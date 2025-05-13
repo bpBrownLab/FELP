@@ -3,8 +3,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 #upload data skipping the first row
-data = np.loadtxt("/home/murdocte/Projects/Rotation/GLY/output0508/stride_2/omm_energies.csv", delimiter=",", skiprows=1)
+data = np.loadtxt("omm_energies.csv", delimiter=",", skiprows=1)
 BINS=180
+CLIP=15
 
 #create a 2d array of phi and psi values    
 stride = data[:, 0]
@@ -27,15 +28,12 @@ assert len(phi) == len(stride)
 #save x and y edges, counts, and densities from histogram
 counts, xedges, yedges = np.histogram2d(phi, psi, bins=BINS)
 
-#try histogram with densities
-density, xedges, yedges = np.histogram2d(phi, psi, bins=BINS, density=True)
-
 # print shape of counts and edges
 print(f"counts.shape: {counts.shape}")
 print(f"xedges.shape: {xedges.shape}")
 print(f"yedges.shape: {yedges.shape}")
 
-#calculate the probabilities for each bin 
+#calculate the probabilities for each bin for Glycine (P_gly_bin)
 sum_counts = np.sum(counts)
 print(f"sum_counts: {sum_counts}")
 bin_probabilities = np.array(counts / sum_counts)
@@ -47,98 +45,104 @@ print(f"bin_probabilities.sum(): {bin_probabilities.sum()}")
 below_epsilon_indices = np.where(bin_probabilities < epsilon)
 print(f"below_epsilon_indices: {below_epsilon_indices}")
 
-# create a 2D numpy array to track counts in each histogram bin from the input data
-# counts_array = np.zeros((len(xedges)-1, len(yedges)-1))
-energy_diff_sums = np.zeros((len(xedges)-1, len(yedges)-1))
-
-# make energy diffs relative to the minimum energy diff
-min_energy_diff = np.min(energy_diff1)
-energy_diff1 = energy_diff1 - min_energy_diff
-
-# for i in range(len(phi)):
-#     for j in range(len(xedges)-1):
-#         for k in range(len(yedges)-1):
-#             if phi[i] >= xedges[j] and phi[i] <= xedges[j+1] and psi[i] >= yedges[k] and psi[i] <= yedges[k+1]:
-#                 counts_array[j][k] += 1
-#                 energy_diff_sums[j][k] += energy_diff1[i]
-
-# Vectorized approach
-# Subtract 1 because digitize returns 1-based indexing and we need 0-based for array access
-# Also, np.digitize needs the bins to be monotonically increasing or decreasing. xedges and yedges are already sorted.
+# Determine 0-based bin indices for each frame's phi and psi value
 x_indices = np.digitize(phi, xedges[:-1]) - 1
 y_indices = np.digitize(psi, yedges[:-1]) - 1
 
-# Ensure indices are within bounds (0 to len(bins)-1)
-# np.digitize handles values outside the bins by assigning them to 0 or len(bins).
-# We need to clip them to the valid range of indices.
-# xedges has shape (nbins+1,), so valid indices for counts_array/energy_diff_sums are 0 to nbins-1
-x_indices = np.clip(x_indices, 0, len(xedges) - 2) # -2 because xedges has nbins+1 elements, so indices are 0 to nbins-1
-y_indices = np.clip(y_indices, 0, len(yedges) - 2) # -2 because yedges has nbins+1 elements, so indices are 0 to nbins-1
+# Clip indices to ensure they are within the valid range [0, BINS-1]
+x_indices = np.clip(x_indices, 0, BINS - 1)
+y_indices = np.clip(y_indices, 0, BINS - 1)
 
+# Shift energy differences by their minimum for numerical stability.
+min_energy_diff = np.min(energy_diff1)
+shifted_energy_diff_per_frame = energy_diff1 - min_energy_diff
 
-# Increment counts for each bin
-# np.add.at performs unbuffered in-place addition, which is what we need here.
-np.add.at(counts, (x_indices, y_indices), 1)
+# Calculate the Boltzmann factor for each frame using the shifted energy difference
+frame_boltzmann_factors = np.exp(-shifted_energy_diff_per_frame / kt)
 
-# Sum energy differences for each bin
-np.add.at(energy_diff_sums, (x_indices, y_indices), energy_diff1)
+# Sum these frame-wise Boltzmann factors within each bin
+sum_boltzmann_factors_in_bin = np.zeros_like(counts, dtype=float)
+np.add.at(sum_boltzmann_factors_in_bin, (x_indices, y_indices), frame_boltzmann_factors)
 
+# Calculate W_b = <exp(-DeltaE_shifted / kt)>_bin for each bin
+W_b_values = np.zeros_like(counts, dtype=float)
+non_empty_bins_mask = counts > 0
+W_b_values[non_empty_bins_mask] = sum_boltzmann_factors_in_bin[non_empty_bins_mask] / counts[non_empty_bins_mask]
 
-#calculate the probabilities for each bin
-# Handle potential division by zero if some bins are empty
-energy_diff_averages = np.zeros_like(counts)
-non_empty_bins = counts > 0
-energy_diff_averages[non_empty_bins] = energy_diff_sums[non_empty_bins] / counts[non_empty_bins]
-print(f"energy_diff_averages.shape: {energy_diff_averages.shape}")
-print(f"energy_diff_averages: {energy_diff_averages}")
-print(f"energy_diff_averages.sum(): {energy_diff_averages.sum()}")
-
-# Iterate over each bin and calculate the reweighted probabilities
-reweighted_probabilities = np.zeros((len(xedges)-1, len(yedges)-1))
-for i in range(len(xedges)-1):
-    for j in range(len(yedges)-1):
-        bin_prob = bin_probabilities[i][j]
-        bin_energy_diff = energy_diff_averages[i][j]
-        pstar_value = bin_prob * np.exp(-kt * bin_energy_diff)
-        reweighted_probabilities[i][j] = pstar_value
+# Calculate unnormalized reweighted probabilities for Alanine: P_ala_unnormalized = P_gly * W_b
+reweighted_probabilities_unnormalized = bin_probabilities * W_b_values
 
 # Normalize the reweighted probabilities
-sum_reweighted_prob = np.sum(reweighted_probabilities)
-reweighted_probabilities = reweighted_probabilities / sum_reweighted_prob
-print(f"reweighted_probabilities.shape: {reweighted_probabilities.shape}")
-print(f"reweighted_probabilities: {reweighted_probabilities}")
-print(f"reweighted_probabilities.sum(): {reweighted_probabilities.sum()}")
+sum_total_reweighted_prob = np.sum(reweighted_probabilities_unnormalized)
+
+if sum_total_reweighted_prob > epsilon:
+    reweighted_probabilities = reweighted_probabilities_unnormalized / sum_total_reweighted_prob
+else:
+    print("Warning: Sum of unnormalized reweighted probabilities is close to zero. Resulting probabilities might be meaningless.")
+    reweighted_probabilities = np.zeros_like(counts, dtype=float)
 
 # Make a 2D heatmap of the original probabilities
-original_free_energy_surface = -kt * np.log(bin_probabilities + epsilon)
-plt.imshow(original_free_energy_surface.T, cmap="viridis")
+# Initialize with NaNs
+original_free_energy_surface = np.full_like(bin_probabilities, np.nan, dtype=float)
+
+# Create a mask for probabilities strictly greater than epsilon
+mask_original = bin_probabilities > epsilon
+
+# Calculate free energy only for bins where probability > epsilon
+original_free_energy_surface[mask_original] = -kt * np.log(bin_probabilities[mask_original])
+
+# Normalize the original free energy surface to start at 0, ignoring NaNs
+min_val_original = np.nanmin(original_free_energy_surface)
+if np.isfinite(min_val_original):
+    original_free_energy_surface -= min_val_original
+
+# Make a 2D heatmap of the original probabilities
+plt.imshow(
+    original_free_energy_surface.T,
+    cmap="jet",
+    origin='lower',
+    extent=[yedges[0], yedges[-1], xedges[0], xedges[-1]]
+)
 
 # Set colorbar limits
-plt.clim(0, 30)
-plt.colorbar()
-plt.xlabel("phi")
-plt.ylabel("psi")
-plt.title("Glycine free energy surface")
-plt.savefig("glycine_free_energy_surface.png", dpi=300)
+plt.clim(0, CLIP)
+plt.colorbar(label="Free Energy (kJ/mol)")
+plt.xlabel("$\psi$ (degrees)")
+plt.ylabel("$\phi$ (degrees)")
+plt.title("Glycine Free Energy Surface")
+plt.savefig("glycine_free_energy_surface.jpg", dpi=300)
 plt.close()
 
 # Make a 2D heatmap of the free energy surface
-free_energy_surface = -kt * np.log(reweighted_probabilities + epsilon)
+# Initialize with NaNs
+free_energy_surface = np.full_like(reweighted_probabilities, np.nan, dtype=float)
 
-# Set max value to 10 if it's greater than 10
-free_energy_surface = np.clip(free_energy_surface, 0, 30)
+# Create a mask for probabilities strictly greater than epsilon
+mask_reweighted = reweighted_probabilities > epsilon
+
+# Calculate free energy only for bins where probability > epsilon
+free_energy_surface[mask_reweighted] = -kt * np.log(reweighted_probabilities[mask_reweighted])
+
+# Normalize the reweighted free energy surface to start at 0, ignoring NaNs
+min_val_reweighted = np.nanmin(free_energy_surface)
+if np.isfinite(min_val_reweighted):
+    free_energy_surface -= min_val_reweighted
 
 print(f"free_energy_surface.shape: {free_energy_surface.shape}")
-print(f"free_energy_surface: {free_energy_surface}")
-print(f"free_energy_surface.min(): {free_energy_surface.min()}")
-print(f"free_energy_surface.max(): {free_energy_surface.max()}")
-plt.imshow(free_energy_surface.T, cmap="viridis")
+print(f"free_energy_surface (finite min): {np.nanmin(free_energy_surface)}")
+print(f"free_energy_surface (finite max): {np.nanmax(free_energy_surface)}")
+plt.imshow(
+    free_energy_surface.T,
+    cmap="jet",
+    origin='lower',
+    extent=[yedges[0], yedges[-1], xedges[0], xedges[-1]]
+)
 
 # Set colorbar limits
-plt.clim(0, 30)
-plt.colorbar()
-plt.xlabel("phi")
-plt.ylabel("psi")
-plt.title("Alanine free energy surface from Glycine")
-plt.savefig("alanine_free_energy_surface.png", dpi=300)
+plt.clim(0, CLIP)
+plt.colorbar(label="Free Energy (kJ/mol)")
+plt.xlabel("$\psi$ (degrees)")
+plt.ylabel("$\phi$ (degrees)")
+plt.title("Alanine Free Energy Surface from Glycine")
+plt.savefig("alanine_free_energy_surface.jpg", dpi=300)
 plt.close()
