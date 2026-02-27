@@ -16,7 +16,7 @@ phi = data[:, 4]
 psi = data[:, 5]
 p_prob = []
 kt = 2.479 # should correspond to KJ/mol; 0.592 for kcal/mol
-epsilon = 1e-6 # Epsilon for numerical stability
+epsilon = 1e-5 # Epsilon for numerical stability
 delta_e_sum = 0
 
 assert len(phi) == len(psi)

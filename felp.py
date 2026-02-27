@@ -45,16 +45,17 @@ def init():
 
 def mutate_pose(pose, target_residue_number, target_residue_name, output_prefix):
     print(f"Pose residue: {pose.residue(target_residue_number)}")
-    pyrosetta.init(options="-database /dors/bpbrownlab/shared/apps/rocky9/rosetta/public/rosetta/database/ -overwrite")
+    pyrosetta.init(options="-database /sb/bpbrownlab/shared/apps/rocky9/rosetta/public/rosetta/database/ -overwrite")
     current_phi = pose.phi(target_residue_number)
     current_psi = pose.psi(target_residue_number)
     current_residue = pose.residue(target_residue_number)
+    pose.dump_pdb(f"{output_prefix}_original.pdb")
     #print(f"Current phi: {current_phi}")
     #print(f"Current psi: {current_psi}")
     #print(f"Current residue: {current_residue}")
     mutate_mover = MutateResidue(target_residue_number, target_residue_name)
     mutate_mover.apply(pose)
-    #pose.dump_pdb(f"{output_prefix}_mutant.pdb")
+    pose.dump_pdb(f"{output_prefix}_mutant.pdb")
     pose.set_phi(target_residue_number, current_phi)
     pose.set_psi(target_residue_number, current_psi)
     #print(f"Mutated residue: {pose.residue(target_residue_number)}")
@@ -105,7 +106,7 @@ def mutate_pose(pose, target_residue_number, target_residue_name, output_prefix)
 
     relax = pyrosetta.rosetta.protocols.relax.FastRelax(scorefxn, 5)  # 5 iterations
     relax.apply(pose)
-    #pose.dump_pdb(f"{output_prefix}.relaxed.pdb")
+    pose.dump_pdb(f"{output_prefix}.relaxed.pdb")
     print(f"Relaxed residue: {pose.residue(target_residue_number)}")
     print(f"Relaxed residue phi: {pose.phi(target_residue_number)}")
     print(f"Relaxed residue psi: {pose.psi(target_residue_number)}")
@@ -198,7 +199,7 @@ def main():
         poses.append(pose)
         phi_values.append(pose.phi(args.target_residue_number))
         psi_values.append(pose.psi(args.target_residue_number))
-        output_prefix = f"{args.output_dir}/mutated_pose_{frame_idx}"
+        output_prefix = f"{args.output_dir}/{frame_idx}"
         mutated_pose = mutate_pose(pose, args.target_residue_number, args.target_residue_name, output_prefix)
         mutated_phi_values.append(mutated_pose.phi(args.target_residue_number))
         mutated_psi_values.append(mutated_pose.psi(args.target_residue_number))
