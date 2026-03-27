@@ -17,8 +17,10 @@ from tests.fake_rosetta_bridge import (
     build_fake_import,
 )
 
-VENDORED_PARMED, _, _ = _import_parmed()
-rosetta_pose_module = VENDORED_PARMED.rosetta.pose
+
+def _rosetta_pose_module():
+    parmed, _, _ = _import_parmed()
+    return parmed.rosetta.pose
 
 
 def test_import_parmed_uses_repo_fallback() -> None:
@@ -110,7 +112,7 @@ def test_structure_conversion_service_round_trips_with_vendor_bridge(monkeypatch
     residue_types, pose = _build_roundtrip_pose()
     fake_import = build_fake_import(residue_types)
     fake_pyrosetta, _, _, _, _, xyz_vector = fake_import
-    monkeypatch.setattr(rosetta_pose_module, "_import_pyrosetta", lambda: fake_import)
+    monkeypatch.setattr(_rosetta_pose_module(), "_import_pyrosetta", lambda: fake_import)
     monkeypatch.setattr(
         conversion_service_module,
         "_import_pyrosetta",
@@ -148,7 +150,7 @@ def test_clone_structure_with_coordinates_preserves_bridge_metadata(monkeypatch)
     residue_types, pose = _build_roundtrip_pose()
     fake_import = build_fake_import(residue_types)
     fake_pyrosetta, _, _, _, _, xyz_vector = fake_import
-    monkeypatch.setattr(rosetta_pose_module, "_import_pyrosetta", lambda: fake_import)
+    monkeypatch.setattr(_rosetta_pose_module(), "_import_pyrosetta", lambda: fake_import)
     monkeypatch.setattr(
         conversion_service_module,
         "_import_pyrosetta",

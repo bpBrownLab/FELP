@@ -75,15 +75,30 @@ def _purge_parmed_modules() -> None:
             del sys.modules[module_name]
 
 
+def _promote_sys_path_entry(path: Path) -> None:
+    target = path.resolve()
+    kept_entries: list[str] = []
+    for entry in sys.path:
+        try:
+            if Path(entry).resolve() == target:
+                continue
+        except Exception:
+            pass
+        if entry == str(path):
+            continue
+        kept_entries.append(entry)
+    sys.path[:] = [str(path)] + kept_entries
+
+
 def _import_parmed():
     repo_root = Path(__file__).resolve().parents[2]
     vendor_root = repo_root / "ParmEd"
     if vendor_root.is_dir():
-        if str(vendor_root) not in sys.path:
-            sys.path.insert(0, str(vendor_root))
+        _promote_sys_path_entry(vendor_root)
         existing = sys.modules.get("parmed")
         if existing is not None and not _path_is_within(getattr(existing, "__file__", None), vendor_root):
             _purge_parmed_modules()
+        importlib.invalidate_caches()
         try:
             parmed = importlib.import_module("parmed")
             if not _path_is_within(getattr(parmed, "__file__", None), vendor_root):

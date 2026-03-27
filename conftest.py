@@ -7,9 +7,23 @@ import sys
 REPO_ROOT = Path(__file__).resolve().parent
 VENDORED_PARMED_ROOT = REPO_ROOT / "ParmEd"
 
+def _promote_sys_path_entry(path: Path) -> None:
+    target = path.resolve()
+    kept_entries: list[str] = []
+    for entry in sys.path:
+        try:
+            if Path(entry).resolve() == target:
+                continue
+        except Exception:
+            pass
+        if entry == str(path):
+            continue
+        kept_entries.append(entry)
+    sys.path[:] = [str(path)] + kept_entries
+
+
 for candidate in (REPO_ROOT, VENDORED_PARMED_ROOT):
-    if str(candidate) not in sys.path:
-        sys.path.insert(0, str(candidate))
+    _promote_sys_path_entry(candidate)
 
 
 def _path_is_within(path: str | None, root: Path) -> bool:
