@@ -61,6 +61,37 @@ class PyRosettaPerturbationProtocol:
 
         return constraint_set
 
+    def _build_relax_score_function(self, pyrosetta):
+        score_function_names = [self.score_function_name]
+        if self.cartesian and not self.score_function_name.endswith("_cart"):
+            score_function_names.insert(0, f"{self.score_function_name}_cart")
+
+        score_function = None
+        last_error = None
+        for score_function_name in score_function_names:
+            try:
+                score_function = pyrosetta.create_score_function(score_function_name)
+                break
+            except Exception as exc:  # pragma: no cover - exercised with live PyRosetta
+                last_error = exc
+        if score_function is None:
+            assert last_error is not None
+            raise last_error
+
+        score_type = pyrosetta.rosetta.core.scoring.ScoreType
+        score_function.set_weight(score_type.dihedral_constraint, 1.0)
+        if self.cartesian:
+            cart_bonded_weight = 0.5
+            if hasattr(score_function, "get_weight"):
+                cart_bonded_weight = max(
+                    cart_bonded_weight,
+                    float(score_function.get_weight(score_type.cart_bonded)),
+                )
+            score_function.set_weight(score_type.cart_bonded, cart_bonded_weight)
+            if hasattr(score_type, "pro_close"):
+                score_function.set_weight(score_type.pro_close, 0.0)
+        return score_function
+
     def _relax_pose(
         self,
         pose,
@@ -74,14 +105,7 @@ class PyRosettaPerturbationProtocol:
         working_pose = pose.clone()
         working_pose.constraint_set(self._build_constraint_set(working_pose, restraint_specs))
 
-        score_function = pyrosetta.create_score_function(self.score_function_name)
-        score_function.set_weight(
-            pyrosetta.rosetta.core.scoring.ScoreType.dihedral_constraint, 1.0
-        )
-        if self.cartesian:
-            score_function.set_weight(
-                pyrosetta.rosetta.core.scoring.ScoreType.cart_bonded, 0.5
-            )
+        score_function = self._build_relax_score_function(pyrosetta)
 
         relax = pyrosetta.rosetta.protocols.relax.FastRelax(
             score_function,
@@ -89,6 +113,8 @@ class PyRosettaPerturbationProtocol:
         )
         if hasattr(relax, "cartesian"):
             relax.cartesian(self.cartesian)
+        if self.cartesian and hasattr(relax, "min_type"):
+            relax.min_type("lbfgs_armijo_nonmonotone")
         relax.apply(working_pose)
 
         if self.write_pose_pdbs:
