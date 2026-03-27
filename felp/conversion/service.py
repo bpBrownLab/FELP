@@ -129,66 +129,29 @@ class StructureConversionService:
         return structure
 
     def pose_to_structure(self, pose):
-        """Convert a PyRosetta Pose to a ParmEd Structure."""
+        """Convert a PyRosetta Pose to a ParmEd Structure via vendored ParmEd."""
         _, load_rosetta, _ = _import_parmed()
-        structure = load_rosetta(pose)
-        return structure
+        try:
+            return load_rosetta(pose)
+        except Exception as exc:
+            raise ConversionError(f"Failed to convert Pose to Structure: {exc}") from exc
 
     def structure_to_pose(self, structure):
-        """Convert a ParmEd Structure to a PyRosetta Pose.
-        
-        This relies on the PMD_TO_ROSETTA_1LETTER mapping to build a sequence,
-        then copies coordinates over by matching atom names.
-        """
+        """Convert a ParmEd Structure to a PyRosetta Pose via vendored ParmEd."""
         parmed, _, _ = _import_parmed()
         if not isinstance(structure, parmed.Structure):
             raise ConversionError("Object is not a ParmEd Structure.")
 
         self.ensure_pyrosetta_initialized()
-        _, Pose, pose_from_sequence, AtomID, xyz_vector = _import_pyrosetta()
-
         if not structure.residues:
             raise ConversionError("Cannot convert an empty Structure to a Pose.")
-
-        sequence = []
-        residue_atom_maps = []
-        for residue in structure.residues:
-            residue_name = residue.name.upper()
-            if residue_name not in PMD_TO_ROSETTA_1LETTER:
-                raise ConversionError(
-                    f"Unsupported residue for Pose conversion: {residue.name}"
-                )
-            sequence.append(PMD_TO_ROSETTA_1LETTER[residue_name])
-            residue_atom_maps.append({atom.name.strip(): atom for atom in residue.atoms})
-
-        pose = pose_from_sequence("".join(sequence).replace(" ", ""))
-        if not isinstance(pose, Pose):
-            raise ConversionError("Failed to build a PyRosetta Pose from the Structure.")
-
-        for residue_index in range(1, pose.total_residue() + 1):
-            pose_residue = pose.residue(residue_index)
-            atom_map = residue_atom_maps[residue_index - 1]
-            for atom_index in range(1, pose_residue.natoms() + 1):
-                atom_name = pose_residue.atom_name(atom_index).strip()
-                parmed_atom = atom_map.get(atom_name)
-                if parmed_atom is None and atom_name in POSE_ATOM_NAME_CONVERSION:
-                    parmed_atom = atom_map.get(POSE_ATOM_NAME_CONVERSION[atom_name])
-                if parmed_atom is None:
-                    continue
-                atom_id = AtomID(atom_index, residue_index)
-                coordinates = xyz_vector(
-                    float(parmed_atom.xx),
-                    float(parmed_atom.xy),
-                    float(parmed_atom.xz),
-                )
-                pose.set_xyz(atom_id, coordinates)
-
+        save_rosetta = getattr(parmed, "save_rosetta", None)
+        if save_rosetta is None:
+            raise DependencyError("Vendored ParmEd is missing the save_rosetta bridge.")
         try:
-            pose.conformation().detect_disulfides()
-        except Exception:
-            pass
-
-        return pose
+            return save_rosetta(structure)
+        except Exception as exc:
+            raise ConversionError(f"Failed to convert Structure to Pose: {exc}") from exc
 
     def validate_round_trip(self, structure) -> dict[str, int]:
         """Test conversion fidelity by converting a Structure to a Pose and back."""

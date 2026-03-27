@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from felp.app import run_pipeline
+from felp.conversion import StructureConversionService
 from felp.conversion.service import _import_parmed
 from felp.core import (
     EnergyConfig,
@@ -30,6 +31,12 @@ def test_gly_to_ala_benchmark_workflow(tmp_path: Path) -> None:
     pyrosetta.init("-ignore_unrecognized_res true -load_PDB_components false")
     pose = pyrosetta.pose_from_sequence("GGG")
     structure = load_rosetta(pose)
+    round_tripped_pose = StructureConversionService(
+        pyrosetta_init_options="-ignore_unrecognized_res true -load_PDB_components false"
+    ).structure_to_pose(structure)
+    round_tripped_structure = load_rosetta(round_tripped_pose)
+    assert len(round_tripped_structure.atoms) == len(structure.atoms)
+    assert len(round_tripped_structure.residues) == len(structure.residues)
 
     pdb_path = tmp_path / "gly_tripeptide.pdb"
     structure.save(str(pdb_path), overwrite=True)
