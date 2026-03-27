@@ -5,8 +5,10 @@ from __future__ import annotations
 import copy
 from dataclasses import dataclass
 import importlib
+import importlib.util
 from pathlib import Path
 import sys
+from types import ModuleType
 from typing import Optional
 
 import numpy as np
@@ -90,23 +92,45 @@ def _promote_sys_path_entry(path: Path) -> None:
     sys.path[:] = [str(path)] + kept_entries
 
 
+def _load_vendored_parmed(vendor_root: Path) -> ModuleType:
+    package_root = vendor_root / "parmed"
+    init_file = package_root / "__init__.py"
+    if not init_file.is_file():
+        raise DependencyError(f"Vendored ParmEd package is missing {init_file}.")
+
+    existing = sys.modules.get("parmed")
+    if existing is not None and _path_is_within(getattr(existing, "__file__", None), vendor_root):
+        return existing
+
+    _purge_parmed_modules()
+    _promote_sys_path_entry(vendor_root)
+    importlib.invalidate_caches()
+    spec = importlib.util.spec_from_file_location(
+        "parmed",
+        init_file,
+        submodule_search_locations=[str(package_root)],
+    )
+    if spec is None or spec.loader is None:
+        raise DependencyError(f"Unable to create an import spec for vendored ParmEd at {init_file}.")
+
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["parmed"] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        _purge_parmed_modules()
+        raise
+    return module
+
+
 def _import_parmed():
     repo_root = Path(__file__).resolve().parents[2]
     vendor_root = repo_root / "ParmEd"
     if vendor_root.is_dir():
-        _promote_sys_path_entry(vendor_root)
-        existing = sys.modules.get("parmed")
-        if existing is not None and not _path_is_within(getattr(existing, "__file__", None), vendor_root):
-            _purge_parmed_modules()
-        importlib.invalidate_caches()
         try:
-            parmed = importlib.import_module("parmed")
-            if not _path_is_within(getattr(parmed, "__file__", None), vendor_root):
-                raise DependencyError(
-                    f"Expected vendored ParmEd from {vendor_root}, got {getattr(parmed, '__file__', 'unknown')}."
-                )
-            from parmed import load_rosetta
-            from parmed.tools.changeradii import ChRad
+            parmed = _load_vendored_parmed(vendor_root)
+            load_rosetta = parmed.load_rosetta
+            ChRad = importlib.import_module("parmed.tools.changeradii").ChRad
         except Exception as exc:
             raise DependencyError("Vendored ParmEd is required for FELP conversion.") from exc
         return parmed, load_rosetta, ChRad
