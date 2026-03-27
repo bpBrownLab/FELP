@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
+import importlib
 from pathlib import Path
 import sys
 from typing import Optional
@@ -58,26 +59,48 @@ _PYROSETTA_INITIALIZED = False
 _PYROSETTA_INIT_OPTIONS: Optional[str] = None
 
 
-def _import_parmed():
+def _path_is_within(path: str | None, root: Path) -> bool:
+    if not path:
+        return False
     try:
-        import parmed
+        Path(path).resolve().relative_to(root.resolve())
+    except ValueError:
+        return False
+    return True
+
+
+def _purge_parmed_modules() -> None:
+    for module_name in list(sys.modules):
+        if module_name == "parmed" or module_name.startswith("parmed."):
+            del sys.modules[module_name]
+
+
+def _import_parmed():
+    repo_root = Path(__file__).resolve().parents[2]
+    vendor_root = repo_root / "ParmEd"
+    if vendor_root.is_dir():
+        if str(vendor_root) not in sys.path:
+            sys.path.insert(0, str(vendor_root))
+        existing = sys.modules.get("parmed")
+        if existing is not None and not _path_is_within(getattr(existing, "__file__", None), vendor_root):
+            _purge_parmed_modules()
+        try:
+            parmed = importlib.import_module("parmed")
+            if not _path_is_within(getattr(parmed, "__file__", None), vendor_root):
+                raise DependencyError(
+                    f"Expected vendored ParmEd from {vendor_root}, got {getattr(parmed, '__file__', 'unknown')}."
+                )
+            from parmed import load_rosetta
+            from parmed.tools.changeradii import ChRad
+        except Exception as exc:
+            raise DependencyError("Vendored ParmEd is required for FELP conversion.") from exc
+        return parmed, load_rosetta, ChRad
+    try:
+        parmed = importlib.import_module("parmed")
         from parmed import load_rosetta
         from parmed.tools.changeradii import ChRad
-    except ImportError as exc:
-        repo_root = Path(__file__).resolve().parents[2]
-        vendor_root = repo_root / "ParmEd"
-        if vendor_root.is_dir():
-            sys.path.insert(0, str(vendor_root))
-            try:
-                import parmed
-                from parmed import load_rosetta
-                from parmed.tools.changeradii import ChRad
-            except ImportError as nested_exc:
-                raise DependencyError(
-                    "ParmEd is required for FELP conversion."
-                ) from nested_exc
-        else:
-            raise DependencyError("ParmEd is required for FELP conversion.") from exc
+    except Exception as exc:
+        raise DependencyError("ParmEd is required for FELP conversion.") from exc
     return parmed, load_rosetta, ChRad
 
 

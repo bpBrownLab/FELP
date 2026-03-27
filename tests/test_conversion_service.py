@@ -7,7 +7,6 @@ import pytest
 from felp.conversion import StructureConversionService
 from felp.conversion import service as conversion_service_module
 from felp.conversion.service import _import_parmed
-from parmed.rosetta import pose as rosetta_pose_module
 from tests.fake_rosetta_bridge import (
     FakeAtomID,
     FakeAtomType,
@@ -18,18 +17,30 @@ from tests.fake_rosetta_bridge import (
     build_fake_import,
 )
 
+VENDORED_PARMED, _, _ = _import_parmed()
+rosetta_pose_module = VENDORED_PARMED.rosetta.pose
+
 
 def test_import_parmed_uses_repo_fallback() -> None:
     parmed, _, _ = _import_parmed()
-    assert "ParmEd/parmed/__init__.py" in parmed.__file__
+    vendor_root = Path(__file__).resolve().parents[1] / "ParmEd"
+    try:
+        Path(parmed.__file__).resolve().relative_to(vendor_root.resolve())
+    except ValueError as exc:
+        raise AssertionError(f"Expected vendored ParmEd under {vendor_root}, got {parmed.__file__}") from exc
 
 
 def test_load_topology_uses_parmed(tmp_path: Path) -> None:
-    source_pdb = (
-        Path(__file__).resolve().parents[1] / "ParmEd" / "test" / "files" / "trx.pdb"
-    )
-    topology_path = tmp_path / "trx_copy.pdb"
-    topology_path.write_text(source_pdb.read_text(encoding="utf-8"), encoding="utf-8")
+    source_pdb = """\
+ATOM      1  N   ALA A   1       0.000   0.000   0.000  1.00  0.00           N
+ATOM      2  CA  ALA A   1       1.458   0.000   0.000  1.00  0.00           C
+ATOM      3  C   ALA A   1       2.028   1.410   0.000  1.00  0.00           C
+ATOM      4  O   ALA A   1       1.420   2.470   0.000  1.00  0.00           O
+TER
+END
+"""
+    topology_path = tmp_path / "minimal_ala.pdb"
+    topology_path.write_text(source_pdb, encoding="utf-8")
 
     service = StructureConversionService(
         pyrosetta_init_options="-ignore_unrecognized_res true -load_PDB_components false"
