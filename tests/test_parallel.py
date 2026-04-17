@@ -54,7 +54,7 @@ def test_frame_executor_serial_path_preserves_order(monkeypatch) -> None:
         )
 
     monkeypatch.setattr(executor_module, "initialize_worker", fake_initialize)
-    monkeypatch.setattr(executor_module, "process_frame_job", fake_process)
+    monkeypatch.setattr(executor_module, "safe_process_frame_job", fake_process)
 
     jobs = [
         SnapshotJob(frame_index=0, stride_number=0, coordinates_angstrom=((0.0, 0.0, 0.0),)),

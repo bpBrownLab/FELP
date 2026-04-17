@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import Future, ProcessPoolExecutor, as_completed
 import multiprocessing as mp
-from typing import Iterable
+import sys
+import traceback
+from typing import Iterable, Iterator, TypeVar
 
 from felp.conversion import StructureConversionService
 from felp.core import FrameResult, RunConfig, SnapshotJob, default_backbone_cv_specs
@@ -33,6 +35,8 @@ _WORKER_RESTRAINT_PROTOCOL: BackboneDihedralCVProtocol | None = None
 _WORKER_TEMPLATE_STRUCTURE = None
 _WORKER_ASSIGNMENT_POLICY: AssignmentPolicy | None = None
 _WORKER_PERTURBATION_CHECKED: bool = False
+
+_T = TypeVar("_T")
 
 
 def _default_assignment_policy(config: RunConfig) -> AssignmentPolicy:
@@ -270,6 +274,97 @@ def process_frame_job(job: SnapshotJob) -> FrameResult:
     )
 
 
+def _failed_frame_result(job: SnapshotJob, exc: BaseException) -> FrameResult:
+    """Return a structured failure row so a single bad frame cannot abort a whole batch."""
+
+    tb = traceback.format_exc()
+    if len(tb) > 8000:
+        tb = f"{tb[:8000]}\n... (traceback truncated)"
+
+    nan = float("nan")
+    return FrameResult(
+        frame_index=job.frame_index,
+        stride_number=job.stride_number,
+        microstate_id="failed",
+        microstate_label="failed",
+        phi_degrees=None,
+        psi_degrees=None,
+        reference_energy_kj_mol=nan,
+        perturbed_energy_kj_mol=nan,
+        delta_u_kj_mol=nan,
+        reference_relaxed_phi_degrees=None,
+        reference_relaxed_psi_degrees=None,
+        perturbed_relaxed_phi_degrees=None,
+        perturbed_relaxed_psi_degrees=None,
+        trajectory_id=job.trajectory_id,
+        source_frame_index=job.source_frame_index,
+        assignment_source="failed",
+        state_level="failed",
+        metadata={
+            "status": "failed",
+            "error_type": type(exc).__name__,
+            "error_message": str(exc),
+            "traceback": tb,
+        },
+    )
+
+
+def safe_process_frame_job(job: SnapshotJob) -> FrameResult:
+    """Like `process_frame_job`, but never raises: failures become `FrameResult` rows."""
+
+    try:
+        return process_frame_job(job)
+    except BaseException as exc:
+        return _failed_frame_result(job, exc)
+
+
+def _should_show_progress_bar(config: RunConfig, job_count: int) -> bool:
+    if config.parallel.progress_mode == "on":
+        return True
+    if config.parallel.progress_mode == "off":
+        return False
+    # auto
+    if job_count <= 1:
+        return False
+    if config.parallel.workers > 1:
+        return True
+    try:
+        from tqdm.auto import tqdm as _tqdm  # type: ignore[import-not-found]
+
+        _ = _tqdm  # noqa: F841
+    except Exception:
+        return False
+    return job_count >= 50
+
+
+def _maybe_tqdm(
+    iterable: Iterable[_T], *, total: int, desc: str, enabled: bool
+) -> Iterator[_T]:
+    if not enabled:
+        yield from iterable
+        return
+
+    try:
+        from tqdm.auto import tqdm
+
+        yield from tqdm(
+            iterable,
+            total=total,
+            desc=desc,
+            leave=True,
+            dynamic_ncols=True,
+            file=sys.stderr,
+        )
+        return
+    except Exception:
+        pass
+
+    for index, item in enumerate(iterable, start=1):
+        if index == 1 or index == total or index % max(total // 50, 1) == 0:
+            print(f"{desc}: {index}/{total}", file=sys.stderr, flush=True)
+        yield item
+
+
 class FrameExecutor:
     """Dispatch frame jobs either serially or with multiprocessing."""
 
@@ -291,9 +386,22 @@ class FrameExecutor:
         if not jobs:
             return []
 
+        show_bar = _should_show_progress_bar(self.config, len(jobs))
+
         if self.config.parallel.workers == 1:
             initialize_worker(self.config, self.atlas, self.assignment_policy)
-            return [process_frame_job(job) for job in jobs]
+            results: list[FrameResult] = []
+            for job in _maybe_tqdm(
+                jobs, total=len(jobs), desc="frames", enabled=show_bar
+            ):
+                result = safe_process_frame_job(job)
+                if self.config.parallel.fail_fast and result.metadata.get("status") == "failed":
+                    raise RuntimeError(
+                        f"Frame {result.frame_index} failed while --fail-fast was enabled: "
+                        f"{result.metadata.get('error_type')}: {result.metadata.get('error_message')}"
+                    ) from None
+                results.append(result)
+            return results
 
         context = mp.get_context(self.config.parallel.start_method)
         with ProcessPoolExecutor(
@@ -302,11 +410,27 @@ class FrameExecutor:
             initializer=initialize_worker,
             initargs=(self.config, self.atlas, self.assignment_policy),
         ) as executor:
-            results = list(
-                executor.map(
-                    process_frame_job,
-                    jobs,
-                    chunksize=self.config.parallel.chunk_size,
-                )
-            )
-        return results
+            futures = [
+                executor.submit(safe_process_frame_job, job)
+                for job in jobs
+            ]
+            results_by_future: dict[Future[FrameResult], FrameResult] = {}
+            completed_iter = as_completed(futures)
+            for future in _maybe_tqdm(
+                completed_iter,
+                total=len(futures),
+                desc="frames",
+                enabled=show_bar,
+            ):
+                result = future.result()
+                if self.config.parallel.fail_fast and result.metadata.get("status") == "failed":
+                    for pending in futures:
+                        pending.cancel()
+                    raise RuntimeError(
+                        f"Frame {result.frame_index} failed while --fail-fast was enabled: "
+                        f"{result.metadata.get('error_type')}: {result.metadata.get('error_message')}"
+                    ) from None
+                results_by_future[future] = result
+
+        ordered = [results_by_future[future] for future in futures]
+        return sorted(ordered, key=lambda item: item.frame_index)

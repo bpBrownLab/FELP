@@ -13,6 +13,18 @@ from felp.core import FrameResult, K_BOLTZMANN_KJ_PER_MOL_K, MicrostateResult
 from .atlas import MicrostateAtlas
 
 
+def is_reweighting_eligible_frame(result: FrameResult) -> bool:
+    if result.metadata.get("status") == "failed":
+        return False
+    if not (
+        math.isfinite(result.reference_energy_kj_mol)
+        and math.isfinite(result.perturbed_energy_kj_mol)
+        and math.isfinite(result.delta_u_kj_mol)
+    ):
+        return False
+    return True
+
+
 @dataclass
 class ReweightingAggregator:
     """Aggregate per-frame deltaU values into reweighted microstate populations."""
@@ -33,13 +45,18 @@ class ReweightingAggregator:
         if not frame_results:
             return []
 
-        delta_shift = min(result.delta_u_kj_mol for result in frame_results)
+        eligible_frames = [
+            result for result in frame_results if is_reweighting_eligible_frame(result)
+        ]
+        if not eligible_frames:
+            return []
+
+        delta_shift = min(result.delta_u_kj_mol for result in eligible_frames)
         grouped: dict[str, list[FrameResult]] = defaultdict(list)
-        for result in frame_results:
+        for result in eligible_frames:
             grouped[result.microstate_id].append(result)
 
-        atlas_by_id = atlas.by_id()
-        empirical_total = len(frame_results)
+        empirical_total = len(eligible_frames)
         reference_probabilities: dict[str, float] = {}
 
         use_loaded = atlas.use_loaded_reference_probabilities and all(

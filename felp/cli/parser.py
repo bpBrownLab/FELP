@@ -331,6 +331,20 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
         default="spawn",
         help="Multiprocessing start method.",
     )
+    parallel_group.add_argument(
+        "--progress",
+        choices=("auto", "on", "off"),
+        default="auto",
+        help=(
+            "Terminal progress display for frame processing. "
+            "'auto' enables a bar for multi-worker runs (and long serial runs when tqdm is installed)."
+        ),
+    )
+    parallel_group.add_argument(
+        "--fail-fast",
+        action="store_true",
+        help="Abort the run on the first per-frame processing failure.",
+    )
 
     output_group = parser.add_argument_group("Output")
     output_group.add_argument(
@@ -736,6 +750,8 @@ def build_run_config(namespace: argparse.Namespace) -> RunConfig:
             workers=namespace.workers,
             chunk_size=namespace.chunk_size,
             start_method=namespace.start_method,
+            progress_mode=namespace.progress,
+            fail_fast=namespace.fail_fast,
         ),
         output=OutputConfig(
             output_dir=namespace.output_dir,

@@ -25,6 +25,7 @@ from felp.reweighting import (
     MicrostateAtlas,
     PrecomputedStateAssignmentPolicy,
     ReweightingAggregator,
+    is_reweighting_eligible_frame,
 )
 
 
@@ -128,15 +129,33 @@ def run_pipeline(config) -> dict:
     writer.write_frame_results(all_frame_results)
     writer.write_microstate_results(microstate_results)
 
+    failed_frame_count = sum(
+        1 for result in all_frame_results if result.metadata.get("status") == "failed"
+    )
+    new_failed_frame_count = sum(
+        1 for result in frame_results if result.metadata.get("status") == "failed"
+    )
+    reweighted_frame_count = sum(
+        1 for result in all_frame_results if is_reweighting_eligible_frame(result)
+    )
+    histogram_frames = [
+        result
+        for result in all_frame_results
+        if result.metadata.get("status") != "failed"
+    ]
+
     summary = {
         "frame_count": len(all_frame_results),
         "new_frame_count": len(frame_results),
+        "failed_frame_count": failed_frame_count,
+        "new_failed_frame_count": new_failed_frame_count,
+        "reweighted_frame_count": reweighted_frame_count,
         "microstate_count": len(microstate_results),
         "microstate_histogram": dict(
-            Counter(result.microstate_label for result in all_frame_results)
+            Counter(result.microstate_label for result in histogram_frames)
         ),
         "microstate_source": config.microstates.source,
-        "state_level": config.microstates.state_level,
+        "microstate_definition_state_level": config.microstates.state_level,
         "msm_bundle_dir": config.microstates.msm_bundle_dir,
         "configured_cvs": [spec.name for spec in config.restraints.cv_specs],
         "output_dir": config.output.output_dir,

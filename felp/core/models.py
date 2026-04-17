@@ -395,6 +395,8 @@ class ParallelConfig:
     workers: int = 1
     chunk_size: int = 1
     start_method: str = "spawn"
+    progress_mode: str = "auto"
+    fail_fast: bool = False
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "ParallelConfig":
@@ -404,6 +406,8 @@ class ParallelConfig:
             workers=payload.get("workers", 1),
             chunk_size=payload.get("chunk_size", 1),
             start_method=payload.get("start_method", "spawn"),
+            progress_mode=payload.get("progress_mode", "auto"),
+            fail_fast=payload.get("fail_fast", False),
         )
 
 
@@ -533,6 +537,10 @@ class RunConfig:
             raise ConfigurationError("Parallel worker count must be at least 1.")
         if self.parallel.chunk_size < 1:
             raise ConfigurationError("Chunk size must be at least 1.")
+        if self.parallel.progress_mode not in {"auto", "on", "off"}:
+            raise ConfigurationError(
+                "parallel.progress_mode must be one of: auto, on, off."
+            )
         if self.microstates.source in {"grid", "msm_bundle"}:
             if self.restraints.cv_specs != default_backbone_cv_specs(
                 self.perturbation.target_residue_number
