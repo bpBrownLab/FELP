@@ -8,6 +8,10 @@ from .exceptions import (
     MicrostateAssignmentError,
 )
 from .models import (
+    ALLOWED_MUTATION_TARGET_NAMES,
+    BACKBONE_DIHEDRAL_KINDS,
+    CVMeasurement,
+    CVSpec,
     DihedralRestraintSpec,
     EnergyConfig,
     EnergyResult,
@@ -29,14 +33,20 @@ from .models import (
     angle_in_interval_degrees,
     angular_midpoint_degrees,
     angular_width_degrees,
+    default_backbone_cv_specs,
     flatten_trajectory_groups,
     normalize_angle_degrees,
+    normalize_mutation_target_name,
     normalize_trajectory_groups,
 )
 
 __all__ = [
+    "ALLOWED_MUTATION_TARGET_NAMES",
+    "BACKBONE_DIHEDRAL_KINDS",
     "ConfigurationError",
     "ConversionError",
+    "CVMeasurement",
+    "CVSpec",
     "DependencyError",
     "DihedralRestraintSpec",
     "EnergyConfig",
@@ -61,7 +71,9 @@ __all__ = [
     "angle_in_interval_degrees",
     "angular_midpoint_degrees",
     "angular_width_degrees",
+    "default_backbone_cv_specs",
     "flatten_trajectory_groups",
     "normalize_angle_degrees",
+    "normalize_mutation_target_name",
     "normalize_trajectory_groups",
 ]

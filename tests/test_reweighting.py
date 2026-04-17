@@ -1,7 +1,14 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from felp.core import FrameResult, MicrostateDefinition
-from felp.reweighting import MicrostateAtlas, ReweightingAggregator
+from felp.reweighting import (
+    MicrostateAtlas,
+    ReweightingAggregator,
+    load_microstate_definitions,
+)
 
 
 def _frame_result(frame_index: int, state_id: str, delta_u: float) -> FrameResult:
@@ -109,3 +116,40 @@ def test_reweighting_supports_discrete_states_with_plot_coordinates() -> None:
     assert result_by_id["0"].plot_x == -1.0
     assert result_by_id["1"].plot_y == -0.5
     assert result_by_id["0"].state_level == "cluster"
+
+
+def test_load_microstate_definitions_supports_generalized_cv_ranges(
+    tmp_path: Path,
+) -> None:
+    state_file = tmp_path / "states.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "states": [
+                    {
+                        "state_id": "helical",
+                        "label": "helical",
+                        "cv_ranges": {
+                            "phi": [-120.0, -30.0],
+                            "omega": [150.0, 180.0],
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    definitions = load_microstate_definitions(str(state_file))
+
+    assert len(definitions) == 1
+    assert definitions[0].cv_ranges == {
+        "phi": (-120.0, -30.0),
+        "omega": (150.0, 180.0),
+    }
+    assignment = MicrostateAtlas(definitions=tuple(definitions)).assign(
+        {"phi": -60.0, "omega": 170.0}
+    )
+    assert assignment.state_id == "helical"
+    assert assignment.phi_degrees == -60.0
+    assert assignment.measurements["omega"] == 170.0

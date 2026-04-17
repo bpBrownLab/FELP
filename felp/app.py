@@ -23,7 +23,6 @@ from felp.parallel import FrameExecutor
 from felp.plotting import generate_felp_plots, generate_msm_plots
 from felp.reweighting import (
     MicrostateAtlas,
-    PhiPsiAssignmentPolicy,
     PrecomputedStateAssignmentPolicy,
     ReweightingAggregator,
 )
@@ -33,6 +32,12 @@ def _parse_optional_int(value: str | None) -> int | None:
     if value in (None, ""):
         return None
     return int(value)
+
+
+def _parse_optional_float(value: str | None) -> float | None:
+    if value in (None, ""):
+        return None
+    return float(value)
 
 
 def _write_stdout(payload: dict) -> None:
@@ -54,22 +59,22 @@ def _load_frame_results_csv(path: str) -> list[FrameResult]:
                     source_frame_index=_parse_optional_int(row.get("source_frame_index")),
                     microstate_id=row["microstate_id"],
                     microstate_label=row["microstate_label"],
-                    phi_degrees=float(row["phi_degrees"]),
-                    psi_degrees=float(row["psi_degrees"]),
+                    phi_degrees=_parse_optional_float(row.get("phi_degrees")),
+                    psi_degrees=_parse_optional_float(row.get("psi_degrees")),
                     reference_energy_kj_mol=float(row["reference_energy_kj_mol"]),
                     perturbed_energy_kj_mol=float(row["perturbed_energy_kj_mol"]),
                     delta_u_kj_mol=float(row["delta_u_kj_mol"]),
-                    reference_relaxed_phi_degrees=float(
-                        row["reference_relaxed_phi_degrees"]
+                    reference_relaxed_phi_degrees=_parse_optional_float(
+                        row.get("reference_relaxed_phi_degrees")
                     ),
-                    reference_relaxed_psi_degrees=float(
-                        row["reference_relaxed_psi_degrees"]
+                    reference_relaxed_psi_degrees=_parse_optional_float(
+                        row.get("reference_relaxed_psi_degrees")
                     ),
-                    perturbed_relaxed_phi_degrees=float(
-                        row["perturbed_relaxed_phi_degrees"]
+                    perturbed_relaxed_phi_degrees=_parse_optional_float(
+                        row.get("perturbed_relaxed_phi_degrees")
                     ),
-                    perturbed_relaxed_psi_degrees=float(
-                        row["perturbed_relaxed_psi_degrees"]
+                    perturbed_relaxed_psi_degrees=_parse_optional_float(
+                        row.get("perturbed_relaxed_psi_degrees")
                     ),
                     assignment_source=row.get("assignment_source", "phi_psi"),
                     state_level=row.get("state_level", "microstate"),
@@ -87,7 +92,7 @@ def _build_execution_context(config):
         bundle = load_bundle(config.microstates.msm_bundle_dir)
         bundle.validate_against_input(config.input)
         return atlas, PrecomputedStateAssignmentPolicy(), bundle
-    return atlas, PhiPsiAssignmentPolicy(), None
+    return atlas, None, None
 
 
 def run_pipeline(config) -> dict:
@@ -133,6 +138,7 @@ def run_pipeline(config) -> dict:
         "microstate_source": config.microstates.source,
         "state_level": config.microstates.state_level,
         "msm_bundle_dir": config.microstates.msm_bundle_dir,
+        "configured_cvs": [spec.name for spec in config.restraints.cv_specs],
         "output_dir": config.output.output_dir,
     }
     writer.write_summary(summary)

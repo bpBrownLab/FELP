@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from felp.core import MicrostateAssignment, MicrostateAssignmentError, PhiPsiMeasurement, SnapshotJob
+from felp.core import (
+    CVMeasurement,
+    MicrostateAssignment,
+    MicrostateAssignmentError,
+    SnapshotJob,
+)
 
 from .atlas import MicrostateAtlas
 
@@ -18,7 +23,7 @@ class AssignmentPolicy:
         self,
         atlas: MicrostateAtlas,
         job: SnapshotJob,
-        measurement: PhiPsiMeasurement,
+        measurement: CVMeasurement,
     ) -> MicrostateAssignment:
         """Assign a job to a state."""
 
@@ -26,18 +31,25 @@ class AssignmentPolicy:
 
 
 @dataclass(frozen=True)
-class PhiPsiAssignmentPolicy(AssignmentPolicy):
-    """Assign frames by measuring phi/psi on the reference pose."""
+class CVAssignmentPolicy(AssignmentPolicy):
+    """Assign frames using the configured CV measurement map."""
 
-    name: str = "phi_psi"
+    name: str = "cv"
 
     def assign(
         self,
         atlas: MicrostateAtlas,
         job: SnapshotJob,
-        measurement: PhiPsiMeasurement,
+        measurement: CVMeasurement,
     ) -> MicrostateAssignment:
-        return atlas.assign(measurement.phi_degrees, measurement.psi_degrees)
+        return atlas.assign(measurement)
+
+
+@dataclass(frozen=True)
+class PhiPsiAssignmentPolicy(CVAssignmentPolicy):
+    """Compatibility wrapper for legacy phi/psi assignment mode."""
+
+    name: str = "phi_psi"
 
 
 @dataclass(frozen=True)
@@ -50,7 +62,7 @@ class PrecomputedStateAssignmentPolicy(AssignmentPolicy):
         self,
         atlas: MicrostateAtlas,
         job: SnapshotJob,
-        measurement: PhiPsiMeasurement,
+        measurement: CVMeasurement,
     ) -> MicrostateAssignment:
         if job.precomputed_state_id is None:
             raise MicrostateAssignmentError(
@@ -58,6 +70,5 @@ class PrecomputedStateAssignmentPolicy(AssignmentPolicy):
             )
         return atlas.assign_precomputed(
             job.precomputed_state_id,
-            measurement.phi_degrees,
-            measurement.psi_degrees,
+            measurement,
         )

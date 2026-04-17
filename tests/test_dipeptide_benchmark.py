@@ -53,7 +53,7 @@ def test_gly_to_ala_benchmark_workflow(tmp_path: Path) -> None:
             original_residue_name="GLY",
         ),
         rosetta=RosettaConfig(),
-        restraints=RestraintConfig(force_constant=10.0),
+        restraints=RestraintConfig(force_constant=10000.0),
         energy=EnergyConfig(backend="openmm"),
         microstates=MicrostateConfig(source="grid", phi_bins=6, psi_bins=6),
         parallel=ParallelConfig(workers=1),

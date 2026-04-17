@@ -2,6 +2,7 @@
 
 from .assignment import (
     AssignmentPolicy,
+    CVAssignmentPolicy,
     PhiPsiAssignmentPolicy,
     PrecomputedStateAssignmentPolicy,
 )
@@ -10,6 +11,7 @@ from .atlas import MicrostateAtlas, generate_phi_psi_grid, load_microstate_defin
 
 __all__ = [
     "AssignmentPolicy",
+    "CVAssignmentPolicy",
     "MicrostateAtlas",
     "PhiPsiAssignmentPolicy",
     "PrecomputedStateAssignmentPolicy",

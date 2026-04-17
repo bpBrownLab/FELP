@@ -9,6 +9,7 @@ from typing import Iterable
 
 from felp.core import DihedralRestraintSpec
 from felp.conversion import StructureConversionService
+from .validation import target_cv_measurement_from_restraints
 
 
 def _import_pyrosetta():
@@ -61,6 +62,30 @@ class PyRosettaPerturbationProtocol:
 
         return constraint_set
 
+    def _cv_residue_number(self, spec: DihedralRestraintSpec) -> int:
+        if spec.kind == "phi":
+            return int(spec.residue_numbers[1])
+        return int(spec.residue_numbers[0])
+
+    def _enforce_target_backbone_cvs(
+        self,
+        pose,
+        restraint_specs: Iterable[DihedralRestraintSpec],
+    ) -> None:
+        restraint_specs = tuple(restraint_specs)
+        if not restraint_specs:
+            return
+        target = target_cv_measurement_from_restraints(restraint_specs)
+        for spec in restraint_specs:
+            residue_number = self._cv_residue_number(spec)
+            target_angle = target.values[spec.label]
+            if spec.kind == "phi":
+                pose.set_phi(residue_number, target_angle)
+            elif spec.kind == "psi":
+                pose.set_psi(residue_number, target_angle)
+            else:
+                pose.set_omega(residue_number, target_angle)
+
     def _build_relax_score_function(self, pyrosetta):
         score_function_names = [self.score_function_name]
         if self.cartesian and not self.score_function_name.endswith("_cart"):
@@ -101,6 +126,7 @@ class PyRosettaPerturbationProtocol:
     ):
         self.conversion_service.ensure_pyrosetta_initialized()
         pyrosetta, _, _ = _import_pyrosetta()
+        restraint_specs = tuple(restraint_specs)
 
         working_pose = pose.clone()
         working_pose.constraint_set(self._build_constraint_set(working_pose, restraint_specs))
@@ -116,6 +142,7 @@ class PyRosettaPerturbationProtocol:
         if self.cartesian and hasattr(relax, "min_type"):
             relax.min_type("lbfgs_armijo_nonmonotone")
         relax.apply(working_pose)
+        self._enforce_target_backbone_cvs(working_pose, restraint_specs)
 
         if self.write_pose_pdbs:
             working_pose.dump_pdb(self._pose_path(frame_index, suffix))
@@ -140,21 +167,32 @@ class PyRosettaPerturbationProtocol:
         frame_index: int,
     ):
         """Mutate the target residue and relax the perturbed pose under restraints."""
-        self.conversion_service.ensure_pyrosetta_initialized()
-        _, _, MutateResidue = _import_pyrosetta()
-
-        mutated_pose = pose.clone()
-        reference_phi = mutated_pose.phi(target_residue_number)
-        reference_psi = mutated_pose.psi(target_residue_number)
-
-        mutate_mover = MutateResidue(target_residue_number, target_residue_name)
-        mutate_mover.apply(mutated_pose)
-        mutated_pose.set_phi(target_residue_number, reference_phi)
-        mutated_pose.set_psi(target_residue_number, reference_psi)
-
+        mutated_pose = self.mutate_pose(
+            pose,
+            target_residue_number,
+            target_residue_name,
+            restraint_specs,
+        )
         return self._relax_pose(
             mutated_pose,
             restraint_specs,
             frame_index,
             f"mutated_{target_residue_name.lower()}",
         )
+
+    def mutate_pose(
+        self,
+        pose,
+        target_residue_number: int,
+        target_residue_name: str,
+        restraint_specs: Iterable[DihedralRestraintSpec] = (),
+    ):
+        """Mutate the target residue while preserving all configured CV targets."""
+        self.conversion_service.ensure_pyrosetta_initialized()
+        _, _, MutateResidue = _import_pyrosetta()
+
+        mutated_pose = pose.clone()
+        mutate_mover = MutateResidue(target_residue_number, target_residue_name)
+        mutate_mover.apply(mutated_pose)
+        self._enforce_target_backbone_cvs(mutated_pose, restraint_specs)
+        return mutated_pose

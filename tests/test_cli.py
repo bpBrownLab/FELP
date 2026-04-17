@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from felp.cli import (
@@ -46,6 +47,10 @@ def test_build_run_config_from_cli(tmp_path: Path) -> None:
     assert config.microstates.phi_bins == 12
     assert config.microstates.psi_bins == 18
     assert config.energy.backend == "openmm"
+    assert [
+        (spec.name, spec.kind, spec.residue_number)
+        for spec in config.restraints.cv_specs
+    ] == [("phi", "phi", 2), ("psi", "psi", 2)]
 
 
 def test_build_run_config_with_msm_bundle(tmp_path: Path) -> None:
@@ -83,6 +88,65 @@ def test_build_run_config_with_msm_bundle(tmp_path: Path) -> None:
     assert config.microstates.source == "msm_bundle"
     assert config.microstates.msm_bundle_dir == str(bundle_dir)
     assert config.microstates.state_level == "metastable"
+
+
+def test_build_run_config_with_custom_backbone_cvs_and_mutation_aliases(
+    tmp_path: Path,
+) -> None:
+    topology = tmp_path / "input.pdb"
+    trajectory = tmp_path / "input.xtc"
+    microstates = tmp_path / "states.json"
+    topology.write_text("placeholder\n", encoding="utf-8")
+    trajectory.write_text("placeholder\n", encoding="utf-8")
+    microstates.write_text(
+        json.dumps(
+            {
+                "states": [
+                    {
+                        "state_id": "helical",
+                        "label": "helical",
+                        "cv_ranges": {
+                            "phi": [-120.0, -30.0],
+                            "omega": [150.0, 180.0],
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    parser = build_parser()
+    namespace = parser.parse_args(
+        [
+            "run",
+            "--topology-file",
+            str(topology),
+            "--trajectory",
+            str(trajectory),
+            "--target-residue-number",
+            "2",
+            "--target-residue-name",
+            "his_d",
+            "--microstate-source",
+            "file",
+            "--microstate-file",
+            str(microstates),
+            "--cv",
+            "phi",
+            "--cv",
+            "omega",
+            "--output-dir",
+            str(tmp_path / "out"),
+        ]
+    )
+
+    config = build_run_config(namespace)
+    assert config.perturbation.target_residue_name == "HID"
+    assert [
+        (spec.name, spec.kind, spec.residue_number)
+        for spec in config.restraints.cv_specs
+    ] == [("phi", "phi", 2), ("omega", "omega", 2)]
 
 
 def test_build_msm_fit_config_from_cli(tmp_path: Path) -> None:

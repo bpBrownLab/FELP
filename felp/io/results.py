@@ -119,22 +119,22 @@ class ResultsWriter:
                         ),
                         microstate_id=row["microstate_id"],
                         microstate_label=row["microstate_label"],
-                        phi_degrees=float(row["phi_degrees"]),
-                        psi_degrees=float(row["psi_degrees"]),
+                        phi_degrees=_parse_optional_float(row.get("phi_degrees")),
+                        psi_degrees=_parse_optional_float(row.get("psi_degrees")),
                         reference_energy_kj_mol=float(row["reference_energy_kj_mol"]),
                         perturbed_energy_kj_mol=float(row["perturbed_energy_kj_mol"]),
                         delta_u_kj_mol=float(row["delta_u_kj_mol"]),
-                        reference_relaxed_phi_degrees=float(
-                            row["reference_relaxed_phi_degrees"]
+                        reference_relaxed_phi_degrees=_parse_optional_float(
+                            row.get("reference_relaxed_phi_degrees")
                         ),
-                        reference_relaxed_psi_degrees=float(
-                            row["reference_relaxed_psi_degrees"]
+                        reference_relaxed_psi_degrees=_parse_optional_float(
+                            row.get("reference_relaxed_psi_degrees")
                         ),
-                        perturbed_relaxed_phi_degrees=float(
-                            row["perturbed_relaxed_phi_degrees"]
+                        perturbed_relaxed_phi_degrees=_parse_optional_float(
+                            row.get("perturbed_relaxed_phi_degrees")
                         ),
-                        perturbed_relaxed_psi_degrees=float(
-                            row["perturbed_relaxed_psi_degrees"]
+                        perturbed_relaxed_psi_degrees=_parse_optional_float(
+                            row.get("perturbed_relaxed_psi_degrees")
                         ),
                         assignment_source=row.get("assignment_source", "phi_psi"),
                         state_level=row.get("state_level", "microstate"),

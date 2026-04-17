@@ -6,6 +6,7 @@ import argparse
 from typing import Optional
 
 from felp.core import (
+    CVSpec,
     EnergyConfig,
     InputConfig,
     MicrostateConfig,
@@ -15,9 +16,59 @@ from felp.core import (
     RestraintConfig,
     RosettaConfig,
     RunConfig,
+    ConfigurationError,
+    default_backbone_cv_specs,
 )
 from felp.msm import MSMFitConfig, MSMSampleExportConfig
 from felp.plotting import FELPPlotConfig, MSMPlotConfig
+
+
+def _default_cv_name(kind: str, residue_number: int, target_residue_number: int) -> str:
+    """Return the legacy-friendly output name for a parsed CV spec."""
+
+    return kind if residue_number == target_residue_number else f"{kind}_{residue_number}"
+
+
+def _parse_cv_specs(
+    raw_tokens: Optional[list[str]],
+    target_residue_number: int,
+) -> tuple[CVSpec, ...]:
+    """Parse repeatable ``--cv`` tokens into typed backbone CV specs."""
+
+    if not raw_tokens:
+        return default_backbone_cv_specs(target_residue_number)
+
+    cv_specs: list[CVSpec] = []
+    seen_names: set[str] = set()
+    for token in raw_tokens:
+        kind_token, separator, residue_token = token.partition(":")
+        if not separator:
+            residue_number = target_residue_number
+        else:
+            residue_text = residue_token.strip()
+            try:
+                residue_number = int(residue_text)
+            except ValueError as exc:
+                raise ConfigurationError(
+                    f"Invalid --cv value {token!r}. Expected kind or kind:<residue>."
+                ) from exc
+        spec = CVSpec(
+            kind=kind_token.strip().lower(),
+            residue_number=residue_number,
+            name=_default_cv_name(
+                kind_token.strip().lower(),
+                residue_number,
+                target_residue_number,
+            ),
+        )
+        if spec.name in seen_names:
+            raise ConfigurationError(
+                f"Duplicate backbone CV specification {spec.name!r}. "
+                "Each configured CV name must be unique."
+            )
+        seen_names.add(spec.name)
+        cv_specs.append(spec)
+    return tuple(cv_specs)
 
 
 def _add_common_microstate_arguments(parser: argparse.ArgumentParser) -> None:
@@ -132,7 +183,10 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
     perturb_group.add_argument(
         "--target-residue-name",
         required=True,
-        help="Three-letter residue name to mutate to in PyRosetta.",
+        help=(
+            "Three-letter mutation target. Supports canonical amino acids plus "
+            "common protonation/disulfide variants such as HID/HIE/HIP/CYM/CYX."
+        ),
     )
     perturb_group.add_argument(
         "--original-residue-name",
@@ -173,15 +227,29 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
     restraint_group = parser.add_argument_group("Restraints")
     restraint_group.add_argument(
         "--restraint-mode",
-        choices=("phi_psi",),
+        choices=("phi_psi", "backbone_dihedrals"),
         default="phi_psi",
-        help="How to preserve the common reference frame during minimization.",
+        help=(
+            "How to preserve the common reference frame during minimization. "
+            "Backbone-dihedral runs are configured explicitly with --cv."
+        ),
+    )
+    restraint_group.add_argument(
+        "--cv",
+        action="append",
+        dest="cv_tokens",
+        metavar="<kind[:residue]>",
+        help=(
+            "Repeatable fixed backbone CV specification. Use phi, psi, or omega; "
+            "append :<residue> to target a different pose residue than "
+            "--target-residue-number. Defaults to phi and psi on the target residue."
+        ),
     )
     restraint_group.add_argument(
         "--restraint-force-constant",
         type=float,
-        default=10.0,
-        help="Force constant applied to reference-frame restraints.",
+        default=10000.0,
+        help="Stiff force constant applied to phi/psi state-locking restraints.",
     )
 
     energy_group = parser.add_argument_group("Energy")
@@ -622,12 +690,8 @@ def build_run_config(namespace: argparse.Namespace) -> RunConfig:
         ),
         perturbation=PerturbationConfig(
             target_residue_number=namespace.target_residue_number,
-            target_residue_name=namespace.target_residue_name.upper(),
-            original_residue_name=(
-                namespace.original_residue_name.upper()
-                if namespace.original_residue_name
-                else None
-            ),
+            target_residue_name=namespace.target_residue_name,
+            original_residue_name=namespace.original_residue_name,
         ),
         rosetta=RosettaConfig(
             init_options=namespace.pyrosetta_init_options,
@@ -639,6 +703,10 @@ def build_run_config(namespace: argparse.Namespace) -> RunConfig:
         restraints=RestraintConfig(
             mode=namespace.restraint_mode,
             force_constant=namespace.restraint_force_constant,
+            cv_specs=_parse_cv_specs(
+                namespace.cv_tokens,
+                namespace.target_residue_number,
+            ),
         ),
         energy=EnergyConfig(
             backend=namespace.energy_backend,

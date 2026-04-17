@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 import math
 import os
@@ -10,6 +11,45 @@ from typing import Any, Optional
 from .exceptions import ConfigurationError
 
 K_BOLTZMANN_KJ_PER_MOL_K = 0.00831446261815324
+CANONICAL_RESIDUE_TARGET_NAMES = frozenset(
+    {
+        "ALA",
+        "ARG",
+        "ASN",
+        "ASP",
+        "CYS",
+        "GLN",
+        "GLU",
+        "GLY",
+        "HIS",
+        "ILE",
+        "LEU",
+        "LYS",
+        "MET",
+        "PHE",
+        "PRO",
+        "SER",
+        "THR",
+        "TRP",
+        "TYR",
+        "VAL",
+    }
+)
+COMMON_VARIANT_RESIDUE_TARGET_NAMES = frozenset(
+    {"ASH", "CYM", "CYX", "GLH", "HID", "HIE", "HIP", "LYN"}
+)
+ALLOWED_MUTATION_TARGET_NAMES = (
+    CANONICAL_RESIDUE_TARGET_NAMES | COMMON_VARIANT_RESIDUE_TARGET_NAMES
+)
+MUTATION_TARGET_NAME_ALIASES = {
+    "CYD": "CYX",
+    "CYZ": "CYM",
+    "HIS_D": "HID",
+    "HIS_E": "HIE",
+    "HIS_P": "HIP",
+    "LYP": "LYS",
+}
+BACKBONE_DIHEDRAL_KINDS = frozenset({"phi", "psi", "omega"})
 
 
 def normalize_angle_degrees(angle: float) -> float:
@@ -77,6 +117,15 @@ def flatten_trajectory_groups(groups: tuple[tuple[str, ...], ...]) -> tuple[str,
     return tuple(path for group in groups for path in group)
 
 
+def normalize_mutation_target_name(name: str) -> str:
+    """Normalize a mutation target name or residue-identity expectation."""
+
+    normalized = str(name).strip().upper()
+    if not normalized:
+        raise ConfigurationError("Residue names may not be empty.")
+    return MUTATION_TARGET_NAME_ALIASES.get(normalized, normalized)
+
+
 @dataclass(frozen=True)
 class InputConfig:
     """Configuration for input topologies and trajectories."""
@@ -134,6 +183,26 @@ class PerturbationConfig:
     target_residue_name: str
     original_residue_name: Optional[str] = None
 
+    def __post_init__(self) -> None:
+        if self.target_residue_number < 1:
+            raise ConfigurationError("Target residue number must be at least 1.")
+
+        normalized_target = normalize_mutation_target_name(self.target_residue_name)
+        if normalized_target not in ALLOWED_MUTATION_TARGET_NAMES:
+            allowed = ", ".join(sorted(ALLOWED_MUTATION_TARGET_NAMES))
+            raise ConfigurationError(
+                f"Unsupported mutation target residue {self.target_residue_name!r}. "
+                f"Allowed targets are: {allowed}."
+            )
+        object.__setattr__(self, "target_residue_name", normalized_target)
+
+        if self.original_residue_name is not None:
+            object.__setattr__(
+                self,
+                "original_residue_name",
+                normalize_mutation_target_name(self.original_residue_name),
+            )
+
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "PerturbationConfig":
         """Rehydrate the config from a serialized dictionary."""
@@ -143,6 +212,47 @@ class PerturbationConfig:
             target_residue_name=payload["target_residue_name"],
             original_residue_name=payload.get("original_residue_name"),
         )
+
+
+@dataclass(frozen=True)
+class CVSpec:
+    """Named backbone-dihedral CV specification."""
+
+    kind: str
+    residue_number: int
+    name: str = ""
+
+    def __post_init__(self) -> None:
+        normalized_kind = self.kind.strip().lower()
+        if normalized_kind not in BACKBONE_DIHEDRAL_KINDS:
+            allowed = ", ".join(sorted(BACKBONE_DIHEDRAL_KINDS))
+            raise ConfigurationError(
+                f"Unsupported backbone CV kind {self.kind!r}. Allowed kinds: {allowed}."
+            )
+        if self.residue_number < 1:
+            raise ConfigurationError("Backbone CV residue numbers must be at least 1.")
+        normalized_name = self.name.strip() if self.name else f"{normalized_kind}_{self.residue_number}"
+        object.__setattr__(self, "kind", normalized_kind)
+        object.__setattr__(self, "name", normalized_name)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "CVSpec":
+        """Rehydrate a CV specification from a serialized dictionary."""
+
+        return cls(
+            kind=payload["kind"],
+            residue_number=payload["residue_number"],
+            name=payload.get("name", ""),
+        )
+
+
+def default_backbone_cv_specs(target_residue_number: int) -> tuple[CVSpec, ...]:
+    """Return the legacy phi/psi CV pair on the target residue."""
+
+    return (
+        CVSpec(kind="phi", residue_number=target_residue_number, name="phi"),
+        CVSpec(kind="psi", residue_number=target_residue_number, name="psi"),
+    )
 
 
 @dataclass(frozen=True)
@@ -176,7 +286,21 @@ class RestraintConfig:
     """Configuration for reference-frame restraints."""
 
     mode: str = "phi_psi"
-    force_constant: float = 10.0
+    force_constant: float = 10000.0
+    cv_specs: tuple[CVSpec, ...] = ()
+
+    def __post_init__(self) -> None:
+        normalized_specs = tuple(self.cv_specs)
+        names = [spec.name for spec in normalized_specs]
+        if len(names) != len(set(names)):
+            duplicates = sorted({name for name in names if names.count(name) > 1})
+            duplicate_text = ", ".join(duplicates)
+            raise ConfigurationError(
+                f"Backbone CV names must be unique; duplicates: {duplicate_text}."
+            )
+        if self.force_constant <= 0.0:
+            raise ConfigurationError("Restraint force_constant must be positive.")
+        object.__setattr__(self, "cv_specs", normalized_specs)
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "RestraintConfig":
@@ -184,7 +308,11 @@ class RestraintConfig:
 
         return cls(
             mode=payload.get("mode", "phi_psi"),
-            force_constant=payload.get("force_constant", 10.0),
+            force_constant=payload.get("force_constant", 10000.0),
+            cv_specs=tuple(
+                CVSpec.from_dict(spec_payload)
+                for spec_payload in payload.get("cv_specs", ())
+            ),
         )
 
 
@@ -361,9 +489,9 @@ class RunConfig:
             and self.input.frame_stop < self.input.frame_start
         ):
             raise ConfigurationError("frame_stop must be greater than frame_start.")
-        if self.perturbation.target_residue_number < 2:
+        if not self.restraints.cv_specs:
             raise ConfigurationError(
-                "Target residue number must be at least 2 for phi/psi restraints."
+                "At least one backbone CV specification is required."
             )
         if self.energy.backend not in {"openmm", "rosetta"}:
             raise ConfigurationError(
@@ -405,6 +533,15 @@ class RunConfig:
             raise ConfigurationError("Parallel worker count must be at least 1.")
         if self.parallel.chunk_size < 1:
             raise ConfigurationError("Chunk size must be at least 1.")
+        if self.microstates.source in {"grid", "msm_bundle"}:
+            if self.restraints.cv_specs != default_backbone_cv_specs(
+                self.perturbation.target_residue_number
+            ):
+                raise ConfigurationError(
+                    "Grid and msm_bundle microstate modes currently require the legacy "
+                    "phi/psi CV pair on the target residue. Use source='file' for "
+                    "custom backbone-CV state definitions."
+                )
 
     def beta(self) -> float:
         """Return the inverse thermal energy used in Zwanzig reweighting."""
@@ -420,11 +557,21 @@ class RunConfig:
     def from_dict(cls, payload: dict[str, Any]) -> "RunConfig":
         """Rehydrate the config from a serialized dictionary."""
 
+        perturbation = PerturbationConfig.from_dict(payload["perturbation"])
+        restraints = RestraintConfig.from_dict(payload["restraints"])
+        if not restraints.cv_specs:
+            restraints = RestraintConfig(
+                mode=restraints.mode,
+                force_constant=restraints.force_constant,
+                cv_specs=default_backbone_cv_specs(
+                    perturbation.target_residue_number
+                ),
+            )
         return cls(
             input=InputConfig.from_dict(payload["input"]),
-            perturbation=PerturbationConfig.from_dict(payload["perturbation"]),
+            perturbation=perturbation,
             rosetta=RosettaConfig.from_dict(payload["rosetta"]),
-            restraints=RestraintConfig.from_dict(payload["restraints"]),
+            restraints=restraints,
             energy=EnergyConfig.from_dict(payload["energy"]),
             microstates=MicrostateConfig.from_dict(payload["microstates"]),
             parallel=ParallelConfig.from_dict(payload["parallel"]),
@@ -451,12 +598,60 @@ class PhiPsiMeasurement:
     phi_degrees: float
     psi_degrees: float
 
+    def as_cv_measurement(self) -> "CVMeasurement":
+        """Promote the legacy measurement to the generalized CV container."""
+
+        return CVMeasurement({"phi": self.phi_degrees, "psi": self.psi_degrees})
+
+
+@dataclass(frozen=True)
+class CVMeasurement:
+    """Measured values for one or more named backbone-dihedral CVs."""
+
+    values: dict[str, float]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "values",
+            {str(name): float(value) for name, value in self.values.items()},
+        )
+
+    def as_dict(self) -> dict[str, float]:
+        """Return a shallow copy of the measured CV map."""
+
+        return dict(self.values)
+
+    def get(self, name: str, default: Optional[float] = None) -> Optional[float]:
+        """Return a measured value by CV name."""
+
+        return self.values.get(name, default)
+
+    @property
+    def phi_degrees(self) -> Optional[float]:
+        """Legacy phi accessor when present."""
+
+        return self.values.get("phi")
+
+    @property
+    def psi_degrees(self) -> Optional[float]:
+        """Legacy psi accessor when present."""
+
+        return self.values.get("psi")
+
+    @property
+    def omega_degrees(self) -> Optional[float]:
+        """Legacy omega accessor when present."""
+
+        return self.values.get("omega")
+
 
 @dataclass(frozen=True)
 class DihedralRestraintSpec:
     """Specification for a single dihedral restraint to apply during relaxation."""
 
     label: str
+    kind: str
     residue_numbers: tuple[int, int, int, int]
     atom_names: tuple[str, str, str, str]
     target_angle_degrees: float
@@ -471,36 +666,72 @@ class MicrostateDefinition:
     label: str
     phi_range: Optional[tuple[float, float]] = None
     psi_range: Optional[tuple[float, float]] = None
+    cv_ranges: dict[str, tuple[float, float]] = field(default_factory=dict)
     reference_probability: Optional[float] = None
     plot_x: Optional[float] = None
     plot_y: Optional[float] = None
     state_level: str = "microstate"
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        normalized_ranges = {
+            str(name): tuple(float(value) for value in bounds)
+            for name, bounds in self.cv_ranges.items()
+        }
+        if self.phi_range is not None and "phi" not in normalized_ranges:
+            normalized_ranges["phi"] = tuple(float(value) for value in self.phi_range)
+        if self.psi_range is not None and "psi" not in normalized_ranges:
+            normalized_ranges["psi"] = tuple(float(value) for value in self.psi_range)
+        object.__setattr__(self, "cv_ranges", normalized_ranges)
+        if self.phi_range is None and "phi" in normalized_ranges:
+            object.__setattr__(self, "phi_range", normalized_ranges["phi"])
+        if self.psi_range is None and "psi" in normalized_ranges:
+            object.__setattr__(self, "psi_range", normalized_ranges["psi"])
+
     @property
     def phi_center(self) -> Optional[float]:
         """Return the Ramachandran phi center when it exists."""
 
-        if self.phi_range is None:
+        phi_range = self.cv_ranges.get("phi", self.phi_range)
+        if phi_range is None:
             return None
-        return angular_midpoint_degrees(*self.phi_range)
+        return angular_midpoint_degrees(*phi_range)
 
     @property
     def psi_center(self) -> Optional[float]:
         """Return the Ramachandran psi center when it exists."""
 
-        if self.psi_range is None:
+        psi_range = self.cv_ranges.get("psi", self.psi_range)
+        if psi_range is None:
             return None
-        return angular_midpoint_degrees(*self.psi_range)
+        return angular_midpoint_degrees(*psi_range)
 
-    def contains(self, phi_degrees: float, psi_degrees: float) -> bool:
-        """Check whether a phi/psi pair falls inside the definition."""
+    def contains(
+        self,
+        measurements_or_phi: CVMeasurement | Mapping[str, float] | float,
+        psi_degrees: Optional[float] = None,
+    ) -> bool:
+        """Check whether a measurement falls inside the definition."""
 
-        if self.phi_range is None or self.psi_range is None:
+        if not self.cv_ranges:
             return False
-        return angle_in_interval_degrees(
-            phi_degrees, *self.phi_range
-        ) and angle_in_interval_degrees(psi_degrees, *self.psi_range)
+        if isinstance(measurements_or_phi, CVMeasurement):
+            measurements = measurements_or_phi.values
+        elif isinstance(measurements_or_phi, Mapping):
+            measurements = measurements_or_phi
+        elif psi_degrees is not None:
+            measurements = {
+                "phi": float(measurements_or_phi),
+                "psi": float(psi_degrees),
+            }
+        else:
+            raise TypeError("contains() expects a CV measurement or a phi/psi pair.")
+
+        for name, bounds in self.cv_ranges.items():
+            value = measurements.get(name)
+            if value is None or not angle_in_interval_degrees(value, *bounds):
+                return False
+        return True
 
 
 @dataclass(frozen=True)
@@ -509,13 +740,28 @@ class MicrostateAssignment:
 
     state_id: str
     label: str
-    phi_degrees: float
-    psi_degrees: float
+    phi_degrees: Optional[float] = None
+    psi_degrees: Optional[float] = None
+    measurements: dict[str, float] = field(default_factory=dict)
     phi_center: Optional[float] = None
     psi_center: Optional[float] = None
     plot_x: Optional[float] = None
     plot_y: Optional[float] = None
     state_level: str = "microstate"
+
+    def __post_init__(self) -> None:
+        measurements = {
+            str(name): float(value) for name, value in self.measurements.items()
+        }
+        if self.phi_degrees is not None:
+            measurements.setdefault("phi", float(self.phi_degrees))
+        if self.psi_degrees is not None:
+            measurements.setdefault("psi", float(self.psi_degrees))
+        object.__setattr__(self, "measurements", measurements)
+        if self.phi_degrees is None and "phi" in measurements:
+            object.__setattr__(self, "phi_degrees", measurements["phi"])
+        if self.psi_degrees is None and "psi" in measurements:
+            object.__setattr__(self, "psi_degrees", measurements["psi"])
 
 
 @dataclass(frozen=True)
@@ -536,15 +782,15 @@ class FrameResult:
     stride_number: int
     microstate_id: str
     microstate_label: str
-    phi_degrees: float
-    psi_degrees: float
+    phi_degrees: Optional[float]
+    psi_degrees: Optional[float]
     reference_energy_kj_mol: float
     perturbed_energy_kj_mol: float
     delta_u_kj_mol: float
-    reference_relaxed_phi_degrees: float
-    reference_relaxed_psi_degrees: float
-    perturbed_relaxed_phi_degrees: float
-    perturbed_relaxed_psi_degrees: float
+    reference_relaxed_phi_degrees: Optional[float]
+    reference_relaxed_psi_degrees: Optional[float]
+    perturbed_relaxed_phi_degrees: Optional[float]
+    perturbed_relaxed_psi_degrees: Optional[float]
     trajectory_id: Optional[int] = None
     source_frame_index: Optional[int] = None
     assignment_source: str = "phi_psi"

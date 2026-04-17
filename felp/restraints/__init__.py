@@ -1,5 +1,5 @@
 """Restraint exports for FELP."""
 
-from .protocols import PhiPsiRestraintProtocol
+from .protocols import BackboneDihedralCVProtocol, PhiPsiRestraintProtocol
 
-__all__ = ["PhiPsiRestraintProtocol"]
+__all__ = ["BackboneDihedralCVProtocol", "PhiPsiRestraintProtocol"]
