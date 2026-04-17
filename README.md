@@ -1,74 +1,290 @@
 # FELP
 
-Free Energy Landscape Perturbation for restrained state-local reweighting.
+Free Energy Landscape Perturbation for restrained, state-local reweighting.
+
+FELP estimates how a local perturbation, such as a point mutation, reshapes a discrete free-energy landscape defined on a reference ensemble. It combines per-frame energy differences with microstate-resolved exponential reweighting to infer target-state populations and relative free energies.
 
 ## Overview
 
-The rewritten codebase keeps `felp.py` as the top-level application entry point and moves the workflow into a modular internal package:
+At a high level, FELP does five things:
 
-### Code Organization (Fishbone Diagram)
+1. Sample a reference ensemble from a trajectory.
+2. Partition that ensemble into discrete microstates.
+3. For each frame, evaluate the reference and perturbed systems under the same local restraints.
+4. Compute a per-frame perturbation energy difference `delta_u = U_perturbed - U_reference`.
+5. Aggregate those `delta_u` values within each microstate to reconstruct a reweighted target distribution.
+
+This repository also supports MSM-backed FELP workflows. In that mode, a pre-fit PyEMMA bundle provides the discrete state definitions, assignments, and optionally a loaded reference prior.
+
+## Theory
+
+### What FELP estimates
+
+FELP is designed to answer a state-resolved question:
+
+`If I start from a reference ensemble and apply a local perturbation, how do the occupancies and relative free energies of predefined states change?`
+
+The method does not directly estimate a continuous global free-energy surface from scratch. Instead, it estimates a discrete target distribution over states and then projects that distribution back into convenient coordinates, such as Ramachandran phi/psi space, for visualization.
+
+### Statistical-mechanics picture
+
+Let `x` denote a configuration from the reference ensemble. FELP compares two effective potentials:
+
+- `U_reference(x)`: the restrained reference-state energy.
+- `U_perturbed(x)`: the restrained perturbed-state energy.
+
+For each evaluated frame, FELP computes:
+
+```text
+delta_u(x) = U_perturbed(x) - U_reference(x)
+beta = 1 / (k_B T)
+```
+
+The central object is the Boltzmann factor:
+
+```text
+exp(-beta * delta_u)
+```
+
+Within each microstate `i`, FELP uses the state-local mean of that factor to reweight the reference probability of the state into a target probability.
+
+### Why FELP is state-local
+
+The key approximation is that the perturbation can be estimated reliably by averaging within a discrete state rather than over the entire landscape at once. This is useful when:
+
+- the reference trajectory already samples the important local substates;
+- the perturbation is local enough that a frame remains meaningfully comparable to its reference microstate;
+- the overlap problem is better behaved inside a state than across the whole ensemble.
+
+In practice, the quality of the estimate depends strongly on whether each state has enough reference support and whether the perturbed and reference restrained ensembles overlap inside that state.
+
+### Microstates
+
+A microstate is a discrete state definition used for both assignment and aggregation. FELP supports three sources:
+
+- `grid`: a uniform phi/psi grid over `[-180, 180)` on each axis.
+- `file`: explicit JSON or YAML state definitions with `cv_ranges` and optional embedded `reference_probability`.
+- `msm_bundle`: cluster or metastable states loaded from a previously exported PyEMMA bundle.
+
+By default, FELP uses the backbone dihedrals `phi` and `psi` on the target residue as its collective variables. File-based microstates can generalize this to other named backbone dihedrals, but the current `grid` and `msm_bundle` modes require the default phi/psi pair.
+
+Each frame is assigned to the first state whose angular intervals contain the measured CVs. Angular comparisons are circular, so wraparound intervals behave correctly across the `-180/180` boundary.
+
+### Why restraints matter
+
+FELP is a restrained comparison, not an unconstrained mutation free-energy calculation. For each frame, the code builds restraint targets from the reference geometry and applies the same restraint specification when evaluating the reference and perturbed states.
+
+Conceptually, the restraints do two things:
+
+- they keep the comparison local to the state represented by the frame;
+- they reduce the chance that the perturbed structure relaxes into a qualitatively different basin before the energy comparison is made.
+
+The practical consequence is important: FELP estimates the free-energy landscape of the restrained target ensemble induced by the chosen state definitions and restraint protocol. If the restraints are too weak, states can drift; if they are too strong, the restrained ensemble may be too artificial.
+
+### Per-frame evaluation
+
+For each trajectory frame, FELP performs the following conceptual steps:
+
+1. Measure the reference-frame CVs and assign the frame to a microstate.
+2. Build a set of restraints from that same reference geometry.
+3. Construct the perturbed system from the reference structure.
+4. Evaluate the reference and perturbed systems under the same restraints and the same energy backend.
+5. Store the resulting `delta_u`.
+
+The default energy backend is OpenMM with AMBER `ff14SBonlysc` and `GBNeck2` implicit solvent. Rosetta-based scoring is also supported. Regardless of backend, FELP compares like with like: same frame, same state definition, same restraint target, same temperature, different Hamiltonian only through the perturbation.
+
+### Reference priors: `loaded` vs `raw_counts`
+
+FELP needs a reference probability `pi_reference(i)` for each state `i`. The code supports two explicit modes:
+
+- `loaded`: normalize the `reference_probability` values embedded in a microstate file or MSM bundle.
+- `raw_counts`: estimate the reference prior empirically from the fraction of reweighting-eligible frames assigned to each state.
+
+In plain text:
+
+```text
+pi_reference(i) = loaded prior from definitions, normalized            if mode = loaded
+pi_reference(i) = eligible frame count in state i / total eligible    if mode = raw_counts
+```
+
+Use `loaded` when your state definitions already carry a trusted reference stationary distribution. Use `raw_counts` when you want FELP to use the evaluated trajectory itself as the reference prior.
+
+Important implementation details:
+
+- `grid` microstates do not embed probabilities, so they must use `--prior-probability-mode raw_counts`.
+- a state with positive reference prior but zero evaluated frames is treated as unsupported and raises an error;
+- failed frames and frames with non-finite energies are excluded from the reweighting estimate.
+
+### The state-local Zwanzig estimator
+
+For state `i` with frames `j = 1..n_i`, FELP computes a numerically stabilized state-local Boltzmann average.
+
+First define:
+
+```text
+delta_shift = min(delta_u over all eligible frames)
+w_ij = exp(-beta * (delta_u_ij - delta_shift))
+f_i = (1 / n_i) * sum_j w_ij
+```
+
+The shift `delta_shift` is only for numerical stability. It cancels during normalization and does not change the final target probabilities.
+
+FELP then reconstructs the target distribution:
+
+```text
+Z = sum_i pi_reference(i) * f_i
+pi_target(i) = pi_reference(i) * f_i / Z
+```
+
+This is the implementation-level estimator recorded in the run and plot summaries:
+
+```text
+pi_target(i) proportional to pi_reference(i) * <exp(-beta * delta_u)>_i
+```
+
+where the code evaluates the Boltzmann factor with the global stability shift described above.
+
+### Relative free energies
+
+Once FELP has `pi_target(i)`, it converts target probabilities into relative free energies:
+
+```text
+F_i = -k_B T ln(pi_target(i))
+```
+
+Finite free energies are then shifted so that the minimum finite value is zero. Therefore:
+
+- FELP free energies are relative, not absolute;
+- only differences between states are meaningful;
+- the zero of energy is chosen by the lowest finite target free energy in the computed set.
+
+### Diagnostics carried per state
+
+For each microstate, FELP also stores quantities that help interpret estimator quality:
+
+- `frame_count`
+- `reweight_factor = f_i`
+- `effective_sample_size`
+- `mean_delta_u_kj_mol`
+- `std_delta_u_kj_mol`
+- `mean_boltzmann_factor`
+- `std_boltzmann_factor`
+
+The effective sample size is computed from the state-local weights:
+
+```text
+ESS_i = (sum_j w_ij)^2 / sum_j (w_ij^2)
+```
+
+Low ESS is a warning sign that a state is dominated by a small number of very favorable frames.
+
+### Plotting semantics
+
+FELP writes discrete state summaries first, then derives plots from those summaries.
+
+For discrete state plots, the code uses the same `pi_reference(i)`, `pi_target(i)`, and `F_i` written to `microstate_summary.csv`.
+
+For phi/psi frame-projected landscapes, FELP reweights individual subsampled frames using state-consistent weights:
+
+```text
+reference frame weight(i, j)  proportional to  pi_reference(i) / n_i
+target frame weight(i, j)     proportional to  pi_reference(i) * exp(-beta * (delta_u_ij - delta_shift)) / n_i
+```
+
+Those weighted histograms are normalized to probability surfaces and converted to relative free energy with the same `-k_B T ln p` rule used for discrete states.
+
+### Capped free-energy plots
+
+`felp-plot` supports `--fel-max-energy-kj-mol` to cap the displayed color scale of free-energy plots. This is a plotting option only; it does not change the underlying probabilities or free energies.
+
+When the cap is set:
+
+- phi/psi free-energy heatmaps use `0 .. cap` on the colorbar;
+- discrete microstate Ramachandran plots use the same cap;
+- values above the cap are drawn in a flat background color instead of stretching the colormap;
+- the `delta_free_energy_projection.png` plot uses a symmetric `-cap .. +cap` scale.
+
+This is useful when a few very high-energy bins would otherwise compress the visually interesting low-energy region.
+
+### MSM-backed FELP
+
+An MSM bundle gives FELP a precomputed discrete state space. In practice that means:
+
+- a bundle can define `cluster` or `metastable` states;
+- the bundle can provide loaded reference probabilities for those states;
+- frames can be assigned by precomputed discrete state IDs instead of geometric lookup.
+
+The FELP reweighting step is still the same state-local exponential reweighting described above. The MSM bundle supplies the state definitions and, optionally, the reference prior. It does not change the form of the FELP estimator.
+
+When using an MSM bundle, keep in mind that any loaded prior inherits the usual modeling choices made during MSM construction: features, lag time, clustering, state level, and the amount of data used to fit the model.
+
+### What FELP is not
+
+FELP is not a guarantee of globally converged free energies. The method can fail or become misleading when:
+
+- the reference ensemble does not sample important perturbed conformations;
+- a state has very poor overlap between reference and perturbed restrained ensembles;
+- the chosen microstates are too coarse or mix multiple distinct basins;
+- the restraints meaningfully distort the physics of the comparison;
+- the energy model is not appropriate for the chemistry of interest.
+
+Always inspect `frame_count`, `effective_sample_size`, `mean_delta_u_kj_mol`, and the plotted landscapes before drawing mechanistic conclusions.
+
+## Implementation Overview
+
+The codebase keeps `felp.py` as the top-level application entry point and organizes the workflow into a modular package:
 
 ```mermaid
 flowchart LR
-    %% Central Spine
     Spine(("felp.py\n(App Entry)"))
-    
-    %% Top Ribs (Setup & Data)
+
     CLI["felp.cli\n(Config & Parsing)"] --> Spine
     IO["felp.io\n(Trajectories & Results)"] --> Spine
-    Conv["felp.conversion\n(ParmEd ↔ PyRosetta)"] --> Spine
+    Conv["felp.conversion\n(ParmEd <-> PyRosetta)"] --> Spine
     Atlas["felp.reweighting\n(Microstate Atlas)"] --> Spine
     MSM["felp.msm\n(PyEMMA2 MSM Bundles)"] --> Spine
     Plot["felp.plotting\n(Publication Figures)"] --> Spine
-    
-    %% Bottom Ribs (Compute & Physics)
+
     Spine --> Par["felp.parallel\n(Multiprocessing)"]
-    Spine --> Rest["felp.restraints\n(Reference Frame)"]
+    Spine --> Rest["felp.restraints\n(Reference-Frame Restraints)"]
     Spine --> Pert["felp.perturbation\n(PyRosetta Mutation)"]
-    Spine --> Eng["felp.energy\n(OpenMM / AMBER)"]
+    Spine --> Eng["felp.energy\n(OpenMM / AMBER / Rosetta)"]
     Spine --> Agg["felp.reweighting\n(Zwanzig Aggregation)"]
 ```
 
-### Module Responsibilities
+### Module responsibilities
 
-- **`felp/cli/`**: Central argument parsing and strictly typed run configuration.
-- **`felp/conversion/`**: Handles the complex interconversion between ParmEd Structures, PyRosetta Poses, and OpenMM Topologies.
-- **`felp/restraints/`**: Shared-reference restraint builders to ensure perturbed states don't drift out of their defined microstate.
-- **`felp/perturbation/`**: PyRosetta mutation and structural relaxation protocols.
-- **`felp/energy/`**: Pluggable energy evaluators, with OpenMM/AMBER (`ff14SBonlysc` + `GBNeck2`) as the default backend.
-- **`felp/reweighting/`**: Microstate definitions (grid or file-based) and local Zwanzig aggregation math.
-- **`felp/parallel/`**: Worker initialization and deterministic frame execution using Python multiprocessing.
-- **`felp/io/`**: Trajectory loading and structured results writing (CSV/JSON).
-- **`felp/msm/`**: Modular PyEMMA2 feature generation, clustering, MSM/HMM fitting, QC plotting, bundle export, and bundle-backed sampling utilities.
-- **`felp/plotting/`**: Publication-oriented plotting helpers for MSM preprocessing and FELP postprocessing.
+- `felp/cli/`: argument parsing and strongly typed configuration objects.
+- `felp/conversion/`: interconversion between ParmEd structures, PyRosetta poses, and OpenMM topologies.
+- `felp/restraints/`: reference-frame restraint builders for backbone-dihedral CVs.
+- `felp/perturbation/`: perturbation construction and relaxation protocols.
+- `felp/energy/`: pluggable energy evaluators; OpenMM/AMBER is the default backend.
+- `felp/reweighting/`: microstate definitions, assignment policies, and state-local reweighting.
+- `felp/parallel/`: multiprocessing workers and deterministic per-frame execution.
+- `felp/io/`: trajectory loading and structured CSV/JSON output.
+- `felp/msm/`: PyEMMA feature generation, clustering, MSM fitting, bundle export, and bundle-backed utilities.
+- `felp/plotting/`: plotting helpers for MSM preprocessing and FELP postprocessing.
 
-### The Workflow
+### Workflow
 
-1. Load reference snapshots from a trajectory.
+1. Load reference snapshots from one or more trajectories.
 2. Assign each snapshot to a microstate.
-3. Convert the snapshot into a PyRosetta pose.
-4. Build restraints from the reference frame so the state definition is preserved.
-5. Relax the reference pose and the perturbed pose under the same restraints.
-6. Rescore both states with the selected energy backend.
-7. Aggregate per-frame `deltaU` values within each microstate and reconstruct a reweighted landscape.
+3. Build restraints from the frame's reference geometry.
+4. Construct and score the perturbed system against the same restrained reference context.
+5. Aggregate per-frame `delta_u` values within each microstate.
+6. Reconstruct the target state distribution and relative free energies.
+7. Write tabular outputs and optional publication-style plots.
 
-For MSM-FEP workflows, the project now also supports:
+## Trajectory input convention
 
-1. Featurizing trajectories with a declarative PyEMMA feature spec.
-2. Fitting a reduced-space clustering plus discrete MSM, with optional metastable overlays.
-3. Exporting a fast-loading MSM bundle that stores `dtrajs`, stationary probabilities, frame maps, and cached embeddings.
-4. Running FELP directly from that precomputed bundle using cluster or metastable state assignments.
-
-### Trajectory Input Convention
-
-Trajectory-bearing commands now use a repeatable grouped flag:
+Trajectory-bearing commands use a repeatable grouped flag:
 
 ```bash
 --trajectory simA.001.nc simA.002.nc simA.003.nc \
 --trajectory simB.001.nc simB.002.nc
 ```
 
-Files passed within one `--trajectory` flag are treated as contiguous chunks of the same simulation and are concatenated in time. Repeating `--trajectory` starts a new independent trajectory, which is kept separate for MSM estimation and bundle alignment.
+Files passed within one `--trajectory` flag are treated as contiguous chunks of the same simulation and concatenated in time. Repeating `--trajectory` starts a new independent trajectory. This matters most for MSM workflows, where trajectory independence should be preserved during estimation and bundle alignment.
 
 ## CLI
 
@@ -81,7 +297,9 @@ python felp.py --help
 Validate a microstate definition:
 
 ```bash
-python felp.py validate-microstates --microstate-file examples/dipeptide_microstates.json
+python felp.py validate-microstates \
+  --microstate-source file \
+  --microstate-file examples/dipeptide_microstates.json
 ```
 
 Run a dipeptide-style benchmark with grid microstates:
@@ -95,10 +313,11 @@ python felp.py run \
   --output-dir outputs/gly_to_ala \
   --phi-bins 12 \
   --psi-bins 12 \
+  --prior-probability-mode raw_counts \
   --workers 4
 ```
 
-Run the same workflow with explicit microstate definitions:
+Run the same workflow with explicit microstate definitions and loaded priors:
 
 ```bash
 python felp.py run \
@@ -108,7 +327,19 @@ python felp.py run \
   --target-residue-name ALA \
   --microstate-source file \
   --microstate-file examples/dipeptide_microstates.json \
+  --prior-probability-mode loaded \
   --output-dir outputs/gly_to_ala_explicit
+```
+
+Recompute microstate summaries from an existing frame-results CSV:
+
+```bash
+python felp.py summarize \
+  --raw-frame-results outputs/gly_to_ala/frame_results.csv \
+  --microstate-source file \
+  --microstate-file examples/dipeptide_microstates.json \
+  --temperature-kelvin 300 \
+  --output-dir outputs/gly_to_ala_resummarized
 ```
 
 Fit a PyEMMA MSM bundle for later FELP runs:
@@ -146,6 +377,7 @@ python felp.py run \
   --microstate-source msm_bundle \
   --msm-bundle-dir outputs/dipeptide_bundle.msm_bundle \
   --state-level cluster \
+  --prior-probability-mode loaded \
   --output-dir outputs/gly_to_ala_from_bundle
 ```
 
@@ -168,13 +400,15 @@ python felp.py msm-plot \
   --output-dir outputs/dipeptide_bundle_plots
 ```
 
-Generate publication-style plots from FELP outputs:
+Generate publication-style plots from FELP outputs, with an optional free-energy cap:
 
 ```bash
 python felp.py felp-plot \
   --microstate-summary outputs/gly_to_ala_from_bundle/microstate_summary.csv \
   --raw-frame-results outputs/gly_to_ala_from_bundle/frame_results.csv \
-  --output-dir outputs/gly_to_ala_publication_plots
+  --output-dir outputs/gly_to_ala_publication_plots \
+  --temperature-kelvin 300 \
+  --fel-max-energy-kj-mol 12
 ```
 
 Use the task-specific wrapper scripts if you prefer shorter entry points:
@@ -193,32 +427,53 @@ Starter command templates are included in `examples/`:
 - `examples/felp_run_from_bundle_starter.sh`
 - `examples/felp_plot_starter.sh`
 
-The `build_msm.py` script is now a thin compatibility wrapper around `python felp.py msm-fit ...`.
+The `build_msm.py` script is a thin compatibility wrapper around `python felp.py msm-fit ...`.
 
 ## Outputs
 
-Each run writes:
+### FELP run outputs
 
-- **`run_config.json`**: Fully resolved FELP configuration used for the run.
-- **`frame_results.csv`**: Per-frame assignments, energies, and computed `deltaU`.
-- **`microstate_summary.csv`**: Microstate-level statistics, effective sample sizes, and reweighting factors.
-- **`reweighted_surface.csv`**: Projected microstate surface summary (probabilities and free energies).
-- **`run_summary.json`**: Concise run summary including frame counts and output paths.
+Each `run` workflow writes:
+
+- `run_config.json`: the fully resolved FELP configuration.
+- `frame_results.csv`: one row per evaluated frame, including assignment, reference and perturbed energies, `delta_u`, relaxed CV measurements, status columns, and metadata.
+- `microstate_summary.csv`: one row per microstate with `frame_count`, `reference_probability`, `reweight_factor`, `target_probability`, `free_energy_kj_mol`, `effective_sample_size`, summary statistics of `delta_u`, and metadata.
+- `reweighted_surface.csv`: a plotting-friendly subset of the microstate summary containing coordinates, probabilities, and free energies.
+- `run_summary.json`: a compact run summary with counts, probability totals, chosen prior mode, and the estimator string used to describe the reweighting.
+
+Each `summarize` workflow writes:
+
+- `microstate_summary.csv`: a recomputed state summary derived from an existing `frame_results.csv`.
+- `reweighted_surface.csv`: the plotting-friendly surface view of the recomputed summary.
+- `run_summary.json`: a concise summary of the recomputed aggregation.
+
+Important semantics:
+
+- `microstate_histogram` in `run_summary.json` is empirical frame counting, not the reweighted target distribution;
+- `reference_probability` is the prior chosen by `loaded` or `raw_counts`;
+- `target_probability` is the normalized reweighted state population;
+- `free_energy_kj_mol` is derived from `target_probability` and shifted so the minimum finite value is zero.
+
+To resume a previously interrupted run, add `--resume`. FELP will read `frame_results.csv` and only process the remaining frames.
+
+### MSM bundle outputs
 
 Each `msm-fit` bundle writes:
 
-- **`manifest.json`**: Bundle schema, feature spec, reducer/clustering settings, state definitions, and provenance.
-- **`assignments.npz`**: Per-trajectory `dtrajs`, frame-source indices, and optional metastable assignment arrays.
-- **`embedding.npz`**: Reduced trajectories and cluster centers for fast downstream visualization.
-- **`pyemma_checkpoints/`**: Optional native PyEMMA checkpoints when `--save-pyemma-checkpoints` is enabled.
-- **`plots/`**: Optional QC plots when `--write-plots` is enabled.
+- `manifest.json`: bundle schema, state definitions, feature spec, and provenance.
+- `assignments.npz`: per-trajectory discrete assignments and frame-source indices.
+- `embedding.npz`: reduced trajectories and cluster centers for fast downstream visualization.
+- `pyemma_checkpoints/`: optional native PyEMMA checkpoints when enabled.
+- `plots/`: optional QC plots when `--write-plots` is enabled.
+
+### Plot outputs
 
 Each plotting command writes:
 
-- **`plot_summary.json`**: Plot provenance plus divergence summaries where relevant.
-- **`*.png`**: Publication-style projection, occupancy, divergence, and free-energy figures.
+- `plot_summary.json`: plot provenance plus divergence summaries where relevant.
+- `*.png`: publication-style occupancy, divergence, projection, and free-energy figures.
 
-To resume a previously interrupted run, simply add the `--resume` flag. FELP will read `frame_results.csv` and only process the remaining frames.
+For FELP plots, `plot_summary.json` records the current estimator descriptions and whether a free-energy display cap was applied via `fel_max_energy_kj_mol`.
 
 ## Testing
 
@@ -228,4 +483,4 @@ Run the lightweight test suite with:
 python -m pytest -q
 ```
 
-The dependency-heavy GLY→ALA end-to-end benchmark test is included and will run automatically when PyRosetta and OpenMM are available.
+The dependency-heavy GLY->ALA end-to-end benchmark test runs automatically when PyRosetta and OpenMM are available.
