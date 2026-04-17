@@ -9,6 +9,7 @@ from typing import Iterable
 
 from felp.core import DihedralRestraintSpec, EnergyResult
 from felp.conversion import StructureConversionService
+from felp.restraints.protocols import find_structure_atom
 
 
 def _import_openmm():
@@ -58,24 +59,18 @@ class OpenMMEnergyEvaluator(EnergyEvaluator):
     def _find_atom_index(self, structure, residue_number: int, atom_name: str) -> int:
         """Find the 0-based index of an atom in a ParmEd Structure.
 
-        Dihedral restraints use **Rosetta pose indices** (1..N). ParmEd often stores
-        ``residue.number`` from PDB numbering after Pose↔Structure conversion, so the
-        primary match uses ``residue.number``. If that fails, fall back to the
-        ``residue_number``-th residue in chain order (same ordering as the pose).
+        Dihedral restraints use **Rosetta pose indices** (1..N). When Rosetta bridge
+        metadata is present, use it to resolve the corresponding structure residue.
+        Otherwise fall back to pose order and finally ``residue.number``.
         """
 
-        name = atom_name.strip()
+        target_atom = find_structure_atom(structure, residue_number, atom_name)
         for atom_index, atom in enumerate(structure.atoms):
-            if atom.residue.number == residue_number and atom.name.strip() == name:
+            if atom is target_atom:
                 return atom_index
-        if 1 <= residue_number <= len(structure.residues):
-            residue = structure.residues[residue_number - 1]
-            for atom_index, atom in enumerate(structure.atoms):
-                if atom.residue is residue and atom.name.strip() == name:
-                    return atom_index
         raise KeyError(
             f"Could not locate atom {atom_name} in residue {residue_number} "
-            f"(PDB or pose order) for OpenMM restraints."
+            f"(Rosetta metadata, pose order, or residue.number) for OpenMM restraints."
         )
 
     def _apply_restraints(self, system, structure, restraint_specs):

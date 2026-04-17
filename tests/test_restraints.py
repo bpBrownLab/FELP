@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from parmed import Structure
+from parmed.topologyobjects import Atom
+
 from felp.core import CVSpec
 from felp.restraints import BackboneDihedralCVProtocol, PhiPsiRestraintProtocol
 
@@ -68,3 +71,33 @@ def test_backbone_dihedral_protocol_supports_omega() -> None:
     assert restraints[1].residue_numbers == (2, 2, 3, 3)
     assert restraints[1].atom_names == ("CA", "C", "N", "CA")
     assert restraints[1].target_angle_degrees == 179.0
+
+
+def test_backbone_dihedral_protocol_measures_structure_with_bridge_seqpos() -> None:
+    structure = Structure()
+    structure.add_atom(Atom(name="CA", atomic_number=6, mass=12.0), "GLY", 40)
+    structure.add_atom(Atom(name="C", atomic_number=6, mass=12.0), "GLY", 40)
+    structure.add_atom(Atom(name="N", atomic_number=7, mass=14.0), "ALA", 99)
+    structure.add_atom(Atom(name="CA", atomic_number=6, mass=12.0), "ALA", 99)
+    coordinates = (
+        (1.0, 0.0, 0.0),
+        (0.0, 0.0, 0.0),
+        (0.0, 1.0, 0.0),
+        (0.0, 1.0, 1.0),
+    )
+    for atom, xyz in zip(structure.atoms, coordinates):
+        atom.xx, atom.xy, atom.xz = xyz
+    setattr(
+        structure,
+        "_rosetta_bridge_metadata",
+        {"residues": [{"seqpos": 2}, {"seqpos": 3}]},
+    )
+
+    protocol = BackboneDihedralCVProtocol(
+        cv_specs=(CVSpec(kind="omega", residue_number=2, name="omega"),),
+        force_constant=25.0,
+    )
+
+    measurement = protocol.measure_structure(structure)
+
+    assert measurement.values == {"omega": -90.0}

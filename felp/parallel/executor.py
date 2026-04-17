@@ -98,8 +98,7 @@ def _build_pyrosetta_options(config: RunConfig) -> str:
 
 
 def _measure_structure(structure):
-    pose = _WORKER_CONVERSION_SERVICE.structure_to_pose(structure)
-    return _WORKER_RESTRAINT_PROTOCOL.measure_pose(pose)
+    return _WORKER_RESTRAINT_PROTOCOL.measure_structure(structure)
 
 
 def process_frame_job(job: SnapshotJob) -> FrameResult:
