@@ -10,6 +10,7 @@ from felp.conversion import StructureConversionService
 from felp.core import FrameResult, RunConfig, SnapshotJob
 from felp.energy import build_energy_evaluator
 from felp.perturbation import PyRosettaPerturbationProtocol
+from felp.perturbation.validation import ensure_perturbation_matches_pose
 from felp.restraints import PhiPsiRestraintProtocol
 from felp.reweighting import AssignmentPolicy, MicrostateAtlas, PhiPsiAssignmentPolicy
 
@@ -21,6 +22,7 @@ _WORKER_ENERGY_EVALUATOR = None
 _WORKER_RESTRAINT_PROTOCOL: PhiPsiRestraintProtocol | None = None
 _WORKER_TEMPLATE_STRUCTURE = None
 _WORKER_ASSIGNMENT_POLICY: AssignmentPolicy | None = None
+_WORKER_PERTURBATION_CHECKED: bool = False
 
 
 def initialize_worker(
@@ -31,6 +33,7 @@ def initialize_worker(
     """Initialize heavy dependencies (PyRosetta, OpenMM) exactly once per worker process."""
     global _WORKER_ATLAS
     global _WORKER_ASSIGNMENT_POLICY
+    global _WORKER_PERTURBATION_CHECKED
     global _WORKER_CONFIG
     global _WORKER_CONVERSION_SERVICE
     global _WORKER_ENERGY_EVALUATOR
@@ -41,6 +44,7 @@ def initialize_worker(
     _WORKER_CONFIG = config
     _WORKER_ATLAS = atlas
     _WORKER_ASSIGNMENT_POLICY = assignment_policy or PhiPsiAssignmentPolicy()
+    _WORKER_PERTURBATION_CHECKED = False
     _WORKER_CONVERSION_SERVICE = StructureConversionService(
         pyrosetta_init_options=_build_pyrosetta_options(config),
         radii_set=config.input.radii_set,
@@ -75,6 +79,7 @@ def _build_pyrosetta_options(config: RunConfig) -> str:
 
 def process_frame_job(job: SnapshotJob) -> FrameResult:
     """Process a single frame: assign microstate, convert, relax, perturb, rescore."""
+    global _WORKER_PERTURBATION_CHECKED
     if any(
         item is None
         for item in (
@@ -94,6 +99,9 @@ def process_frame_job(job: SnapshotJob) -> FrameResult:
         job.coordinates_angstrom,
     )
     reference_pose = _WORKER_CONVERSION_SERVICE.structure_to_pose(structure)
+    if not _WORKER_PERTURBATION_CHECKED:
+        ensure_perturbation_matches_pose(reference_pose, _WORKER_CONFIG.perturbation)
+        _WORKER_PERTURBATION_CHECKED = True
     reference_measurement = _WORKER_RESTRAINT_PROTOCOL.measure_pose(reference_pose)
     assignment = _WORKER_ASSIGNMENT_POLICY.assign(
         _WORKER_ATLAS,

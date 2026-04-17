@@ -96,7 +96,11 @@ def _load_vendored_parmed(vendor_root: Path) -> ModuleType:
     package_root = vendor_root / "parmed"
     init_file = package_root / "__init__.py"
     if not init_file.is_file():
-        raise DependencyError(f"Vendored ParmEd package is missing {init_file}.")
+        raise DependencyError(
+            f"Vendored ParmEd package is missing {init_file}. "
+            "If this is a git checkout, initialize the submodule from the repo root: "
+            "git submodule update --init ParmEd"
+        )
 
     existing = sys.modules.get("parmed")
     if existing is not None and _path_is_within(getattr(existing, "__file__", None), vendor_root):

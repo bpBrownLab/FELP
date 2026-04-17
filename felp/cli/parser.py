@@ -28,7 +28,11 @@ def _add_common_microstate_arguments(parser: argparse.ArgumentParser) -> None:
         "--microstate-source",
         choices=("grid", "file", "msm_bundle"),
         default="grid",
-        help="How to define microstates for the reference landscape.",
+        help=(
+            "How to define microstates for the reference landscape. "
+            "Use grid for first passes; msm_bundle requires a pre-fit bundle aligned "
+            "to your --trajectory grouping."
+        ),
     )
     group.add_argument(
         "--microstate-file",
@@ -120,7 +124,10 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
         "--target-residue-number",
         required=True,
         type=int,
-        help="Residue number to perturb in PyRosetta.",
+        help=(
+            "Rosetta pose residue index (1..N) to mutate, as in pose.residue(i). "
+            "This is sequential pose numbering, not necessarily PDB residue numbers."
+        ),
     )
     perturb_group.add_argument(
         "--target-residue-name",
@@ -129,7 +136,11 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
     )
     perturb_group.add_argument(
         "--original-residue-name",
-        help="Optional three-letter residue name expected before mutation.",
+        help=(
+            "Optional three-letter residue expected at --target-residue-number before "
+            "mutation (e.g. GLY for GLY→ALA). When set, the first frame checks the "
+            "pose matches this name at the Rosetta index."
+        ),
     )
 
     rosetta_group = parser.add_argument_group("PyRosetta")
