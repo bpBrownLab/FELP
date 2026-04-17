@@ -620,6 +620,16 @@ def _add_felp_plot_arguments(parser: argparse.ArgumentParser) -> None:
         default=200_000,
         help="Maximum frames used when building phi/psi heatmaps (uniform subsampling).",
     )
+    parser.add_argument(
+        "--fel-max-energy-kj-mol",
+        type=float,
+        default=None,
+        help=(
+            "Cap relative free-energy color scales at this value (kJ/mol). "
+            "Bins or points above the cap are drawn in a flat background color; "
+            "delta free-energy projections use a symmetric cap (± this value)."
+        ),
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -901,6 +911,7 @@ def build_felp_plot_config(namespace: argparse.Namespace) -> FELPPlotConfig:
         top_states=namespace.top_states,
         fel_bins=namespace.fel_bins,
         fel_max_points=namespace.fel_max_points,
+        fel_max_energy_kj_mol=namespace.fel_max_energy_kj_mol,
         overwrite=namespace.overwrite,
     )
     config.validate()

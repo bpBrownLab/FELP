@@ -319,6 +319,8 @@ def test_build_plot_configs_from_cli(tmp_path: Path) -> None:
             str(tmp_path / "felp_plots"),
             "--fel-bins",
             "36",
+            "--fel-max-energy-kj-mol",
+            "12",
         ]
     )
 
@@ -329,3 +331,4 @@ def test_build_plot_configs_from_cli(tmp_path: Path) -> None:
     assert felp_config.raw_frame_results_csv == str(frame_csv)
     assert felp_config.output_dir.endswith("felp_plots")
     assert felp_config.fel_bins == 36
+    assert felp_config.fel_max_energy_kj_mol == 12.0

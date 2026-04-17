@@ -161,6 +161,23 @@ def probability_surface_to_free_energy(
     return free_energy
 
 
+_FEL_CAP_OVER_COLOR = "#e8e8e8"
+
+
+def _copy_viridis_colormap():
+    """Return a mutable viridis colormap without deprecated get_cmap when possible."""
+
+    import matplotlib as mpl
+    import matplotlib.cm as mpl_cm
+
+    registry = getattr(mpl, "colormaps", None)
+    if registry is not None:
+        base = registry["viridis"]
+    else:
+        base = mpl_cm.get_cmap("viridis")
+    return base.copy()
+
+
 def scatter_state_projection(
     ax,
     x: np.ndarray,
@@ -170,22 +187,46 @@ def scatter_state_projection(
     title: str,
     xlabel: str = "Projection 1",
     ylabel: str = "Projection 2",
+    *,
+    fel_max_energy_kj_mol: float | None = None,
+    symmetric_energy_cap: bool = False,
 ) -> None:
     """Draw a colored scatter plot for state-wise projected values."""
 
-    scatter = ax.scatter(
-        x,
-        y,
-        c=values,
-        cmap="viridis",
-        s=60,
-        edgecolors="black",
-        linewidths=0.3,
-    )
+    import matplotlib.colors as mcolors
+
+    values_plot = np.ma.masked_invalid(np.asarray(values, dtype=float))
+    scatter_kwargs: dict = {
+        "x": x,
+        "y": y,
+        "c": values_plot,
+        "cmap": "viridis",
+        "s": 60,
+        "edgecolors": "black",
+        "linewidths": 0.3,
+    }
+    colorbar_extend: str | None = None
+    if fel_max_energy_kj_mol is not None:
+        cap = float(fel_max_energy_kj_mol)
+        cmap = _copy_viridis_colormap()
+        cmap.set_bad(_FEL_CAP_OVER_COLOR)
+        cmap.set_over(_FEL_CAP_OVER_COLOR)
+        cmap.set_under(_FEL_CAP_OVER_COLOR)
+        scatter_kwargs["cmap"] = cmap
+        if symmetric_energy_cap:
+            scatter_kwargs["norm"] = mcolors.Normalize(
+                vmin=-cap, vmax=cap, clip=False
+            )
+            colorbar_extend = "both"
+        else:
+            scatter_kwargs["norm"] = mcolors.Normalize(vmin=0.0, vmax=cap, clip=False)
+            colorbar_extend = "max"
+
+    scatter = ax.scatter(**scatter_kwargs)
     ax.set_title(title)
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
-    colorbar = ax.figure.colorbar(scatter, ax=ax)
+    colorbar = ax.figure.colorbar(scatter, ax=ax, extend=colorbar_extend or "neither")
     colorbar.set_label(colorbar_label)
 
 
@@ -200,21 +241,41 @@ def save_pcolormesh_landscape(
     colorbar_label: str,
     xlabel: str,
     ylabel: str,
+    fel_max_energy_kj_mol: float | None = None,
 ) -> str:
     """Render a 2D surface on a histogram grid (e.g. probability or free energy)."""
 
+    import matplotlib.colors as mcolors
+
     fig, ax = plt.subplots(1, 1)
-    image = ax.pcolormesh(
-        x_edges,
-        y_edges,
-        z.T,
-        shading="auto",
-        cmap="viridis",
-    )
+    z_plot = np.ma.masked_invalid(np.asarray(z, dtype=float).T)
+    colorbar_extend: str | None = None
+    if fel_max_energy_kj_mol is not None:
+        cap = float(fel_max_energy_kj_mol)
+        cmap = _copy_viridis_colormap()
+        cmap.set_bad(_FEL_CAP_OVER_COLOR)
+        cmap.set_over(_FEL_CAP_OVER_COLOR)
+        image = ax.pcolormesh(
+            x_edges,
+            y_edges,
+            z_plot,
+            shading="auto",
+            cmap=cmap,
+            norm=mcolors.Normalize(vmin=0.0, vmax=cap, clip=False),
+        )
+        colorbar_extend = "max"
+    else:
+        image = ax.pcolormesh(
+            x_edges,
+            y_edges,
+            z_plot,
+            shading="auto",
+            cmap="viridis",
+        )
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
     ax.set_title(title)
-    colorbar = fig.colorbar(image, ax=ax)
+    colorbar = fig.colorbar(image, ax=ax, extend=colorbar_extend or "neither")
     colorbar.set_label(colorbar_label)
     fig.tight_layout()
     fig.savefig(path)
