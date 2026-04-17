@@ -53,6 +53,34 @@ def test_build_run_config_from_cli(tmp_path: Path) -> None:
     ] == [("phi", "phi", 2), ("psi", "psi", 2)]
 
 
+def test_build_run_config_mute_pyrosetta(tmp_path: Path) -> None:
+    topology = tmp_path / "input.pdb"
+    trajectory = tmp_path / "input.xtc"
+    topology.write_text("placeholder\n", encoding="utf-8")
+    trajectory.write_text("placeholder\n", encoding="utf-8")
+
+    parser = build_parser()
+    namespace = parser.parse_args(
+        [
+            "run",
+            "--topology-file",
+            str(topology),
+            "--trajectory-file",
+            str(trajectory),
+            "--target-residue-number",
+            "2",
+            "--target-residue-name",
+            "ALA",
+            "--output-dir",
+            str(tmp_path / "out"),
+            "--mute-pyrosetta",
+        ]
+    )
+
+    config = build_run_config(namespace)
+    assert config.rosetta.mute_tracers is True
+
+
 def test_build_run_config_with_msm_bundle(tmp_path: Path) -> None:
     topology = tmp_path / "input.pdb"
     trajectory = tmp_path / "input.xtc"

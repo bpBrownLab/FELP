@@ -98,6 +98,8 @@ def _build_pyrosetta_options(config: RunConfig) -> str:
     options = config.rosetta.init_options.strip()
     if config.rosetta.database_path:
         options = f"{options} -database {config.rosetta.database_path}".strip()
+    if config.rosetta.mute_tracers and "-mute" not in options:
+        options = f"{options} -mute all".strip()
     return options
 
 

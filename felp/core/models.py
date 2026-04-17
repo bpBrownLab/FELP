@@ -264,6 +264,7 @@ class RosettaConfig:
     score_function: str = "ref2015"
     relax_iterations: int = 5
     cartesian: bool = True
+    mute_tracers: bool = False
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "RosettaConfig":
@@ -278,6 +279,7 @@ class RosettaConfig:
             score_function=payload.get("score_function", "ref2015"),
             relax_iterations=payload.get("relax_iterations", 5),
             cartesian=payload.get("cartesian", True),
+            mute_tracers=payload.get("mute_tracers", False),
         )
 
 

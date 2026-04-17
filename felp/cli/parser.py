@@ -223,6 +223,14 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Disable Cartesian FastRelax.",
     )
+    rosetta_group.add_argument(
+        "--mute-pyrosetta",
+        action="store_true",
+        help=(
+            "Reduce Rosetta tracer noise (FastRelax, packing, etc.) by adding "
+            "'-mute all' to pyrosetta.init unless your --pyrosetta-init-options already set -mute."
+        ),
+    )
 
     restraint_group = parser.add_argument_group("Restraints")
     restraint_group.add_argument(
@@ -713,6 +721,7 @@ def build_run_config(namespace: argparse.Namespace) -> RunConfig:
             score_function=namespace.rosetta_score_function,
             relax_iterations=namespace.rosetta_relax_iterations,
             cartesian=not namespace.no_cartesian_relax,
+            mute_tracers=namespace.mute_pyrosetta,
         ),
         restraints=RestraintConfig(
             mode=namespace.restraint_mode,
