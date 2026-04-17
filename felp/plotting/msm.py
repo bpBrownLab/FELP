@@ -16,6 +16,7 @@ from .common import (
     import_matplotlib,
     prepare_output_dir,
     probability_surface_to_free_energy,
+    save_pcolormesh_landscape,
     scatter_state_projection,
     write_json,
 )
@@ -291,22 +292,17 @@ def _plot_probability_heatmap(
 ) -> None:
     """Render a 2D histogram-like heatmap."""
 
-    fig, ax = plt.subplots(1, 1)
-    image = ax.pcolormesh(
+    save_pcolormesh_landscape(
+        plt,
+        path,
+        histogram,
         x_edges,
         y_edges,
-        histogram.T,
-        shading="auto",
-        cmap="viridis",
+        title=title,
+        colorbar_label=colorbar_label,
+        xlabel="Projection 1",
+        ylabel="Projection 2",
     )
-    ax.set_xlabel("Projection 1")
-    ax.set_ylabel("Projection 2")
-    ax.set_title(title)
-    colorbar = fig.colorbar(image, ax=ax)
-    colorbar.set_label(colorbar_label)
-    fig.tight_layout()
-    fig.savefig(path)
-    plt.close(fig)
 
 
 def _plot_state_centers(

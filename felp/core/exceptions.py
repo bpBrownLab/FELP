@@ -19,3 +19,7 @@ class ConversionError(FelpError):
 
 class MicrostateAssignmentError(FelpError):
     """Raised when a frame cannot be assigned to a microstate."""
+
+
+class ReweightingError(FelpError):
+    """Raised when a reweighting estimate is unsupported or ill-defined."""

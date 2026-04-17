@@ -6,6 +6,7 @@ from .exceptions import (
     DependencyError,
     FelpError,
     MicrostateAssignmentError,
+    ReweightingError,
 )
 from .models import (
     ALLOWED_MUTATION_TARGET_NAMES,
@@ -64,6 +65,7 @@ __all__ = [
     "ParallelConfig",
     "PerturbationConfig",
     "PhiPsiMeasurement",
+    "ReweightingError",
     "RestraintConfig",
     "RosettaConfig",
     "RunConfig",

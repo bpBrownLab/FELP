@@ -36,7 +36,7 @@ class MicrostateAtlas:
 
     definitions: tuple[MicrostateDefinition, ...]
     allow_unassigned: bool = False
-    use_loaded_reference_probabilities: bool = True
+    reference_probability_mode: str = "loaded"
 
     @classmethod
     def from_config(cls, config: MicrostateConfig) -> "MicrostateAtlas":
@@ -52,7 +52,7 @@ class MicrostateAtlas:
         return cls.from_definitions(
             definitions=definitions,
             allow_unassigned=config.allow_unassigned,
-            use_loaded_reference_probabilities=config.use_loaded_reference_probabilities,
+            reference_probability_mode=config.reference_probability_mode,
         )
 
     @classmethod
@@ -60,14 +60,14 @@ class MicrostateAtlas:
         cls,
         definitions: Iterable[MicrostateDefinition],
         allow_unassigned: bool = False,
-        use_loaded_reference_probabilities: bool = True,
+        reference_probability_mode: str = "loaded",
     ) -> "MicrostateAtlas":
         """Build an atlas directly from an iterable of definitions."""
 
         return cls(
             definitions=tuple(definitions),
             allow_unassigned=allow_unassigned,
-            use_loaded_reference_probabilities=use_loaded_reference_probabilities,
+            reference_probability_mode=reference_probability_mode,
         )
 
     def assign(
@@ -142,6 +142,7 @@ class MicrostateAtlas:
         return {
             "definition_count": len(self.definitions),
             "allow_unassigned": self.allow_unassigned,
+            "reference_probability_mode": self.reference_probability_mode,
             "state_ids": [definition.state_id for definition in self.definitions[:10]],
             "state_levels": state_levels,
             "cv_names": sorted(

@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass
+import json
+import math
 import os
 
 import numpy as np
 
-from felp.core import ConfigurationError
+from felp.core import ConfigurationError, K_BOLTZMANN_KJ_PER_MOL_K
+from felp.io import load_frame_results_csv
+from felp.reweighting import is_reweighting_eligible_frame
 
 from .common import (
     apply_publication_style,
@@ -16,7 +21,9 @@ from .common import (
     import_matplotlib,
     parse_optional_float,
     prepare_output_dir,
+    probability_surface_to_free_energy,
     read_csv_rows,
+    save_pcolormesh_landscape,
     scatter_state_projection,
     write_json,
 )
@@ -31,6 +38,8 @@ class FELPPlotConfig:
     raw_frame_results_csv: str | None = None
     temperature_kelvin: float = 300.0
     top_states: int = 40
+    fel_bins: int = 72
+    fel_max_points: int = 200_000
     overwrite: bool = False
 
     def validate(self) -> None:
@@ -50,6 +59,10 @@ class FELPPlotConfig:
             raise ConfigurationError("temperature_kelvin must be positive.")
         if self.top_states < 1:
             raise ConfigurationError("top_states must be at least 1.")
+        if self.fel_bins < 10:
+            raise ConfigurationError("fel_bins must be at least 10.")
+        if self.fel_max_points < 1:
+            raise ConfigurationError("fel_max_points must be at least 1.")
 
 
 def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
@@ -61,6 +74,7 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
     apply_publication_style()
 
     rows = read_csv_rows(config.microstate_summary_csv)
+    state_ids = [row.get("state_id", row["label"]) for row in rows]
     labels = [row["label"] for row in rows]
     reference_probabilities = np.asarray(
         [float(row["reference_probability"]) for row in rows],
@@ -109,6 +123,7 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
         reference_probabilities,
         target_probabilities,
     )
+    summary_metadata = _load_microstate_summary_metadata(rows)
 
     outputs = [
         _plot_occupancy_shift(
@@ -146,12 +161,60 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
             )
         )
 
+    phi_centers = np.asarray(
+        [_as_nan(parse_optional_float(row.get("phi_center"))) for row in rows],
+        dtype=float,
+    )
+    psi_centers = np.asarray(
+        [_as_nan(parse_optional_float(row.get("psi_center"))) for row in rows],
+        dtype=float,
+    )
+    outputs.extend(
+        _plot_phi_psi_state_landscapes(
+            plt=plt,
+            phi_centers=phi_centers,
+            psi_centers=psi_centers,
+            reference_probabilities=reference_probabilities,
+            target_probabilities=target_probabilities,
+            temperature_kelvin=config.temperature_kelvin,
+            output_dir=config.output_dir,
+        )
+    )
+
+    phi_psi_projection_available = False
     if config.raw_frame_results_csv:
+        frame_results = load_frame_results_csv(config.raw_frame_results_csv)
         outputs.append(
             _plot_delta_u_distribution(
                 plt=plt,
-                raw_frame_results_csv=config.raw_frame_results_csv,
+                frame_results=frame_results,
                 output_dir=config.output_dir,
+            )
+        )
+        projected_outputs = _plot_phi_psi_projected_landscapes(
+            plt=plt,
+            frame_results=frame_results,
+            state_ids=state_ids,
+            reference_probabilities=reference_probabilities,
+            temperature_kelvin=config.temperature_kelvin,
+            bins=config.fel_bins,
+            max_points=config.fel_max_points,
+            output_dir=config.output_dir,
+        )
+        if projected_outputs:
+            phi_psi_projection_available = True
+            outputs.extend(projected_outputs)
+    if np.isfinite(phi_centers).any() and np.isfinite(psi_centers).any():
+        outputs.extend(
+            _plot_discrete_microstate_ramachandran(
+                plt=plt,
+                phi_degrees=phi_centers,
+                psi_degrees=psi_centers,
+                free_energy_kj_mol=target_free_energy,
+                target_probability=target_probabilities,
+                labels=labels,
+                output_dir=config.output_dir,
+                temperature_kelvin=config.temperature_kelvin,
             )
         )
 
@@ -162,6 +225,16 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
         "kl_reference_to_target": float(kl_ref_to_target),
         "kl_target_to_reference": float(kl_target_to_ref),
         "jensen_shannon_divergence": float(js_divergence),
+        "reference_probability_source": summary_metadata.get("reference_probability_source"),
+        "prior_probability_mode": summary_metadata.get("prior_probability_mode"),
+        "phi_psi_frame_projection_available": phi_psi_projection_available,
+        "phi_psi_frame_projection_estimator": (
+            "w_ij proportional to pi_reference(i) * exp(-beta * delta_u_ij) / n_i"
+        ),
+        "state_reweighting_estimator": (
+            "pi_target(i) proportional to "
+            "pi_reference(i) * <exp(-beta * delta_u)>_i"
+        ),
         "generated_files": outputs,
     }
     write_json(os.path.join(config.output_dir, "plot_summary.json"), summary)
@@ -172,6 +245,20 @@ def _as_nan(value: float | None) -> float:
     """Convert an optional float into a finite-or-NaN plotting value."""
 
     return float("nan") if value is None else float(value)
+
+
+def _load_microstate_summary_metadata(rows: list[dict[str, str]]) -> dict[str, object]:
+    """Best-effort parse of shared per-state metadata from the summary CSV."""
+
+    for row in rows:
+        raw = row.get("metadata")
+        if raw in (None, ""):
+            continue
+        try:
+            return dict(json.loads(raw))
+        except json.JSONDecodeError:
+            continue
+    return {}
 
 
 def _safe_probabilities(values: np.ndarray) -> np.ndarray:
@@ -332,16 +419,30 @@ def _plot_projected_state_quantities(
 
 def _plot_delta_u_distribution(
     plt,
-    raw_frame_results_csv: str,
+    frame_results,
     output_dir: str,
 ) -> str:
     """Plot the distribution of per-frame deltaU values."""
 
-    rows = read_csv_rows(raw_frame_results_csv)
-    delta_u = np.asarray([float(row["delta_u_kj_mol"]) for row in rows], dtype=float)
+    delta_values: list[float] = []
+    for result in frame_results:
+        if not is_reweighting_eligible_frame(result):
+            continue
+        delta_values.append(float(result.delta_u_kj_mol))
+    delta_u = np.asarray(delta_values, dtype=float)
 
     fig, ax = plt.subplots(1, 1)
-    ax.hist(delta_u, bins=40, color="slategray", alpha=0.85)
+    if delta_u.size == 0:
+        ax.text(
+            0.5,
+            0.5,
+            "No finite ΔU samples",
+            transform=ax.transAxes,
+            ha="center",
+            va="center",
+        )
+    else:
+        ax.hist(delta_u, bins=40, color="slategray", alpha=0.85)
     ax.set_xlabel("Delta U (kJ/mol)")
     ax.set_ylabel("Frame Count")
     ax.set_title("Per-Frame Delta U Distribution")
@@ -351,3 +452,358 @@ def _plot_delta_u_distribution(
     fig.savefig(path)
     plt.close(fig)
     return path
+
+
+def _regular_centers_to_edges(
+    centers: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Infer regularly spaced histogram edges from state-center coordinates."""
+
+    finite = np.asarray(sorted(np.unique(centers[np.isfinite(centers)])), dtype=float)
+    if finite.size == 0:
+        return None
+    if finite.size == 1:
+        width = 360.0
+    else:
+        diffs = np.diff(finite)
+        if not np.allclose(diffs, diffs[0], atol=1.0e-6, rtol=1.0e-6):
+            return None
+        width = float(diffs[0])
+    edges = np.concatenate(([finite[0] - width / 2.0], finite + width / 2.0))
+    return finite, edges
+
+
+def _build_regular_state_grid(
+    phi_centers: np.ndarray,
+    psi_centers: np.ndarray,
+    values: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    """Build a rectangular state grid when the summary rows form a complete mesh."""
+
+    if not (
+        phi_centers.size == psi_centers.size == values.size
+        and np.isfinite(phi_centers).all()
+        and np.isfinite(psi_centers).all()
+    ):
+        return None
+    phi_grid = _regular_centers_to_edges(phi_centers)
+    psi_grid = _regular_centers_to_edges(psi_centers)
+    if phi_grid is None or psi_grid is None:
+        return None
+    phi_unique, phi_edges = phi_grid
+    psi_unique, psi_edges = psi_grid
+    if phi_unique.size * psi_unique.size != values.size:
+        return None
+
+    grid = np.full((phi_unique.size, psi_unique.size), np.nan, dtype=float)
+    phi_index = {float(value): index for index, value in enumerate(phi_unique)}
+    psi_index = {float(value): index for index, value in enumerate(psi_unique)}
+    for phi, psi, value in zip(phi_centers, psi_centers, values):
+        location = (phi_index[float(phi)], psi_index[float(psi)])
+        if not math.isnan(grid[location]):
+            return None
+        grid[location] = float(value)
+    if np.isnan(grid).any():
+        return None
+    return grid, phi_edges, psi_edges
+
+
+def _subsample_indices(total: int, max_points: int) -> np.ndarray:
+    if total <= max_points:
+        return np.arange(total, dtype=int)
+    return np.linspace(0, total - 1, max_points, dtype=int)
+
+
+def _plot_phi_psi_state_landscapes(
+    plt,
+    *,
+    phi_centers: np.ndarray,
+    psi_centers: np.ndarray,
+    reference_probabilities: np.ndarray,
+    target_probabilities: np.ndarray,
+    temperature_kelvin: float,
+    output_dir: str,
+) -> list[str]:
+    """Build Ramachandran-like free energy surfaces from discrete state probabilities."""
+
+    reference_grid_data = _build_regular_state_grid(
+        phi_centers,
+        psi_centers,
+        reference_probabilities,
+    )
+    target_grid_data = _build_regular_state_grid(
+        phi_centers,
+        psi_centers,
+        target_probabilities,
+    )
+    if reference_grid_data is None or target_grid_data is None:
+        return []
+    reference_grid, x_edges, y_edges = reference_grid_data
+    target_grid, _, _ = target_grid_data
+    reference_fe = probability_surface_to_free_energy(reference_grid, temperature_kelvin)
+    reweighted_fe = probability_surface_to_free_energy(target_grid, temperature_kelvin)
+
+    outputs: list[str] = []
+    outputs.append(
+        save_pcolormesh_landscape(
+            plt,
+            os.path.join(output_dir, "reference_phi_psi_state_free_energy_landscape.png"),
+            reference_fe,
+            x_edges,
+            y_edges,
+            title="Reference microstate free energy (phi, psi)",
+            colorbar_label="Relative free energy (kJ/mol)",
+            xlabel=r"$\phi$ (deg)",
+            ylabel=r"$\psi$ (deg)",
+        )
+    )
+    outputs.append(
+        save_pcolormesh_landscape(
+            plt,
+            os.path.join(output_dir, "reweighted_phi_psi_state_free_energy_landscape.png"),
+            reweighted_fe,
+            x_edges,
+            y_edges,
+            title="Reweighted microstate free energy (phi, psi)",
+            colorbar_label="Relative free energy (kJ/mol)",
+            xlabel=r"$\phi$ (deg)",
+            ylabel=r"$\psi$ (deg)",
+        )
+    )
+    return outputs
+
+
+def _sample_state_projection_points(
+    state_samples: dict[str, list[tuple[float, float, float]]],
+    max_points: int,
+) -> dict[str, list[tuple[float, float, float]]]:
+    """Deterministically subsample projection points while preserving state coverage."""
+
+    total_count = sum(len(values) for values in state_samples.values())
+    if total_count <= max_points:
+        return state_samples
+
+    sample_budget = max(max_points, len(state_samples))
+    sampled: dict[str, list[tuple[float, float, float]]] = {}
+    for state_id, values in state_samples.items():
+        target_count = max(
+            1,
+            int(round(len(values) * sample_budget / total_count)),
+        )
+        target_count = min(target_count, len(values))
+        sampled[state_id] = [values[index] for index in _subsample_indices(len(values), target_count)]
+    return sampled
+
+
+def _collect_phi_psi_projection_samples(
+    *,
+    frame_results,
+    reference_probability_by_state: dict[str, float],
+    temperature_kelvin: float,
+    max_points: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
+    """Collect exact phi/psi frame samples with state-consistent reference weights."""
+
+    grouped: dict[str, list[tuple[float, float, float]]] = defaultdict(list)
+    eligible_delta_values: list[float] = []
+    for result in frame_results:
+        if not is_reweighting_eligible_frame(result):
+            continue
+        if result.microstate_id not in reference_probability_by_state:
+            continue
+        if (
+            result.phi_degrees is None
+            or result.psi_degrees is None
+            or not math.isfinite(result.phi_degrees)
+            or not math.isfinite(result.psi_degrees)
+        ):
+            continue
+        grouped[result.microstate_id].append(
+            (
+                float(result.phi_degrees),
+                float(result.psi_degrees),
+                float(result.delta_u_kj_mol),
+            )
+        )
+        eligible_delta_values.append(float(result.delta_u_kj_mol))
+
+    if not eligible_delta_values:
+        return None
+
+    missing_positive_prior = [
+        state_id
+        for state_id, probability in reference_probability_by_state.items()
+        if probability > 0.0 and not grouped.get(state_id)
+    ]
+    if missing_positive_prior:
+        return None
+
+    sampled = _sample_state_projection_points(grouped, max_points)
+    beta = 1.0 / (K_BOLTZMANN_KJ_PER_MOL_K * temperature_kelvin)
+    delta_shift = min(eligible_delta_values)
+
+    phi_values: list[float] = []
+    psi_values: list[float] = []
+    reference_weights: list[float] = []
+    reweighted_weights: list[float] = []
+    for state_id, samples in sampled.items():
+        sample_count = len(samples)
+        if sample_count == 0:
+            continue
+        reference_probability = reference_probability_by_state.get(state_id, 0.0)
+        for phi, psi, delta_u in samples:
+            phi_values.append(phi)
+            psi_values.append(psi)
+            reference_weights.append(reference_probability / sample_count)
+            reweighted_weights.append(
+                reference_probability
+                * math.exp(-beta * (delta_u - delta_shift))
+                / sample_count
+            )
+
+    if not phi_values:
+        return None
+
+    return (
+        np.asarray(phi_values, dtype=float),
+        np.asarray(psi_values, dtype=float),
+        np.asarray(reference_weights, dtype=float),
+        np.asarray(reweighted_weights, dtype=float),
+    )
+
+
+def _plot_phi_psi_projected_landscapes(
+    plt,
+    *,
+    frame_results,
+    state_ids: list[str],
+    reference_probabilities: np.ndarray,
+    temperature_kelvin: float,
+    bins: int,
+    max_points: int,
+    output_dir: str,
+) -> list[str]:
+    """Project exact phi/psi frame samples using prior-consistent frame weights."""
+
+    reference_probability_by_state = {
+        state_id: float(probability)
+        for state_id, probability in zip(state_ids, reference_probabilities)
+    }
+    sampled = _collect_phi_psi_projection_samples(
+        frame_results=frame_results,
+        reference_probability_by_state=reference_probability_by_state,
+        temperature_kelvin=temperature_kelvin,
+        max_points=max_points,
+    )
+    if sampled is None:
+        return []
+
+    phi, psi, reference_weights, reweighted_weights = sampled
+    ram_range = ((-180.0, 180.0), (-180.0, 180.0))
+    reference_hist, x_edges, y_edges = np.histogram2d(
+        phi,
+        psi,
+        bins=bins,
+        range=ram_range,
+        weights=reference_weights,
+    )
+    reweighted_hist, _, _ = np.histogram2d(
+        phi,
+        psi,
+        bins=bins,
+        range=ram_range,
+        weights=reweighted_weights,
+    )
+    if reference_hist.sum() > 0.0:
+        reference_hist = reference_hist / float(reference_hist.sum())
+    if reweighted_hist.sum() > 0.0:
+        reweighted_hist = reweighted_hist / float(reweighted_hist.sum())
+    reference_fe = probability_surface_to_free_energy(reference_hist, temperature_kelvin)
+    reweighted_fe = probability_surface_to_free_energy(reweighted_hist, temperature_kelvin)
+
+    outputs: list[str] = []
+    outputs.append(
+        save_pcolormesh_landscape(
+            plt,
+            os.path.join(output_dir, "reference_phi_psi_free_energy_landscape.png"),
+            reference_fe,
+            x_edges,
+            y_edges,
+            title="Reference projected free energy (phi, psi)",
+            colorbar_label="Relative free energy (kJ/mol)",
+            xlabel=r"$\phi$ (deg)",
+            ylabel=r"$\psi$ (deg)",
+        )
+    )
+    outputs.append(
+        save_pcolormesh_landscape(
+            plt,
+            os.path.join(output_dir, "reweighted_phi_psi_free_energy_landscape.png"),
+            reweighted_fe,
+            x_edges,
+            y_edges,
+            title="Reweighted projected free energy (phi, psi)",
+            colorbar_label="Relative free energy (kJ/mol)",
+            xlabel=r"$\phi$ (deg)",
+            ylabel=r"$\psi$ (deg)",
+        )
+    )
+    return outputs
+
+
+def _plot_discrete_microstate_ramachandran(
+    plt,
+    *,
+    phi_degrees: np.ndarray,
+    psi_degrees: np.ndarray,
+    free_energy_kj_mol: np.ndarray,
+    target_probability: np.ndarray,
+    labels: list[str],
+    output_dir: str,
+    temperature_kelvin: float,
+) -> list[str]:
+    """Scatter microstate centers on (phi, psi) colored by reweighted free energy."""
+
+    mask = np.isfinite(phi_degrees) & np.isfinite(psi_degrees)
+    if int(mask.sum()) < 1:
+        return []
+
+    fe = np.asarray(free_energy_kj_mol, dtype=float)
+    if not np.isfinite(fe[mask]).any():
+        values = free_energy_from_probabilities(
+            np.asarray(target_probability, dtype=float),
+            temperature_kelvin=temperature_kelvin,
+        )
+        colorbar_label = "Relative free energy from P_target (kJ/mol)"
+        title = "Microstate centers (phi, psi)"
+    else:
+        values = fe
+        colorbar_label = "Relative free energy (kJ/mol)"
+        title = "Microstate centers (phi, psi)"
+
+    fig, ax = plt.subplots(1, 1)
+    scatter_state_projection(
+        ax=ax,
+        x=phi_degrees[mask],
+        y=psi_degrees[mask],
+        values=values[mask],
+        colorbar_label=colorbar_label,
+        title=title,
+        xlabel=r"$\phi$ center (deg)",
+        ylabel=r"$\psi$ center (deg)",
+    )
+    if int(mask.sum()) <= 24:
+        for index in np.flatnonzero(mask):
+            ax.annotate(
+                labels[index],
+                (phi_degrees[index], psi_degrees[index]),
+                textcoords="offset points",
+                xytext=(4, 4),
+                fontsize=7,
+                alpha=0.85,
+            )
+    fig.tight_layout()
+    path = os.path.join(output_dir, "discrete_microstate_free_energy_ramachandran.png")
+    fig.savefig(path)
+    plt.close(fig)
+    return [path]

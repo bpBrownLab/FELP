@@ -369,12 +369,26 @@ class MicrostateConfig:
     msm_bundle_dir: Optional[str] = None
     state_level: str = "cluster"
     allow_unassigned: bool = False
-    use_loaded_reference_probabilities: bool = True
+    reference_probability_mode: str = "loaded"
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "MicrostateConfig":
         """Rehydrate the config from a serialized dictionary."""
 
+        if "reference_probability_mode" in payload:
+            reference_probability_mode = payload.get(
+                "reference_probability_mode", "loaded"
+            )
+        elif "use_loaded_reference_probabilities" in payload:
+            reference_probability_mode = (
+                "loaded"
+                if payload.get("use_loaded_reference_probabilities", True)
+                else "raw_counts"
+            )
+        else:
+            reference_probability_mode = (
+                "raw_counts" if payload.get("source", "grid") == "grid" else "loaded"
+            )
         return cls(
             source=payload.get("source", "grid"),
             target_residue_number=payload.get("target_residue_number", 2),
@@ -384,9 +398,7 @@ class MicrostateConfig:
             msm_bundle_dir=payload.get("msm_bundle_dir"),
             state_level=payload.get("state_level", "cluster"),
             allow_unassigned=payload.get("allow_unassigned", False),
-            use_loaded_reference_probabilities=payload.get(
-                "use_loaded_reference_probabilities", True
-            ),
+            reference_probability_mode=str(reference_probability_mode),
         )
 
 
@@ -534,6 +546,20 @@ class RunConfig:
         if self.microstates.state_level not in {"cluster", "metastable"}:
             raise ConfigurationError(
                 f"Unsupported state level: {self.microstates.state_level}"
+            )
+        if self.microstates.reference_probability_mode not in {"loaded", "raw_counts"}:
+            raise ConfigurationError(
+                "microstates.reference_probability_mode must be one of: "
+                "loaded, raw_counts."
+            )
+        if (
+            self.microstates.source == "grid"
+            and self.microstates.reference_probability_mode == "loaded"
+        ):
+            raise ConfigurationError(
+                "Grid microstates do not embed reference probabilities. Use "
+                "microstates.reference_probability_mode='raw_counts' or switch to "
+                "source='file'/'msm_bundle' with loaded priors."
             )
         if self.parallel.workers < 1:
             raise ConfigurationError("Parallel worker count must be at least 1.")

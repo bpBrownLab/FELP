@@ -36,6 +36,8 @@ def test_build_run_config_from_cli(tmp_path: Path) -> None:
             "12",
             "--psi-bins",
             "18",
+            "--prior-probability-mode",
+            "raw_counts",
         ]
     )
 
@@ -46,6 +48,7 @@ def test_build_run_config_from_cli(tmp_path: Path) -> None:
     assert config.perturbation.target_residue_name == "ALA"
     assert config.microstates.phi_bins == 12
     assert config.microstates.psi_bins == 18
+    assert config.microstates.reference_probability_mode == "raw_counts"
     assert config.energy.backend == "openmm"
     assert [
         (spec.name, spec.kind, spec.residue_number)
@@ -74,11 +77,41 @@ def test_build_run_config_mute_pyrosetta(tmp_path: Path) -> None:
             "--output-dir",
             str(tmp_path / "out"),
             "--mute-pyrosetta",
+            "--prior-probability-mode",
+            "raw_counts",
         ]
     )
 
     config = build_run_config(namespace)
     assert config.rosetta.mute_tracers is True
+
+
+def test_build_run_config_prior_mode_alias(tmp_path: Path) -> None:
+    topology = tmp_path / "input.pdb"
+    trajectory = tmp_path / "input.xtc"
+    topology.write_text("placeholder\n", encoding="utf-8")
+    trajectory.write_text("placeholder\n", encoding="utf-8")
+
+    parser = build_parser()
+    namespace = parser.parse_args(
+        [
+            "run",
+            "--topology-file",
+            str(topology),
+            "--trajectory-file",
+            str(trajectory),
+            "--target-residue-number",
+            "2",
+            "--target-residue-name",
+            "ALA",
+            "--output-dir",
+            str(tmp_path / "out"),
+            "--ignore-loaded-reference-probabilities",
+        ]
+    )
+
+    config = build_run_config(namespace)
+    assert config.microstates.reference_probability_mode == "raw_counts"
 
 
 def test_build_run_config_with_msm_bundle(tmp_path: Path) -> None:
@@ -116,6 +149,7 @@ def test_build_run_config_with_msm_bundle(tmp_path: Path) -> None:
     assert config.microstates.source == "msm_bundle"
     assert config.microstates.msm_bundle_dir == str(bundle_dir)
     assert config.microstates.state_level == "metastable"
+    assert config.microstates.reference_probability_mode == "loaded"
 
 
 def test_build_run_config_with_custom_backbone_cvs_and_mutation_aliases(
@@ -175,6 +209,7 @@ def test_build_run_config_with_custom_backbone_cvs_and_mutation_aliases(
         (spec.name, spec.kind, spec.residue_number)
         for spec in config.restraints.cv_specs
     ] == [("phi", "phi", 2), ("omega", "omega", 2)]
+    assert config.microstates.reference_probability_mode == "loaded"
 
 
 def test_build_msm_fit_config_from_cli(tmp_path: Path) -> None:
@@ -282,6 +317,8 @@ def test_build_plot_configs_from_cli(tmp_path: Path) -> None:
             str(frame_csv),
             "--output-dir",
             str(tmp_path / "felp_plots"),
+            "--fel-bins",
+            "36",
         ]
     )
 
@@ -291,3 +328,4 @@ def test_build_plot_configs_from_cli(tmp_path: Path) -> None:
     assert msm_config.output_dir.endswith("msm_plots")
     assert felp_config.raw_frame_results_csv == str(frame_csv)
     assert felp_config.output_dir.endswith("felp_plots")
+    assert felp_config.fel_bins == 36

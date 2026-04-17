@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections import Counter
-import csv
 import json
 from typing import Sequence
 
@@ -16,8 +15,8 @@ from felp.cli import (
     build_parser,
     build_run_config,
 )
-from felp.core import FrameResult, OutputConfig
-from felp.io import ResultsWriter, TrajectoryLoader
+from felp.core import OutputConfig
+from felp.io import ResultsWriter, TrajectoryLoader, load_frame_results_csv
 from felp.msm import PyEMMAPipeline, export_state_samples, load_bundle
 from felp.parallel import FrameExecutor
 from felp.plotting import generate_felp_plots, generate_msm_plots
@@ -28,61 +27,8 @@ from felp.reweighting import (
     is_reweighting_eligible_frame,
 )
 
-
-def _parse_optional_int(value: str | None) -> int | None:
-    if value in (None, ""):
-        return None
-    return int(value)
-
-
-def _parse_optional_float(value: str | None) -> float | None:
-    if value in (None, ""):
-        return None
-    return float(value)
-
-
 def _write_stdout(payload: dict) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True))
-
-
-def _load_frame_results_csv(path: str) -> list[FrameResult]:
-    """Read frame-level FELP results from an arbitrary CSV path."""
-
-    frame_results: list[FrameResult] = []
-    with open(path, newline="", encoding="utf-8") as handle:
-        reader = csv.DictReader(handle)
-        for row in reader:
-            frame_results.append(
-                FrameResult(
-                    frame_index=int(row["frame_index"]),
-                    stride_number=int(row["stride_number"]),
-                    trajectory_id=_parse_optional_int(row.get("trajectory_id")),
-                    source_frame_index=_parse_optional_int(row.get("source_frame_index")),
-                    microstate_id=row["microstate_id"],
-                    microstate_label=row["microstate_label"],
-                    phi_degrees=_parse_optional_float(row.get("phi_degrees")),
-                    psi_degrees=_parse_optional_float(row.get("psi_degrees")),
-                    reference_energy_kj_mol=float(row["reference_energy_kj_mol"]),
-                    perturbed_energy_kj_mol=float(row["perturbed_energy_kj_mol"]),
-                    delta_u_kj_mol=float(row["delta_u_kj_mol"]),
-                    reference_relaxed_phi_degrees=_parse_optional_float(
-                        row.get("reference_relaxed_phi_degrees")
-                    ),
-                    reference_relaxed_psi_degrees=_parse_optional_float(
-                        row.get("reference_relaxed_psi_degrees")
-                    ),
-                    perturbed_relaxed_phi_degrees=_parse_optional_float(
-                        row.get("perturbed_relaxed_phi_degrees")
-                    ),
-                    perturbed_relaxed_psi_degrees=_parse_optional_float(
-                        row.get("perturbed_relaxed_psi_degrees")
-                    ),
-                    assignment_source=row.get("assignment_source", "phi_psi"),
-                    state_level=row.get("state_level", "microstate"),
-                    metadata=json.loads(row["metadata"]) if row["metadata"] else {},
-                )
-            )
-    return frame_results
 
 
 def _build_execution_context(config):
@@ -143,6 +89,17 @@ def run_pipeline(config) -> dict:
         for result in all_frame_results
         if result.metadata.get("status") != "failed"
     ]
+    empirical_histogram = Counter(result.microstate_label for result in histogram_frames)
+    reference_probability_source = None
+    prior_probability_mode = None
+    unsupported_state_count = 0
+    unsupported_state_ids: list[str] = []
+    if microstate_results:
+        metadata = microstate_results[0].metadata
+        reference_probability_source = metadata.get("reference_probability_source")
+        prior_probability_mode = metadata.get("prior_probability_mode")
+        unsupported_state_count = int(metadata.get("unsupported_state_count", 0))
+        unsupported_state_ids = list(metadata.get("unsupported_state_ids", []))
 
     summary = {
         "frame_count": len(all_frame_results),
@@ -151,8 +108,21 @@ def run_pipeline(config) -> dict:
         "new_failed_frame_count": new_failed_frame_count,
         "reweighted_frame_count": reweighted_frame_count,
         "microstate_count": len(microstate_results),
-        "microstate_histogram": dict(
-            Counter(result.microstate_label for result in histogram_frames)
+        "microstate_histogram": dict(empirical_histogram),
+        "microstate_histogram_kind": "empirical_frame_counts",
+        "reference_probability_source": reference_probability_source,
+        "prior_probability_mode": prior_probability_mode,
+        "reference_probability_total": float(
+            sum(result.reference_probability for result in microstate_results)
+        ),
+        "target_probability_total": float(
+            sum(result.target_probability for result in microstate_results)
+        ),
+        "unsupported_state_count": unsupported_state_count,
+        "unsupported_state_ids": unsupported_state_ids,
+        "state_reweighting_estimator": (
+            "pi_target(i) proportional to "
+            "pi_reference(i) * <exp(-beta * delta_u)>_i"
         ),
         "microstate_source": config.microstates.source,
         "microstate_definition_state_level": config.microstates.state_level,
@@ -187,16 +157,39 @@ def summarize_results(namespace) -> dict:
     )
     writer.prepare_output_dir()
 
-    frame_results = _load_frame_results_csv(namespace.raw_frame_results)
+    frame_results = load_frame_results_csv(namespace.raw_frame_results)
 
     microstate_results = ReweightingAggregator(namespace.temperature_kelvin).aggregate(
         frame_results,
         atlas,
     )
     writer.write_microstate_results(microstate_results)
+    reference_probability_source = None
+    prior_probability_mode = None
+    unsupported_state_count = 0
+    unsupported_state_ids: list[str] = []
+    if microstate_results:
+        metadata = microstate_results[0].metadata
+        reference_probability_source = metadata.get("reference_probability_source")
+        prior_probability_mode = metadata.get("prior_probability_mode")
+        unsupported_state_count = int(metadata.get("unsupported_state_count", 0))
+        unsupported_state_ids = list(metadata.get("unsupported_state_ids", []))
     summary = {
         "frame_count": len(frame_results),
+        "reweighted_frame_count": sum(
+            1 for result in frame_results if is_reweighting_eligible_frame(result)
+        ),
         "microstate_count": len(microstate_results),
+        "reference_probability_source": reference_probability_source,
+        "prior_probability_mode": prior_probability_mode,
+        "reference_probability_total": float(
+            sum(result.reference_probability for result in microstate_results)
+        ),
+        "target_probability_total": float(
+            sum(result.target_probability for result in microstate_results)
+        ),
+        "unsupported_state_count": unsupported_state_count,
+        "unsupported_state_ids": unsupported_state_ids,
         "output_dir": namespace.output_dir,
     }
     writer.write_summary(summary)

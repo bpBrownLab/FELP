@@ -117,9 +117,23 @@ def _add_common_microstate_arguments(parser: argparse.ArgumentParser) -> None:
         help="Allow frames outside the supplied microstate definitions.",
     )
     group.add_argument(
+        "--prior-probability-mode",
+        choices=("loaded", "raw_counts"),
+        default="loaded",
+        help=(
+            "How FELP chooses the reference microstate prior. "
+            "'loaded' uses probabilities embedded in the microstate file or MSM "
+            "bundle; 'raw_counts' uses empirical frame counts from the evaluated "
+            "reference frames."
+        ),
+    )
+    group.add_argument(
         "--ignore-loaded-reference-probabilities",
         action="store_true",
-        help="Ignore reference probabilities embedded in a microstate file.",
+        help=(
+            "Deprecated alias for '--prior-probability-mode raw_counts'. "
+            "When set, raw frame counts are used as the reference prior."
+        ),
     )
 
 
@@ -594,6 +608,18 @@ def _add_felp_plot_arguments(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Allow overwriting an existing plot output directory.",
     )
+    parser.add_argument(
+        "--fel-bins",
+        type=int,
+        default=72,
+        help="Bin count per axis for Ramachandran (phi, psi) free energy heatmaps.",
+    )
+    parser.add_argument(
+        "--fel-max-points",
+        type=int,
+        default=200_000,
+        help="Maximum frames used when building phi/psi heatmaps (uniform subsampling).",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -699,6 +725,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def build_run_config(namespace: argparse.Namespace) -> RunConfig:
     """Construct and validate a RunConfig from the parsed CLI namespace."""
+
+    reference_probability_mode = namespace.prior_probability_mode
+    if namespace.ignore_loaded_reference_probabilities:
+        reference_probability_mode = "raw_counts"
+
     config = RunConfig(
         input=InputConfig(
             topology_file=namespace.topology_file,
@@ -753,7 +784,7 @@ def build_run_config(namespace: argparse.Namespace) -> RunConfig:
             msm_bundle_dir=namespace.msm_bundle_dir,
             state_level=namespace.state_level,
             allow_unassigned=namespace.allow_unassigned,
-            use_loaded_reference_probabilities=not namespace.ignore_loaded_reference_probabilities,
+            reference_probability_mode=reference_probability_mode,
         ),
         parallel=ParallelConfig(
             workers=namespace.workers,
@@ -777,6 +808,11 @@ def build_microstate_config(
     namespace: argparse.Namespace, target_residue_number: int = 2
 ) -> MicrostateConfig:
     """Construct a MicrostateConfig from the parsed CLI namespace."""
+
+    reference_probability_mode = namespace.prior_probability_mode
+    if namespace.ignore_loaded_reference_probabilities:
+        reference_probability_mode = "raw_counts"
+
     return MicrostateConfig(
         source=namespace.microstate_source,
         target_residue_number=target_residue_number,
@@ -786,7 +822,7 @@ def build_microstate_config(
         msm_bundle_dir=namespace.msm_bundle_dir,
         state_level=namespace.state_level,
         allow_unassigned=namespace.allow_unassigned,
-        use_loaded_reference_probabilities=not namespace.ignore_loaded_reference_probabilities,
+        reference_probability_mode=reference_probability_mode,
     )
 
 
@@ -863,6 +899,8 @@ def build_felp_plot_config(namespace: argparse.Namespace) -> FELPPlotConfig:
         output_dir=namespace.output_dir,
         temperature_kelvin=namespace.temperature_kelvin,
         top_states=namespace.top_states,
+        fel_bins=namespace.fel_bins,
+        fel_max_points=namespace.fel_max_points,
         overwrite=namespace.overwrite,
     )
     config.validate()

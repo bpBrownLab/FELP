@@ -6,6 +6,7 @@ import csv
 import json
 import os
 import shutil
+import tempfile
 from typing import Iterable
 
 import numpy as np
@@ -62,8 +63,25 @@ def prepare_output_dir(output_dir: str, overwrite: bool = False) -> None:
 def write_json(path: str, payload: dict) -> None:
     """Write a JSON payload to disk with stable formatting."""
 
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2, sort_keys=True)
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    fd, temp_path = tempfile.mkstemp(
+        dir=directory,
+        prefix=f".{os.path.basename(path)}.",
+        text=True,
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+    except Exception:
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+        raise
 
 
 def read_csv_rows(path: str) -> list[dict[str, str]]:
@@ -150,6 +168,8 @@ def scatter_state_projection(
     values: np.ndarray,
     colorbar_label: str,
     title: str,
+    xlabel: str = "Projection 1",
+    ylabel: str = "Projection 2",
 ) -> None:
     """Draw a colored scatter plot for state-wise projected values."""
 
@@ -163,10 +183,43 @@ def scatter_state_projection(
         linewidths=0.3,
     )
     ax.set_title(title)
-    ax.set_xlabel("Projection 1")
-    ax.set_ylabel("Projection 2")
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
     colorbar = ax.figure.colorbar(scatter, ax=ax)
     colorbar.set_label(colorbar_label)
+
+
+def save_pcolormesh_landscape(
+    plt,
+    path: str,
+    z: np.ndarray,
+    x_edges: np.ndarray,
+    y_edges: np.ndarray,
+    *,
+    title: str,
+    colorbar_label: str,
+    xlabel: str,
+    ylabel: str,
+) -> str:
+    """Render a 2D surface on a histogram grid (e.g. probability or free energy)."""
+
+    fig, ax = plt.subplots(1, 1)
+    image = ax.pcolormesh(
+        x_edges,
+        y_edges,
+        z.T,
+        shading="auto",
+        cmap="viridis",
+    )
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    colorbar = fig.colorbar(image, ax=ax)
+    colorbar.set_label(colorbar_label)
+    fig.tight_layout()
+    fig.savefig(path)
+    plt.close(fig)
+    return path
 
 
 def finite_top_indices(values: Iterable[float], count: int) -> np.ndarray:

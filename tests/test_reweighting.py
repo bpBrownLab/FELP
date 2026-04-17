@@ -4,7 +4,9 @@ import json
 import math
 from pathlib import Path
 
-from felp.core import FrameResult, MicrostateDefinition
+import pytest
+
+from felp.core import FrameResult, MicrostateDefinition, ReweightingError
 from felp.reweighting import (
     MicrostateAtlas,
     ReweightingAggregator,
@@ -35,7 +37,8 @@ def test_reweighting_uses_empirical_reference_probabilities() -> None:
         definitions=(
             MicrostateDefinition("a", "a", (-180.0, 0.0), (-180.0, 180.0)),
             MicrostateDefinition("b", "b", (0.0, 180.0), (-180.0, 180.0)),
-        )
+        ),
+        reference_probability_mode="raw_counts",
     )
     aggregator = ReweightingAggregator(temperature_kelvin=300.0)
     results = aggregator.aggregate(
@@ -52,6 +55,7 @@ def test_reweighting_uses_empirical_reference_probabilities() -> None:
     assert result_by_id["b"].reference_probability == 1.0 / 3.0
     assert result_by_id["a"].target_probability > result_by_id["b"].target_probability
     assert abs(sum(result.target_probability for result in results) - 1.0) < 1.0e-8
+    assert result_by_id["a"].metadata["reference_probability_source"] == "raw_counts"
 
 
 def test_reweighting_ignores_failed_frames() -> None:
@@ -59,7 +63,8 @@ def test_reweighting_ignores_failed_frames() -> None:
         definitions=(
             MicrostateDefinition("a", "a", (-180.0, 0.0), (-180.0, 180.0)),
             MicrostateDefinition("b", "b", (0.0, 180.0), (-180.0, 180.0)),
-        )
+        ),
+        reference_probability_mode="raw_counts",
     )
     aggregator = ReweightingAggregator(temperature_kelvin=300.0)
 
@@ -95,6 +100,49 @@ def test_reweighting_ignores_failed_frames() -> None:
     assert not math.isnan(float(result_by_id["a"].reweight_factor))
 
 
+def test_reweighting_requires_explicit_loaded_priors() -> None:
+    atlas = MicrostateAtlas(
+        definitions=(
+            MicrostateDefinition("a", "a", (-180.0, 0.0), (-180.0, 180.0)),
+            MicrostateDefinition("b", "b", (0.0, 180.0), (-180.0, 180.0)),
+        ),
+        reference_probability_mode="loaded",
+    )
+    aggregator = ReweightingAggregator(temperature_kelvin=300.0)
+
+    with pytest.raises(ReweightingError, match="reference_probability"):
+        aggregator.aggregate(
+            [_frame_result(0, "a", 0.0), _frame_result(1, "b", 0.0)],
+            atlas,
+        )
+
+
+def test_reweighting_rejects_nonzero_prior_states_without_frames() -> None:
+    atlas = MicrostateAtlas(
+        definitions=(
+            MicrostateDefinition(
+                "a",
+                "a",
+                (-180.0, 0.0),
+                (-180.0, 180.0),
+                reference_probability=0.25,
+            ),
+            MicrostateDefinition(
+                "b",
+                "b",
+                (0.0, 180.0),
+                (-180.0, 180.0),
+                reference_probability=0.75,
+            ),
+        ),
+        reference_probability_mode="loaded",
+    )
+    aggregator = ReweightingAggregator(temperature_kelvin=300.0)
+
+    with pytest.raises(ReweightingError, match="positive reference prior"):
+        aggregator.aggregate([_frame_result(0, "a", 0.0)], atlas)
+
+
 def test_reweighting_uses_loaded_reference_probabilities() -> None:
     atlas = MicrostateAtlas(
         definitions=(
@@ -113,7 +161,7 @@ def test_reweighting_uses_loaded_reference_probabilities() -> None:
                 reference_probability=0.75,
             ),
         ),
-        use_loaded_reference_probabilities=True,
+        reference_probability_mode="loaded",
     )
     aggregator = ReweightingAggregator(temperature_kelvin=300.0)
     results = aggregator.aggregate(
@@ -124,6 +172,7 @@ def test_reweighting_uses_loaded_reference_probabilities() -> None:
     result_by_id = {result.state_id: result for result in results}
     assert abs(result_by_id["a"].reference_probability - 0.25) < 1.0e-8
     assert abs(result_by_id["b"].reference_probability - 0.75) < 1.0e-8
+    assert result_by_id["a"].metadata["reference_probability_source"] == "loaded"
 
 
 def test_reweighting_supports_discrete_states_with_plot_coordinates() -> None:
@@ -146,7 +195,7 @@ def test_reweighting_supports_discrete_states_with_plot_coordinates() -> None:
                 state_level="cluster",
             ),
         ),
-        use_loaded_reference_probabilities=True,
+        reference_probability_mode="loaded",
     )
     aggregator = ReweightingAggregator(temperature_kelvin=300.0)
     results = aggregator.aggregate(
