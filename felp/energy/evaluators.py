@@ -7,9 +7,25 @@ import math
 from dataclasses import dataclass
 from typing import Iterable
 
-from felp.core import DihedralRestraintSpec, EnergyResult
+from felp.core import ConfigurationError, DihedralRestraintSpec, EnergyResult
 from felp.conversion import StructureConversionService
 from felp.restraints.protocols import find_structure_atom
+
+
+def resolve_openmm_gpu_platform_name() -> str:
+    """Return the first available OpenMM GPU platform name (CUDA, else OpenCL)."""
+
+    import openmm
+
+    for name in ("CUDA", "OpenCL"):
+        try:
+            openmm.Platform.getPlatformByName(name)
+            return name
+        except Exception:
+            continue
+    raise ConfigurationError(
+        "OpenMM GPU requested (--gpu) but neither CUDA nor OpenCL platforms are available."
+    )
 
 
 def _import_openmm():

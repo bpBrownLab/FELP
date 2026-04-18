@@ -19,6 +19,7 @@ from felp.core import (
     ConfigurationError,
     default_backbone_cv_specs,
 )
+from felp.energy import resolve_openmm_gpu_platform_name
 from felp.msm import MSMFitConfig, MSMSampleExportConfig
 from felp.plotting import FELPPlotConfig, MSMPlotConfig
 
@@ -329,7 +330,24 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
     )
     energy_group.add_argument(
         "--platform-name",
-        help="Optional OpenMM platform name, such as CPU or CUDA.",
+        help=(
+            "Optional explicit OpenMM platform name (e.g. CPU, CUDA, OpenCL). "
+            "Mutually exclusive with --cpu and --gpu."
+        ),
+    )
+    openmm_device = energy_group.add_mutually_exclusive_group()
+    openmm_device.add_argument(
+        "--cpu",
+        action="store_true",
+        help="Use the OpenMM CPU platform for energy minimization and scoring.",
+    )
+    openmm_device.add_argument(
+        "--gpu",
+        action="store_true",
+        help=(
+            "Use an OpenMM GPU platform: CUDA if available, otherwise OpenCL. "
+            "Only applies when --energy-backend is openmm."
+        ),
     )
 
     _add_common_microstate_arguments(parser)
@@ -740,6 +758,21 @@ def build_run_config(namespace: argparse.Namespace) -> RunConfig:
     if namespace.ignore_loaded_reference_probabilities:
         reference_probability_mode = "raw_counts"
 
+    if namespace.cpu or namespace.gpu:
+        if namespace.energy_backend != "openmm":
+            raise ConfigurationError(
+                "--cpu and --gpu are only supported with --energy-backend openmm."
+            )
+    platform_name = namespace.platform_name
+    if namespace.cpu:
+        if namespace.platform_name is not None:
+            raise ConfigurationError("Do not combine --cpu with --platform-name.")
+        platform_name = "CPU"
+    elif namespace.gpu:
+        if namespace.platform_name is not None:
+            raise ConfigurationError("Do not combine --gpu with --platform-name.")
+        platform_name = resolve_openmm_gpu_platform_name()
+
     config = RunConfig(
         input=InputConfig(
             topology_file=namespace.topology_file,
@@ -782,7 +815,7 @@ def build_run_config(namespace: argparse.Namespace) -> RunConfig:
             nonbonded_cutoff_nm=namespace.nonbonded_cutoff_nm,
             minimization_tolerance_kj_per_mol_nm=namespace.minimization_tolerance_kj_per_mol_nm,
             minimization_max_iterations=namespace.minimization_max_iterations,
-            platform_name=namespace.platform_name,
+            platform_name=platform_name,
             rosetta_score_function=namespace.rosetta_score_function,
         ),
         microstates=MicrostateConfig(

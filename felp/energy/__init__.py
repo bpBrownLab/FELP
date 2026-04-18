@@ -5,6 +5,7 @@ from .evaluators import (
     OpenMMEnergyEvaluator,
     RosettaEnergyEvaluator,
     build_energy_evaluator,
+    resolve_openmm_gpu_platform_name,
 )
 
 __all__ = [
@@ -12,4 +13,5 @@ __all__ = [
     "OpenMMEnergyEvaluator",
     "RosettaEnergyEvaluator",
     "build_energy_evaluator",
+    "resolve_openmm_gpu_platform_name",
 ]

@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
+from felp.core import ConfigurationError
 from felp.cli import (
     build_felp_plot_config,
     build_msm_fit_config,
@@ -54,6 +57,97 @@ def test_build_run_config_from_cli(tmp_path: Path) -> None:
         (spec.name, spec.kind, spec.residue_number)
         for spec in config.restraints.cv_specs
     ] == [("phi", "phi", 2), ("psi", "psi", 2)]
+
+
+def test_build_run_config_openmm_cpu_flag(tmp_path: Path) -> None:
+    topology = tmp_path / "input.pdb"
+    trajectory = tmp_path / "input.xtc"
+    topology.write_text("placeholder\n", encoding="utf-8")
+    trajectory.write_text("placeholder\n", encoding="utf-8")
+
+    parser = build_parser()
+    namespace = parser.parse_args(
+        [
+            "run",
+            "--topology-file",
+            str(topology),
+            "--trajectory-file",
+            str(trajectory),
+            "--target-residue-number",
+            "2",
+            "--target-residue-name",
+            "ALA",
+            "--output-dir",
+            str(tmp_path / "out"),
+            "--prior-probability-mode",
+            "raw_counts",
+            "--cpu",
+        ]
+    )
+    config = build_run_config(namespace)
+    assert config.energy.platform_name == "CPU"
+
+
+def test_build_run_config_cpu_conflicts_with_platform_name(tmp_path: Path) -> None:
+    topology = tmp_path / "input.pdb"
+    trajectory = tmp_path / "input.xtc"
+    topology.write_text("placeholder\n", encoding="utf-8")
+    trajectory.write_text("placeholder\n", encoding="utf-8")
+
+    parser = build_parser()
+    namespace = parser.parse_args(
+        [
+            "run",
+            "--topology-file",
+            str(topology),
+            "--trajectory-file",
+            str(trajectory),
+            "--target-residue-number",
+            "2",
+            "--target-residue-name",
+            "ALA",
+            "--output-dir",
+            str(tmp_path / "out"),
+            "--prior-probability-mode",
+            "raw_counts",
+            "--cpu",
+            "--platform-name",
+            "CUDA",
+        ]
+    )
+    with pytest.raises(ConfigurationError, match="--cpu"):
+        build_run_config(namespace)
+
+
+def test_build_run_config_gpu_requires_openmm_backend(tmp_path: Path) -> None:
+    topology = tmp_path / "input.pdb"
+    trajectory = tmp_path / "input.xtc"
+    topology.write_text("placeholder\n", encoding="utf-8")
+    trajectory.write_text("placeholder\n", encoding="utf-8")
+
+    parser = build_parser()
+    namespace = parser.parse_args(
+        [
+            "run",
+            "--topology-file",
+            str(topology),
+            "--trajectory-file",
+            str(trajectory),
+            "--target-residue-number",
+            "2",
+            "--target-residue-name",
+            "ALA",
+            "--output-dir",
+            str(tmp_path / "out"),
+            "--prior-probability-mode",
+            "raw_counts",
+            "--energy-backend",
+            "rosetta",
+            "--gpu",
+        ]
+    )
+    with pytest.raises(ConfigurationError, match="--gpu"):
+        build_run_config(namespace)
 
 
 def test_build_run_config_mute_pyrosetta(tmp_path: Path) -> None:
