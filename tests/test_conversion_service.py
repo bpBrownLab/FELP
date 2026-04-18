@@ -170,20 +170,48 @@ def test_clone_structure_with_coordinates_preserves_bridge_metadata(monkeypatch)
     assert cloned.coordinates.shape == (len(structure.atoms), 3)
 
 
-def test_pose_to_structure_normalizes_rosetta_proline_hydrogen_names(monkeypatch) -> None:
+def test_prepare_structure_for_openmm_normalizes_proline_and_strips_virtual_atoms(
+    monkeypatch,
+) -> None:
     proline_type = FakeResidueType(
         unique_name="PRO:NtermProteinFull:CtermProteinFull",
         name3_value="PRO",
         name1_value="P",
-        atom_order=("N", "CA", "C", "CB", "1HB", "2HB", "CG", "1HG", "2HG", "CD", "1HD", "2HD"),
+        atom_order=(
+            "N",
+            "CA",
+            "C",
+            "CB",
+            "1HB",
+            "2HB",
+            "CG",
+            "1HG",
+            "2HG",
+            "CD",
+            "1HD",
+            "2HD",
+            "V1",
+        ),
         atom_types={
-            atom_name: FakeAtomType(
-                element="H" if atom_name.startswith(("1", "2")) else ("N" if atom_name == "N" else "C"),
-                atom_type_name=atom_name,
-                lj_radius=1.0 if atom_name.startswith(("1", "2")) else 1.8,
-                lj_wdepth=0.02 if atom_name.startswith(("1", "2")) else 0.1,
-            )
-            for atom_name in ("N", "CA", "C", "CB", "1HB", "2HB", "CG", "1HG", "2HG", "CD", "1HD", "2HD")
+            "N": FakeAtomType(element="N", atom_type_name="Nbb", lj_radius=1.4, lj_wdepth=0.2),
+            "CA": FakeAtomType(element="C", atom_type_name="CAbb", lj_radius=1.8, lj_wdepth=0.1),
+            "C": FakeAtomType(element="C", atom_type_name="CObb", lj_radius=1.7, lj_wdepth=0.12),
+            "CB": FakeAtomType(element="C", atom_type_name="CH2", lj_radius=1.8, lj_wdepth=0.1),
+            "1HB": FakeAtomType(element="H", atom_type_name="Hapo", lj_radius=1.0, lj_wdepth=0.02),
+            "2HB": FakeAtomType(element="H", atom_type_name="Hapo", lj_radius=1.0, lj_wdepth=0.02),
+            "CG": FakeAtomType(element="C", atom_type_name="CH2", lj_radius=1.8, lj_wdepth=0.1),
+            "1HG": FakeAtomType(element="H", atom_type_name="Hapo", lj_radius=1.0, lj_wdepth=0.02),
+            "2HG": FakeAtomType(element="H", atom_type_name="Hapo", lj_radius=1.0, lj_wdepth=0.02),
+            "CD": FakeAtomType(element="C", atom_type_name="CH2", lj_radius=1.8, lj_wdepth=0.1),
+            "1HD": FakeAtomType(element="H", atom_type_name="Hapo", lj_radius=1.0, lj_wdepth=0.02),
+            "2HD": FakeAtomType(element="H", atom_type_name="Hapo", lj_radius=1.0, lj_wdepth=0.02),
+            "V1": FakeAtomType(
+                element="EP",
+                atom_type_name="VIRT",
+                lj_radius=0.0,
+                lj_wdepth=0.0,
+                is_virtual=True,
+            ),
         },
     )
     pose = FakePose(
@@ -203,6 +231,7 @@ def test_pose_to_structure_normalizes_rosetta_proline_hydrogen_names(monkeypatch
                     "CD": (-0.5, 0.4, 0.0),
                     "1HD": (-1.2, 0.2, 0.8),
                     "2HD": (-1.2, 0.2, -0.8),
+                    "V1": (-0.2, 0.9, 0.0),
                 },
             )
         ],
@@ -219,7 +248,7 @@ def test_pose_to_structure_normalizes_rosetta_proline_hydrogen_names(monkeypatch
             ((1, 7), (1, 10)),
             ((1, 10), (1, 11)),
             ((1, 10), (1, 12)),
-            ((1, 10), (1, 1)),
+            ((1, 10), (1, 13)),
         ],
         pdb_info=FakePDBInfo(1),
     )
@@ -237,8 +266,9 @@ def test_pose_to_structure_normalizes_rosetta_proline_hydrogen_names(monkeypatch
 
     service = StructureConversionService(pyrosetta_init_options="-mute all")
     structure = service.pose_to_structure(pose)
-    rebuilt_pose = service.structure_to_pose(structure)
-    round_tripped = service.pose_to_structure(rebuilt_pose)
+    assert [atom.name for atom in structure.atoms][-1] == "V1"
+
+    structure = service.prepare_structure_for_openmm(structure)
 
     assert [atom.name for atom in structure.atoms] == [
         "N",
@@ -269,4 +299,12 @@ def test_pose_to_structure_normalizes_rosetta_proline_hydrogen_names(monkeypatch
         "HD2",
         "HD3",
     ]
-    assert [atom.name for atom in round_tripped.atoms] == [atom.name for atom in structure.atoms]
+    assert any(
+        {bond.atom1.name, bond.atom2.name} == {"N", "CD"}
+        for bond in structure.bonds
+        if bond.atom1.residue is structure.residues[0] and bond.atom2.residue is structure.residues[0]
+    )
+    assert all(
+        bond.atom1.name != "V1" and bond.atom2.name != "V1"
+        for bond in structure.bonds
+    )

@@ -167,6 +167,9 @@ def process_frame_job(job: SnapshotJob) -> FrameResult:
         reference_structure = _WORKER_CONVERSION_SERVICE.pose_to_structure(
             reference_pose
         )
+        reference_structure = _WORKER_CONVERSION_SERVICE.prepare_structure_for_openmm(
+            reference_structure
+        )
         perturbed_pose = _WORKER_PERTURBATION_PROTOCOL.apply_perturbation(
             reference_pose,
             _WORKER_CONFIG.perturbation.target_residue_number,
@@ -176,6 +179,9 @@ def process_frame_job(job: SnapshotJob) -> FrameResult:
         )
         perturbed_structure = _WORKER_CONVERSION_SERVICE.pose_to_structure(
             perturbed_pose
+        )
+        perturbed_structure = _WORKER_CONVERSION_SERVICE.prepare_structure_for_openmm(
+            perturbed_structure
         )
         reference_energy = _WORKER_ENERGY_EVALUATOR.evaluate(
             structure=reference_structure,

@@ -221,6 +221,83 @@ def _normalize_pose_derived_structure_names(structure) -> None:
             atom_meta["structure_name"] = normalized_name
 
 
+def _is_virtual_pose_derived_atom(atom, atom_meta=None) -> bool:
+    """Return whether a Rosetta-derived ParmEd atom is virtual."""
+
+    if isinstance(atom_meta, dict) and bool(atom_meta.get("is_virtual", False)):
+        return True
+    try:
+        if int(getattr(atom, "atomic_number", 0) or 0) == 0:
+            return True
+    except Exception:
+        pass
+    return str(getattr(atom, "type", "")).strip().upper() in {"EP", "VIRT"}
+
+
+def _strip_pose_derived_virtual_atoms(structure) -> None:
+    """Remove Rosetta virtual atoms and all bonded terms attached to them."""
+
+    metadata = getattr(structure, "_rosetta_bridge_metadata", None)
+    residue_metadata = metadata.get("residues") if isinstance(metadata, dict) else None
+    selection: list[int] = []
+
+    if isinstance(residue_metadata, list):
+        for residue_index, residue in enumerate(getattr(structure, "residues", ())):
+            residue_meta = (
+                residue_metadata[residue_index]
+                if residue_index < len(residue_metadata)
+                and isinstance(residue_metadata[residue_index], dict)
+                else None
+            )
+            atom_metadata = residue_meta.get("atoms") if residue_meta is not None else None
+            kept_atom_metadata: list[dict] = []
+            for atom_index, atom in enumerate(getattr(residue, "atoms", ())):
+                atom_meta = (
+                    atom_metadata[atom_index]
+                    if isinstance(atom_metadata, list)
+                    and atom_index < len(atom_metadata)
+                    and isinstance(atom_metadata[atom_index], dict)
+                    else None
+                )
+                is_virtual = _is_virtual_pose_derived_atom(atom, atom_meta)
+                selection.append(1 if is_virtual else 0)
+                if isinstance(atom_metadata, list) and atom_index < len(atom_metadata) and not is_virtual:
+                    kept_atom_metadata.append(atom_metadata[atom_index])
+            if residue_meta is not None and isinstance(atom_metadata, list):
+                residue_meta["atoms"] = kept_atom_metadata
+    else:
+        selection = [1 if _is_virtual_pose_derived_atom(atom) else 0 for atom in structure.atoms]
+
+    if any(selection):
+        structure.strip(selection)
+
+
+def _repair_pose_derived_proline_ring_closure(structure) -> None:
+    """Ensure converted proline residues include the backbone N-CD bond.
+
+    PyRosetta residue conversion occasionally drops the intramolecular N-CD bond
+    that distinguishes proline from other amino acids. OpenMM's AMBER templates
+    require that bond to match the internal ``PRO`` residue template, so repair
+    it here if the converted ParmEd structure is missing it.
+    """
+
+    parmed, _, _ = _import_parmed()
+    for residue in getattr(structure, "residues", ()):
+        if str(getattr(residue, "name", "")).strip().upper() != "PRO":
+            continue
+        atoms_by_name = {
+            str(getattr(atom, "name", "")).strip().upper(): atom
+            for atom in getattr(residue, "atoms", ())
+        }
+        nitrogen = atoms_by_name.get("N")
+        delta_carbon = atoms_by_name.get("CD")
+        if nitrogen is None or delta_carbon is None:
+            continue
+        if delta_carbon in getattr(nitrogen, "bond_partners", ()):
+            continue
+        structure.bonds.append(parmed.Bond(nitrogen, delta_carbon))
+
+
 @dataclass
 class StructureConversionService:
     """Owns PyRosetta and ParmEd conversion policies."""
@@ -263,9 +340,18 @@ class StructureConversionService:
         try:
             structure = load_rosetta(pose)
             _normalize_pose_derived_structure_names(structure)
+            _repair_pose_derived_proline_ring_closure(structure)
             return structure
         except Exception as exc:
             raise ConversionError(f"Failed to convert Pose to Structure: {exc}") from exc
+
+    def prepare_structure_for_openmm(self, structure):
+        """Mutate a pose-derived structure into an OpenMM-template-compatible form."""
+
+        _normalize_pose_derived_structure_names(structure)
+        _strip_pose_derived_virtual_atoms(structure)
+        _repair_pose_derived_proline_ring_closure(structure)
+        return structure
 
     def structure_to_pose(self, structure):
         """Convert a ParmEd Structure to a PyRosetta Pose via vendored ParmEd."""
