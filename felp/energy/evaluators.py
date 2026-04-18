@@ -93,7 +93,11 @@ class OpenMMEnergyEvaluator(EnergyEvaluator):
     def _apply_restraints(self, system, structure, restraint_specs):
         """Apply dihedral restraints to the OpenMM System."""
         _, _, CustomTorsionForce, _, _, _, _, _ = _import_openmm()
-        force = CustomTorsionForce("0.5*k*(acos(cos(theta-theta0)))^2")
+        # Use a smooth periodic restraint to avoid NaN forces at exact target angles
+        # on the OpenMM CPU platform. ``acos(cos(theta-theta0))`` is singular at the
+        # target by construction for the reference structure, while ``1-cos`` has the
+        # same local harmonic curvature without the derivative blow-up.
+        force = CustomTorsionForce("k*(1-cos(theta-theta0))")
         force.addPerTorsionParameter("theta0")
         force.addPerTorsionParameter("k")
 
