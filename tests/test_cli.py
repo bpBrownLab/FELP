@@ -86,6 +86,70 @@ def test_build_run_config_openmm_cpu_flag(tmp_path: Path) -> None:
     )
     config = build_run_config(namespace)
     assert config.energy.platform_name == "CPU"
+    assert config.energy.cpu_threads == 1
+
+
+def test_build_run_config_cpu_threads_override(tmp_path: Path) -> None:
+    topology = tmp_path / "input.pdb"
+    trajectory = tmp_path / "input.xtc"
+    topology.write_text("placeholder\n", encoding="utf-8")
+    trajectory.write_text("placeholder\n", encoding="utf-8")
+
+    parser = build_parser()
+    namespace = parser.parse_args(
+        [
+            "run",
+            "--topology-file",
+            str(topology),
+            "--trajectory-file",
+            str(trajectory),
+            "--target-residue-number",
+            "2",
+            "--target-residue-name",
+            "ALA",
+            "--output-dir",
+            str(tmp_path / "out"),
+            "--prior-probability-mode",
+            "raw_counts",
+            "--cpu",
+            "--cpu-threads",
+            "4",
+        ]
+    )
+    config = build_run_config(namespace)
+    assert config.energy.platform_name == "CPU"
+    assert config.energy.cpu_threads == 4
+
+
+def test_build_run_config_cpu_threads_must_be_positive(tmp_path: Path) -> None:
+    topology = tmp_path / "input.pdb"
+    trajectory = tmp_path / "input.xtc"
+    topology.write_text("placeholder\n", encoding="utf-8")
+    trajectory.write_text("placeholder\n", encoding="utf-8")
+
+    parser = build_parser()
+    namespace = parser.parse_args(
+        [
+            "run",
+            "--topology-file",
+            str(topology),
+            "--trajectory-file",
+            str(trajectory),
+            "--target-residue-number",
+            "2",
+            "--target-residue-name",
+            "ALA",
+            "--output-dir",
+            str(tmp_path / "out"),
+            "--prior-probability-mode",
+            "raw_counts",
+            "--cpu",
+            "--cpu-threads",
+            "0",
+        ]
+    )
+    with pytest.raises(ConfigurationError, match="cpu_threads"):
+        build_run_config(namespace)
 
 
 def test_build_run_config_cpu_conflicts_with_platform_name(tmp_path: Path) -> None:

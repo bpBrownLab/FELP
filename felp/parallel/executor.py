@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from concurrent.futures import Future, ProcessPoolExecutor, as_completed
 import multiprocessing as mp
+import os
 import sys
 import traceback
 from typing import Iterable, Iterator, TypeVar
@@ -49,6 +50,27 @@ def _default_assignment_policy(config: RunConfig) -> AssignmentPolicy:
     return CVAssignmentPolicy()
 
 
+def _apply_cpu_thread_limits(config: RunConfig) -> None:
+    """Constrain OpenMM CPU and OpenMP threading per worker.
+
+    On many-core machines the OpenMM CPU platform will, by default, fan out a
+    single tiny minimization across every available logical core. That has
+    been seen to produce numerical instability (NaN coordinates) when stacked
+    on top of FELP's per-frame multiprocessing. We always cap OpenMM CPU
+    threads to ``cpu_threads`` (default 1) when the CPU platform is selected,
+    and conservatively cap nested OpenMP/MKL parallelism in the same way
+    unless the user has already pinned them explicitly.
+    """
+
+    if config.energy.platform_name != "CPU":
+        return
+    cpu_threads = max(1, int(config.energy.cpu_threads))
+    os.environ["OPENMM_CPU_THREADS"] = str(cpu_threads)
+    os.environ.setdefault("OMP_NUM_THREADS", str(cpu_threads))
+    os.environ.setdefault("MKL_NUM_THREADS", str(cpu_threads))
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", str(cpu_threads))
+
+
 def initialize_worker(
     config: RunConfig,
     atlas: MicrostateAtlas,
@@ -65,6 +87,7 @@ def initialize_worker(
     global _WORKER_RESTRAINT_PROTOCOL
     global _WORKER_TEMPLATE_STRUCTURE
 
+    _apply_cpu_thread_limits(config)
     _WORKER_CONFIG = config
     _WORKER_ATLAS = atlas
     _WORKER_ASSIGNMENT_POLICY = assignment_policy or _default_assignment_policy(config)

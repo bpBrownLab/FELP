@@ -317,6 +317,26 @@ python felp.py run \
   --workers 4
 ```
 
+OpenMM platform selection is controlled with mutually exclusive `--cpu` / `--gpu`
+flags (or `--platform-name NAME` for expert use). Without either flag, OpenMM
+auto-selects the fastest available platform (typically CUDA). `--gpu` forces an
+OpenMM GPU platform (CUDA first, then OpenCL), and `--cpu` forces the OpenMM CPU
+platform.
+
+When the OpenMM CPU platform is in use, FELP caps OpenMM's per-context thread
+count at 1 by default (via `platformProperties={"Threads": "1"}` and the
+`OPENMM_CPU_THREADS` environment variable), because the CPU platform will
+otherwise try to fan out each tiny per-frame minimization across every logical
+core on the host. On many-core servers that routinely produces NaN coordinates
+during minimization, in addition to heavy oversubscription when stacked on top
+of `--workers`. Increase it with `--cpu-threads N` only if you are running very
+few workers and want OpenMM CPU to use intra-simulation threading.
+
+```bash
+python felp.py run ... --cpu --workers 192                 # 192 workers * 1 OpenMM thread
+python felp.py run ... --cpu --workers 8 --cpu-threads 4   # 8 workers * 4 OpenMM threads
+```
+
 Run the same workflow with explicit microstate definitions and loaded priors:
 
 ```bash

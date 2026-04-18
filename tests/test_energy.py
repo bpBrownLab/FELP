@@ -16,6 +16,16 @@ def test_build_energy_evaluator_openmm() -> None:
     assert isinstance(evaluator, OpenMMEnergyEvaluator)
 
 
+def test_build_energy_evaluator_openmm_propagates_cpu_threads() -> None:
+    evaluator = build_energy_evaluator(
+        EnergyConfig(backend="openmm", platform_name="CPU", cpu_threads=4),
+        StructureConversionService(pyrosetta_init_options=""),
+    )
+    assert isinstance(evaluator, OpenMMEnergyEvaluator)
+    assert evaluator.platform_name == "CPU"
+    assert evaluator.cpu_threads == 4
+
+
 def test_build_energy_evaluator_rosetta() -> None:
     evaluator = build_energy_evaluator(
         EnergyConfig(backend="rosetta"),

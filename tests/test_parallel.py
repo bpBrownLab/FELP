@@ -67,3 +67,76 @@ def test_frame_executor_serial_path_preserves_order(monkeypatch) -> None:
 
     assert calls["initialized"] is True
     assert [result.frame_index for result in results] == [0, 1]
+
+
+def test_apply_cpu_thread_limits_sets_openmm_env(monkeypatch) -> None:
+    monkeypatch.delenv("OPENMM_CPU_THREADS", raising=False)
+    monkeypatch.delenv("OMP_NUM_THREADS", raising=False)
+    monkeypatch.delenv("MKL_NUM_THREADS", raising=False)
+    monkeypatch.delenv("OPENBLAS_NUM_THREADS", raising=False)
+
+    config = RunConfig(
+        input=InputConfig(topology_file="unused", trajectory_files=(("unused",),)),
+        perturbation=PerturbationConfig(target_residue_number=2, target_residue_name="ALA"),
+        rosetta=RosettaConfig(),
+        restraints=RestraintConfig(),
+        energy=EnergyConfig(platform_name="CPU", cpu_threads=3),
+        microstates=MicrostateConfig(),
+        parallel=ParallelConfig(workers=1),
+        output=OutputConfig(output_dir="unused"),
+    )
+
+    executor_module._apply_cpu_thread_limits(config)
+
+    import os
+
+    assert os.environ["OPENMM_CPU_THREADS"] == "3"
+    assert os.environ["OMP_NUM_THREADS"] == "3"
+    assert os.environ["MKL_NUM_THREADS"] == "3"
+    assert os.environ["OPENBLAS_NUM_THREADS"] == "3"
+
+
+def test_apply_cpu_thread_limits_skips_non_cpu_platform(monkeypatch) -> None:
+    monkeypatch.delenv("OPENMM_CPU_THREADS", raising=False)
+
+    config = RunConfig(
+        input=InputConfig(topology_file="unused", trajectory_files=(("unused",),)),
+        perturbation=PerturbationConfig(target_residue_number=2, target_residue_name="ALA"),
+        rosetta=RosettaConfig(),
+        restraints=RestraintConfig(),
+        energy=EnergyConfig(platform_name="CUDA", cpu_threads=1),
+        microstates=MicrostateConfig(),
+        parallel=ParallelConfig(workers=1),
+        output=OutputConfig(output_dir="unused"),
+    )
+
+    executor_module._apply_cpu_thread_limits(config)
+
+    import os
+
+    assert "OPENMM_CPU_THREADS" not in os.environ
+
+
+def test_apply_cpu_thread_limits_respects_preexisting_user_env(monkeypatch) -> None:
+    monkeypatch.delenv("OPENMM_CPU_THREADS", raising=False)
+    monkeypatch.setenv("OMP_NUM_THREADS", "8")
+    monkeypatch.setenv("MKL_NUM_THREADS", "8")
+
+    config = RunConfig(
+        input=InputConfig(topology_file="unused", trajectory_files=(("unused",),)),
+        perturbation=PerturbationConfig(target_residue_number=2, target_residue_name="ALA"),
+        rosetta=RosettaConfig(),
+        restraints=RestraintConfig(),
+        energy=EnergyConfig(platform_name="CPU", cpu_threads=2),
+        microstates=MicrostateConfig(),
+        parallel=ParallelConfig(workers=1),
+        output=OutputConfig(output_dir="unused"),
+    )
+
+    executor_module._apply_cpu_thread_limits(config)
+
+    import os
+
+    assert os.environ["OPENMM_CPU_THREADS"] == "2"
+    assert os.environ["OMP_NUM_THREADS"] == "8"
+    assert os.environ["MKL_NUM_THREADS"] == "8"

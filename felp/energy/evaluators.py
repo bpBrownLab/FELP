@@ -71,6 +71,7 @@ class OpenMMEnergyEvaluator(EnergyEvaluator):
     minimization_tolerance_kj_per_mol_nm: float
     minimization_max_iterations: int
     platform_name: str | None = None
+    cpu_threads: int = 1
 
     def _find_atom_index(self, structure, residue_number: int, atom_name: str) -> int:
         """Find the 0-based index of an atom in a ParmEd Structure.
@@ -141,11 +142,24 @@ class OpenMMEnergyEvaluator(EnergyEvaluator):
             self.timestep_fs * unit.femtosecond,
         )
         platform = None
+        platform_properties: dict[str, str] | None = None
         if self.platform_name:
             platform = openmm.Platform.getPlatformByName(self.platform_name)
+            if platform.getName() == "CPU":
+                platform_properties = {
+                    "Threads": str(max(1, int(self.cpu_threads))),
+                }
 
         if platform is None:
             simulation = Simulation(modeller.topology, system, integrator)
+        elif platform_properties is not None:
+            simulation = Simulation(
+                modeller.topology,
+                system,
+                integrator,
+                platform,
+                platform_properties,
+            )
         else:
             simulation = Simulation(modeller.topology, system, integrator, platform)
 
@@ -246,6 +260,7 @@ def build_energy_evaluator(
             minimization_tolerance_kj_per_mol_nm=energy_config.minimization_tolerance_kj_per_mol_nm,
             minimization_max_iterations=energy_config.minimization_max_iterations,
             platform_name=energy_config.platform_name,
+            cpu_threads=energy_config.cpu_threads,
         )
     return RosettaEnergyEvaluator(
         conversion_service=conversion_service,

@@ -332,7 +332,13 @@ class EnergyConfig:
     minimization_tolerance_kj_per_mol_nm: float = 1.0
     minimization_max_iterations: int = 0
     platform_name: Optional[str] = None
+    cpu_threads: int = 1
     rosetta_score_function: str = "ref2015"
+
+    def __post_init__(self) -> None:
+        if int(self.cpu_threads) < 1:
+            raise ConfigurationError("cpu_threads must be at least 1.")
+        object.__setattr__(self, "cpu_threads", int(self.cpu_threads))
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "EnergyConfig":
@@ -353,6 +359,7 @@ class EnergyConfig:
             ),
             minimization_max_iterations=payload.get("minimization_max_iterations", 0),
             platform_name=payload.get("platform_name"),
+            cpu_threads=payload.get("cpu_threads", 1),
             rosetta_score_function=payload.get("rosetta_score_function", "ref2015"),
         )
 

@@ -349,6 +349,18 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
             "Only applies when --energy-backend is openmm."
         ),
     )
+    energy_group.add_argument(
+        "--cpu-threads",
+        type=int,
+        default=1,
+        help=(
+            "Number of OpenMM CPU-platform threads per worker process. Defaults to 1 "
+            "because FELP already parallelizes across frames via --workers, and "
+            "letting each OpenMM context spin up hundreds of threads on a many-core "
+            "host has been observed to cause numerical instability (NaN coordinates). "
+            "Only applied when the OpenMM CPU platform is in use."
+        ),
+    )
 
     _add_common_microstate_arguments(parser)
 
@@ -816,6 +828,7 @@ def build_run_config(namespace: argparse.Namespace) -> RunConfig:
             minimization_tolerance_kj_per_mol_nm=namespace.minimization_tolerance_kj_per_mol_nm,
             minimization_max_iterations=namespace.minimization_max_iterations,
             platform_name=platform_name,
+            cpu_threads=namespace.cpu_threads,
             rosetta_score_function=namespace.rosetta_score_function,
         ),
         microstates=MicrostateConfig(
