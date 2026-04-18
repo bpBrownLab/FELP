@@ -168,3 +168,105 @@ def test_clone_structure_with_coordinates_preserves_bridge_metadata(monkeypatch)
 
     assert hasattr(cloned, "_rosetta_bridge_metadata")
     assert cloned.coordinates.shape == (len(structure.atoms), 3)
+
+
+def test_pose_to_structure_normalizes_rosetta_proline_hydrogen_names(monkeypatch) -> None:
+    proline_type = FakeResidueType(
+        unique_name="PRO:NtermProteinFull:CtermProteinFull",
+        name3_value="PRO",
+        name1_value="P",
+        atom_order=("N", "CA", "C", "CB", "1HB", "2HB", "CG", "1HG", "2HG", "CD", "1HD", "2HD"),
+        atom_types={
+            atom_name: FakeAtomType(
+                element="H" if atom_name.startswith(("1", "2")) else ("N" if atom_name == "N" else "C"),
+                atom_type_name=atom_name,
+                lj_radius=1.0 if atom_name.startswith(("1", "2")) else 1.8,
+                lj_wdepth=0.02 if atom_name.startswith(("1", "2")) else 0.1,
+            )
+            for atom_name in ("N", "CA", "C", "CB", "1HB", "2HB", "CG", "1HG", "2HG", "CD", "1HD", "2HD")
+        },
+    )
+    pose = FakePose(
+        [
+            FakeResidue(
+                proline_type,
+                coordinates={
+                    "N": (0.0, 0.0, 0.0),
+                    "CA": (1.0, 0.0, 0.0),
+                    "C": (2.0, 0.0, 0.0),
+                    "CB": (1.0, 1.0, 0.0),
+                    "1HB": (1.0, 1.5, 0.8),
+                    "2HB": (1.0, 1.5, -0.8),
+                    "CG": (0.0, 1.5, 0.0),
+                    "1HG": (-0.6, 1.8, 0.8),
+                    "2HG": (-0.6, 1.8, -0.8),
+                    "CD": (-0.5, 0.4, 0.0),
+                    "1HD": (-1.2, 0.2, 0.8),
+                    "2HD": (-1.2, 0.2, -0.8),
+                },
+            )
+        ],
+        chain_indices=[1],
+        bonds=[
+            ((1, 1), (1, 2)),
+            ((1, 2), (1, 3)),
+            ((1, 2), (1, 4)),
+            ((1, 4), (1, 5)),
+            ((1, 4), (1, 6)),
+            ((1, 4), (1, 7)),
+            ((1, 7), (1, 8)),
+            ((1, 7), (1, 9)),
+            ((1, 7), (1, 10)),
+            ((1, 10), (1, 11)),
+            ((1, 10), (1, 12)),
+            ((1, 10), (1, 1)),
+        ],
+        pdb_info=FakePDBInfo(1),
+    )
+
+    fake_import = build_fake_import([proline_type])
+    fake_pyrosetta, _, _, _, _, xyz_vector = fake_import
+    monkeypatch.setattr(_rosetta_pose_module(), "_import_pyrosetta", lambda: fake_import)
+    monkeypatch.setattr(
+        conversion_service_module,
+        "_import_pyrosetta",
+        lambda: (fake_pyrosetta, FakePose, None, FakeAtomID, xyz_vector),
+    )
+    monkeypatch.setattr(conversion_service_module, "_PYROSETTA_INITIALIZED", False)
+    monkeypatch.setattr(conversion_service_module, "_PYROSETTA_INIT_OPTIONS", None)
+
+    service = StructureConversionService(pyrosetta_init_options="-mute all")
+    structure = service.pose_to_structure(pose)
+    rebuilt_pose = service.structure_to_pose(structure)
+    round_tripped = service.pose_to_structure(rebuilt_pose)
+
+    assert [atom.name for atom in structure.atoms] == [
+        "N",
+        "CA",
+        "C",
+        "CB",
+        "HB2",
+        "HB3",
+        "CG",
+        "HG2",
+        "HG3",
+        "CD",
+        "HD2",
+        "HD3",
+    ]
+    metadata = getattr(structure, "_rosetta_bridge_metadata")
+    assert [atom_meta["structure_name"] for atom_meta in metadata["residues"][0]["atoms"]] == [
+        "N",
+        "CA",
+        "C",
+        "CB",
+        "HB2",
+        "HB3",
+        "CG",
+        "HG2",
+        "HG3",
+        "CD",
+        "HD2",
+        "HD3",
+    ]
+    assert [atom.name for atom in round_tripped.atoms] == [atom.name for atom in structure.atoms]

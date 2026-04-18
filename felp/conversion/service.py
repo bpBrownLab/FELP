@@ -54,6 +54,33 @@ POSE_ATOM_NAME_CONVERSION = {
     "3HH2": "H3",
     "1HA": "HA2",
     "2HA": "HA3",
+    "1HB": "HB2",
+    "2HB": "HB3",
+    "1HG": "HG2",
+    "2HG": "HG3",
+    "1HD": "HD2",
+    "2HD": "HD3",
+    "1HE": "HE2",
+    "2HE": "HE3",
+    "1HZ": "HZ1",
+    "2HZ": "HZ2",
+    "3HZ": "HZ3",
+    "1HG1": "HG11",
+    "2HG1": "HG12",
+    "3HG1": "HG13",
+    "1HG2": "HG21",
+    "2HG2": "HG22",
+    "3HG2": "HG23",
+    "1HD1": "HD11",
+    "2HD1": "HD12",
+    "3HD1": "HD13",
+    "1HD2": "HD21",
+    "2HD2": "HD22",
+    "3HD2": "HD23",
+    "1HE2": "HE21",
+    "2HE2": "HE22",
+    "1HH1": "HH11",
+    "2HH1": "HH12",
     "HN2": "H",
 }
 
@@ -158,6 +185,42 @@ def _import_pyrosetta():
     return pyrosetta, Pose, pose_from_sequence, AtomID, xyzVector_double_t
 
 
+def _normalize_pose_atom_name(atom_name: str) -> str:
+    """Map Rosetta-style atom names onto AMBER/OpenMM template names."""
+
+    stripped = atom_name.strip()
+    return POSE_ATOM_NAME_CONVERSION.get(stripped, stripped)
+
+
+def _normalize_pose_derived_structure_names(structure) -> None:
+    """Normalize Rosetta atom names on a just-converted ParmEd structure.
+
+    ``load_rosetta()`` preserves the exact Rosetta atom names in both the
+    structure and its bridge metadata. That is ideal for round-tripping back
+    into a Pose, but some Rosetta hydrogen names (`1HB`, `2HD`, etc.) do not
+    match AMBER/OpenMM residue templates (`HB2`, `HD3`, etc.). Normalize the
+    structure-facing names while keeping the original ``pose_name`` metadata so
+    the bridge can still reconstruct the original Pose atom ordering.
+    """
+
+    metadata = getattr(structure, "_rosetta_bridge_metadata", None)
+    residue_metadata = metadata.get("residues") if isinstance(metadata, dict) else None
+    if not isinstance(residue_metadata, list):
+        return
+
+    for residue, residue_meta in zip(structure.residues, residue_metadata):
+        atom_metadata = residue_meta.get("atoms") if isinstance(residue_meta, dict) else None
+        if not isinstance(atom_metadata, list):
+            continue
+        for atom, atom_meta in zip(getattr(residue, "atoms", ()), atom_metadata):
+            if not isinstance(atom_meta, dict):
+                continue
+            pose_name = str(atom_meta.get("pose_name", atom.name)).strip()
+            normalized_name = _normalize_pose_atom_name(pose_name or str(atom.name))
+            atom.name = normalized_name
+            atom_meta["structure_name"] = normalized_name
+
+
 @dataclass
 class StructureConversionService:
     """Owns PyRosetta and ParmEd conversion policies."""
@@ -198,7 +261,9 @@ class StructureConversionService:
         """Convert a PyRosetta Pose to a ParmEd Structure via vendored ParmEd."""
         _, load_rosetta, _ = _import_parmed()
         try:
-            return load_rosetta(pose)
+            structure = load_rosetta(pose)
+            _normalize_pose_derived_structure_names(structure)
+            return structure
         except Exception as exc:
             raise ConversionError(f"Failed to convert Pose to Structure: {exc}") from exc
 
