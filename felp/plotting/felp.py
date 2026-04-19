@@ -28,6 +28,20 @@ from .common import (
     write_json,
 )
 
+_KJ_PER_KCAL = 4.184
+
+
+def _plot_energy_display_scale_and_label(plot_energy_unit: str) -> tuple[float, str]:
+    """Scale factor (multiply kJ/mol) and axis label for plot display units."""
+
+    if plot_energy_unit == "kcal_mol":
+        return 1.0 / _KJ_PER_KCAL, "kcal/mol"
+    if plot_energy_unit == "kj_mol":
+        return 1.0, "kJ/mol"
+    raise ConfigurationError(
+        f"plot_energy_unit must be 'kj_mol' or 'kcal_mol', not {plot_energy_unit!r}."
+    )
+
 
 @dataclass(frozen=True)
 class FELPPlotConfig:
@@ -41,6 +55,11 @@ class FELPPlotConfig:
     fel_bins: int = 72
     fel_max_points: int = 200_000
     fel_max_energy_kj_mol: float | None = None
+    """Cap for relative free-energy color scales; always interpreted as kJ/mol."""
+
+    plot_energy_unit: str = "kj_mol"
+    """Display unit for energies on plots: ``kj_mol`` (default) or ``kcal_mol``."""
+
     overwrite: bool = False
 
     def validate(self) -> None:
@@ -66,6 +85,7 @@ class FELPPlotConfig:
             raise ConfigurationError("fel_max_points must be at least 1.")
         if self.fel_max_energy_kj_mol is not None and self.fel_max_energy_kj_mol <= 0.0:
             raise ConfigurationError("fel_max_energy_kj_mol must be positive when set.")
+        _plot_energy_display_scale_and_label(self.plot_energy_unit)
 
 
 def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
@@ -75,6 +95,15 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
     prepare_output_dir(config.output_dir, overwrite=config.overwrite)
     plt = import_matplotlib()
     apply_publication_style()
+
+    energy_scale, energy_unit_label = _plot_energy_display_scale_and_label(
+        config.plot_energy_unit
+    )
+    fel_max_display = (
+        float(config.fel_max_energy_kj_mol) * energy_scale
+        if config.fel_max_energy_kj_mol is not None
+        else None
+    )
 
     rows = read_csv_rows(config.microstate_summary_csv)
     state_ids = [row.get("state_id", row["label"]) for row in rows]
@@ -96,19 +125,19 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
         dtype=float,
     )
 
-    reference_free_energy = free_energy_from_probabilities(
+    reference_free_energy_kj_mol = free_energy_from_probabilities(
         reference_probabilities,
         temperature_kelvin=config.temperature_kelvin,
     )
-    target_free_energy = np.asarray(
+    target_free_energy_kj_mol = np.asarray(
         [
             _as_nan(parse_optional_float(row.get("free_energy_kj_mol")))
             for row in rows
         ],
         dtype=float,
     )
-    if not np.isfinite(target_free_energy).any():
-        target_free_energy = free_energy_from_probabilities(
+    if not np.isfinite(target_free_energy_kj_mol).any():
+        target_free_energy_kj_mol = free_energy_from_probabilities(
             target_probabilities,
             temperature_kelvin=config.temperature_kelvin,
         )
@@ -159,9 +188,11 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
                 plot_y=plot_y,
                 reference_probabilities=reference_probabilities,
                 target_probabilities=target_probabilities,
-                delta_free_energy=target_free_energy - reference_free_energy,
+                delta_free_energy=energy_scale
+                * (target_free_energy_kj_mol - reference_free_energy_kj_mol),
                 output_dir=config.output_dir,
-                fel_max_energy_kj_mol=config.fel_max_energy_kj_mol,
+                fel_max_energy_display=fel_max_display,
+                energy_unit_label=energy_unit_label,
             )
         )
 
@@ -182,7 +213,9 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
             target_probabilities=target_probabilities,
             temperature_kelvin=config.temperature_kelvin,
             output_dir=config.output_dir,
-            fel_max_energy_kj_mol=config.fel_max_energy_kj_mol,
+            energy_scale=energy_scale,
+            energy_unit_label=energy_unit_label,
+            fel_max_energy_display=fel_max_display,
         )
     )
 
@@ -194,6 +227,8 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
                 plt=plt,
                 frame_results=frame_results,
                 output_dir=config.output_dir,
+                energy_scale=energy_scale,
+                energy_unit_label=energy_unit_label,
             )
         )
         projected_outputs = _plot_phi_psi_projected_landscapes(
@@ -205,7 +240,9 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
             bins=config.fel_bins,
             max_points=config.fel_max_points,
             output_dir=config.output_dir,
-            fel_max_energy_kj_mol=config.fel_max_energy_kj_mol,
+            energy_scale=energy_scale,
+            energy_unit_label=energy_unit_label,
+            fel_max_energy_display=fel_max_display,
         )
         if projected_outputs:
             phi_psi_projection_available = True
@@ -216,12 +253,14 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
                 plt=plt,
                 phi_degrees=phi_centers,
                 psi_degrees=psi_centers,
-                free_energy_kj_mol=target_free_energy,
+                free_energy_kj_mol=target_free_energy_kj_mol,
                 target_probability=target_probabilities,
                 labels=labels,
                 output_dir=config.output_dir,
                 temperature_kelvin=config.temperature_kelvin,
-                fel_max_energy_kj_mol=config.fel_max_energy_kj_mol,
+                energy_scale=energy_scale,
+                energy_unit_label=energy_unit_label,
+                fel_max_energy_display=fel_max_display,
             )
         )
 
@@ -243,6 +282,7 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
             "pi_reference(i) * <exp(-beta * delta_u)>_i"
         ),
         "fel_max_energy_kj_mol": config.fel_max_energy_kj_mol,
+        "plot_energy_unit": config.plot_energy_unit,
         "generated_files": outputs,
     }
     write_json(os.path.join(config.output_dir, "plot_summary.json"), summary)
@@ -383,7 +423,9 @@ def _plot_projected_state_quantities(
     target_probabilities: np.ndarray,
     delta_free_energy: np.ndarray,
     output_dir: str,
-    fel_max_energy_kj_mol: float | None,
+    *,
+    fel_max_energy_display: float | None,
+    energy_unit_label: str,
 ) -> list[str]:
     """Plot state quantities projected onto reduced-space coordinates."""
 
@@ -407,7 +449,7 @@ def _plot_projected_state_quantities(
         (
             delta_free_energy,
             "Delta Free Energy",
-            "Delta Free Energy (kJ/mol)",
+            f"Delta Free Energy ({energy_unit_label})",
             "delta_free_energy_projection.png",
             True,
         ),
@@ -421,8 +463,8 @@ def _plot_projected_state_quantities(
             "colorbar_label": colorbar_label,
             "title": title,
         }
-        if cap_delta and fel_max_energy_kj_mol is not None:
-            scatter_kwargs["fel_max_energy_kj_mol"] = fel_max_energy_kj_mol
+        if cap_delta and fel_max_energy_display is not None:
+            scatter_kwargs["fel_max_energy_kj_mol"] = fel_max_energy_display
             scatter_kwargs["symmetric_energy_cap"] = True
         scatter_state_projection(**scatter_kwargs)
         fig.tight_layout()
@@ -437,6 +479,9 @@ def _plot_delta_u_distribution(
     plt,
     frame_results,
     output_dir: str,
+    *,
+    energy_scale: float,
+    energy_unit_label: str,
 ) -> str:
     """Plot the distribution of per-frame deltaU values."""
 
@@ -444,7 +489,7 @@ def _plot_delta_u_distribution(
     for result in frame_results:
         if not is_reweighting_eligible_frame(result):
             continue
-        delta_values.append(float(result.delta_u_kj_mol))
+        delta_values.append(float(result.delta_u_kj_mol) * energy_scale)
     delta_u = np.asarray(delta_values, dtype=float)
 
     fig, ax = plt.subplots(1, 1)
@@ -459,7 +504,7 @@ def _plot_delta_u_distribution(
         )
     else:
         ax.hist(delta_u, bins=40, color="slategray", alpha=0.85)
-    ax.set_xlabel("Delta U (kJ/mol)")
+    ax.set_xlabel(f"Delta U ({energy_unit_label})")
     ax.set_ylabel("Frame Count")
     ax.set_title("Per-Frame Delta U Distribution")
     fig.tight_layout()
@@ -539,7 +584,9 @@ def _plot_phi_psi_state_landscapes(
     target_probabilities: np.ndarray,
     temperature_kelvin: float,
     output_dir: str,
-    fel_max_energy_kj_mol: float | None,
+    energy_scale: float,
+    energy_unit_label: str,
+    fel_max_energy_display: float | None,
 ) -> list[str]:
     """Build Ramachandran-like free energy surfaces from discrete state probabilities."""
 
@@ -557,8 +604,12 @@ def _plot_phi_psi_state_landscapes(
         return []
     reference_grid, x_edges, y_edges = reference_grid_data
     target_grid, _, _ = target_grid_data
-    reference_fe = probability_surface_to_free_energy(reference_grid, temperature_kelvin)
-    reweighted_fe = probability_surface_to_free_energy(target_grid, temperature_kelvin)
+    reference_fe = energy_scale * probability_surface_to_free_energy(
+        reference_grid, temperature_kelvin
+    )
+    reweighted_fe = energy_scale * probability_surface_to_free_energy(
+        target_grid, temperature_kelvin
+    )
 
     outputs: list[str] = []
     outputs.append(
@@ -569,10 +620,10 @@ def _plot_phi_psi_state_landscapes(
             x_edges,
             y_edges,
             title="Reference microstate free energy (phi, psi)",
-            colorbar_label="Relative free energy (kJ/mol)",
+            colorbar_label=f"Relative free energy ({energy_unit_label})",
             xlabel=r"$\phi$ (deg)",
             ylabel=r"$\psi$ (deg)",
-            fel_max_energy_kj_mol=fel_max_energy_kj_mol,
+            fel_max_energy_kj_mol=fel_max_energy_display,
         )
     )
     outputs.append(
@@ -583,10 +634,10 @@ def _plot_phi_psi_state_landscapes(
             x_edges,
             y_edges,
             title="Reweighted microstate free energy (phi, psi)",
-            colorbar_label="Relative free energy (kJ/mol)",
+            colorbar_label=f"Relative free energy ({energy_unit_label})",
             xlabel=r"$\phi$ (deg)",
             ylabel=r"$\psi$ (deg)",
-            fel_max_energy_kj_mol=fel_max_energy_kj_mol,
+            fel_max_energy_kj_mol=fel_max_energy_display,
         )
     )
     return outputs
@@ -701,7 +752,9 @@ def _plot_phi_psi_projected_landscapes(
     bins: int,
     max_points: int,
     output_dir: str,
-    fel_max_energy_kj_mol: float | None,
+    energy_scale: float,
+    energy_unit_label: str,
+    fel_max_energy_display: float | None,
 ) -> list[str]:
     """Project exact phi/psi frame samples using prior-consistent frame weights."""
 
@@ -738,8 +791,12 @@ def _plot_phi_psi_projected_landscapes(
         reference_hist = reference_hist / float(reference_hist.sum())
     if reweighted_hist.sum() > 0.0:
         reweighted_hist = reweighted_hist / float(reweighted_hist.sum())
-    reference_fe = probability_surface_to_free_energy(reference_hist, temperature_kelvin)
-    reweighted_fe = probability_surface_to_free_energy(reweighted_hist, temperature_kelvin)
+    reference_fe = energy_scale * probability_surface_to_free_energy(
+        reference_hist, temperature_kelvin
+    )
+    reweighted_fe = energy_scale * probability_surface_to_free_energy(
+        reweighted_hist, temperature_kelvin
+    )
 
     outputs: list[str] = []
     outputs.append(
@@ -750,10 +807,10 @@ def _plot_phi_psi_projected_landscapes(
             x_edges,
             y_edges,
             title="Reference projected free energy (phi, psi)",
-            colorbar_label="Relative free energy (kJ/mol)",
+            colorbar_label=f"Relative free energy ({energy_unit_label})",
             xlabel=r"$\phi$ (deg)",
             ylabel=r"$\psi$ (deg)",
-            fel_max_energy_kj_mol=fel_max_energy_kj_mol,
+            fel_max_energy_kj_mol=fel_max_energy_display,
         )
     )
     outputs.append(
@@ -764,10 +821,10 @@ def _plot_phi_psi_projected_landscapes(
             x_edges,
             y_edges,
             title="Reweighted projected free energy (phi, psi)",
-            colorbar_label="Relative free energy (kJ/mol)",
+            colorbar_label=f"Relative free energy ({energy_unit_label})",
             xlabel=r"$\phi$ (deg)",
             ylabel=r"$\psi$ (deg)",
-            fel_max_energy_kj_mol=fel_max_energy_kj_mol,
+            fel_max_energy_kj_mol=fel_max_energy_display,
         )
     )
     return outputs
@@ -783,7 +840,9 @@ def _plot_discrete_microstate_ramachandran(
     labels: list[str],
     output_dir: str,
     temperature_kelvin: float,
-    fel_max_energy_kj_mol: float | None,
+    energy_scale: float,
+    energy_unit_label: str,
+    fel_max_energy_display: float | None,
 ) -> list[str]:
     """Scatter microstate centers on (phi, psi) colored by reweighted free energy."""
 
@@ -791,17 +850,17 @@ def _plot_discrete_microstate_ramachandran(
     if int(mask.sum()) < 1:
         return []
 
-    fe = np.asarray(free_energy_kj_mol, dtype=float)
+    fe = energy_scale * np.asarray(free_energy_kj_mol, dtype=float)
     if not np.isfinite(fe[mask]).any():
-        values = free_energy_from_probabilities(
+        values = energy_scale * free_energy_from_probabilities(
             np.asarray(target_probability, dtype=float),
             temperature_kelvin=temperature_kelvin,
         )
-        colorbar_label = "Relative free energy from P_target (kJ/mol)"
+        colorbar_label = f"Relative free energy from P_target ({energy_unit_label})"
         title = "Microstate centers (phi, psi)"
     else:
         values = fe
-        colorbar_label = "Relative free energy (kJ/mol)"
+        colorbar_label = f"Relative free energy ({energy_unit_label})"
         title = "Microstate centers (phi, psi)"
 
     fig, ax = plt.subplots(1, 1)
@@ -815,8 +874,8 @@ def _plot_discrete_microstate_ramachandran(
         "xlabel": r"$\phi$ center (deg)",
         "ylabel": r"$\psi$ center (deg)",
     }
-    if fel_max_energy_kj_mol is not None:
-        scatter_kwargs["fel_max_energy_kj_mol"] = fel_max_energy_kj_mol
+    if fel_max_energy_display is not None:
+        scatter_kwargs["fel_max_energy_kj_mol"] = fel_max_energy_display
     scatter_state_projection(**scatter_kwargs)
     if int(mask.sum()) <= 24:
         for index in np.flatnonzero(mask):

@@ -49,6 +49,30 @@ MUTATION_TARGET_NAME_ALIASES = {
     "HIS_P": "HIP",
     "LYP": "LYS",
 }
+MUTATION_TARGET_FAMILIES = {
+    "ASH": "ASP",
+    "ASP": "ASP",
+    "CYM": "CYS",
+    "CYS": "CYS",
+    "CYX": "CYS",
+    "GLH": "GLU",
+    "GLU": "GLU",
+    "HID": "HIS",
+    "HIE": "HIS",
+    "HIP": "HIS",
+    "HIS": "HIS",
+    "LYN": "LYS",
+    "LYS": "LYS",
+}
+ROSETTA_RESIDUE_NAME_CANDIDATES = {
+    "ASH": ("ASP_P2", "ASP_P1", "ASH"),
+    "CYM": ("CYZ", "CYM"),
+    "CYX": ("CYD", "CYX"),
+    "GLH": ("GLU_P2", "GLU_P1", "GLH"),
+    "HID": ("HIS_D", "HID"),
+    "HIE": ("HIS_E", "HIE"),
+    "HIP": ("HIS_P", "HIP"),
+}
 BACKBONE_DIHEDRAL_KINDS = frozenset({"phi", "psi", "omega"})
 
 
@@ -124,6 +148,20 @@ def normalize_mutation_target_name(name: str) -> str:
     if not normalized:
         raise ConfigurationError("Residue names may not be empty.")
     return MUTATION_TARGET_NAME_ALIASES.get(normalized, normalized)
+
+
+def mutation_target_family(name: str) -> str:
+    """Return the shared residue-chemistry family for protonation variants."""
+
+    normalized = normalize_mutation_target_name(name)
+    return MUTATION_TARGET_FAMILIES.get(normalized, normalized)
+
+
+def rosetta_residue_name_candidates(name: str) -> tuple[str, ...]:
+    """Return candidate Rosetta residue type names for a CLI residue token."""
+
+    normalized = normalize_mutation_target_name(name)
+    return ROSETTA_RESIDUE_NAME_CANDIDATES.get(normalized, (normalized,))
 
 
 @dataclass(frozen=True)
@@ -285,10 +323,17 @@ class RosettaConfig:
 
 @dataclass(frozen=True)
 class RestraintConfig:
-    """Configuration for reference-frame restraints."""
+    """Configuration for reference-frame restraints.
+
+    ``cv_measurement_tolerance_degrees`` gates post-relax (Rosetta) and post-minimize
+    (OpenMM) backbone CV checks against restraint targets.
+    """
 
     mode: str = "phi_psi"
     force_constant: float = 10000.0
+    rosetta_restraint_force_constant: Optional[float] = None
+    openmm_restraint_force_constant: Optional[float] = None
+    cv_measurement_tolerance_degrees: float = 1.0
     cv_specs: tuple[CVSpec, ...] = ()
 
     def __post_init__(self) -> None:
@@ -302,7 +347,39 @@ class RestraintConfig:
             )
         if self.force_constant <= 0.0:
             raise ConfigurationError("Restraint force_constant must be positive.")
+        if self.cv_measurement_tolerance_degrees <= 0.0:
+            raise ConfigurationError(
+                "cv_measurement_tolerance_degrees must be positive."
+            )
+        if (
+            self.rosetta_restraint_force_constant is not None
+            and self.rosetta_restraint_force_constant <= 0.0
+        ):
+            raise ConfigurationError(
+                "rosetta_restraint_force_constant must be positive when set."
+            )
+        if (
+            self.openmm_restraint_force_constant is not None
+            and self.openmm_restraint_force_constant <= 0.0
+        ):
+            raise ConfigurationError(
+                "openmm_restraint_force_constant must be positive when set."
+            )
         object.__setattr__(self, "cv_specs", normalized_specs)
+
+    def effective_rosetta_force_constant(self) -> float:
+        """Force constant for Rosetta dihedral constraints and CV protocol."""
+
+        if self.rosetta_restraint_force_constant is not None:
+            return float(self.rosetta_restraint_force_constant)
+        return float(self.force_constant)
+
+    def effective_openmm_force_constant(self) -> float:
+        """Force constant for OpenMM CustomTorsionForce restraints."""
+
+        if self.openmm_restraint_force_constant is not None:
+            return float(self.openmm_restraint_force_constant)
+        return float(self.force_constant)
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "RestraintConfig":
@@ -311,6 +388,15 @@ class RestraintConfig:
         return cls(
             mode=payload.get("mode", "phi_psi"),
             force_constant=payload.get("force_constant", 10000.0),
+            rosetta_restraint_force_constant=payload.get(
+                "rosetta_restraint_force_constant"
+            ),
+            openmm_restraint_force_constant=payload.get(
+                "openmm_restraint_force_constant"
+            ),
+            cv_measurement_tolerance_degrees=payload.get(
+                "cv_measurement_tolerance_degrees", 1.0
+            ),
             cv_specs=tuple(
                 CVSpec.from_dict(spec_payload)
                 for spec_payload in payload.get("cv_specs", ())
@@ -606,6 +692,9 @@ class RunConfig:
             restraints = RestraintConfig(
                 mode=restraints.mode,
                 force_constant=restraints.force_constant,
+                rosetta_restraint_force_constant=restraints.rosetta_restraint_force_constant,
+                openmm_restraint_force_constant=restraints.openmm_restraint_force_constant,
+                cv_measurement_tolerance_degrees=restraints.cv_measurement_tolerance_degrees,
                 cv_specs=default_backbone_cv_specs(
                     perturbation.target_residue_number
                 ),

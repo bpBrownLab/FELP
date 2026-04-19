@@ -16,6 +16,8 @@ from felp.core import (
 from felp.perturbation.validation import (
     ensure_measurement_matches_restraints,
     ensure_perturbation_matches_pose,
+    ensure_perturbation_matches_structure,
+    ensure_pose_residue_matches_expected,
     measurement_deviation_degrees,
 )
 
@@ -52,6 +54,17 @@ def test_passes_when_common_variant_aliases_normalize() -> None:
     ensure_perturbation_matches_pose(pose, perturbation)
 
 
+def test_passes_when_pose_family_matches_requested_protonation_variant() -> None:
+    residue = SimpleNamespace(name3=lambda: "HIS")
+    pose = SimpleNamespace(residue=lambda _: residue)
+    perturbation = PerturbationConfig(
+        target_residue_number=2,
+        target_residue_name="ALA",
+        original_residue_name="HIE",
+    )
+    ensure_perturbation_matches_pose(pose, perturbation)
+
+
 def test_raises_on_mismatch() -> None:
     residue = SimpleNamespace(name3=lambda: "ALA")
     pose = SimpleNamespace(residue=lambda _: residue)
@@ -62,6 +75,112 @@ def test_raises_on_mismatch() -> None:
     )
     with pytest.raises(ConversionError, match="target mismatch"):
         ensure_perturbation_matches_pose(pose, perturbation)
+
+
+def test_structure_validation_passes_when_names_match() -> None:
+    structure = SimpleNamespace(residues=[SimpleNamespace(name="GLY"), SimpleNamespace(name="HIE")])
+    perturbation = PerturbationConfig(
+        target_residue_number=2,
+        target_residue_name="ALA",
+        original_residue_name="HIE",
+    )
+    ensure_perturbation_matches_structure(structure, perturbation)
+
+
+def test_structure_validation_normalizes_common_variant_aliases() -> None:
+    structure = SimpleNamespace(residues=[SimpleNamespace(name="CYZ")])
+    perturbation = PerturbationConfig(
+        target_residue_number=1,
+        target_residue_name="ALA",
+        original_residue_name="CYM",
+    )
+    ensure_perturbation_matches_structure(structure, perturbation)
+
+
+def test_structure_validation_passes_when_family_matches_requested_variant() -> None:
+    structure = SimpleNamespace(residues=[SimpleNamespace(name="GLU")])
+    perturbation = PerturbationConfig(
+        target_residue_number=1,
+        target_residue_name="ALA",
+        original_residue_name="GLH",
+    )
+    ensure_perturbation_matches_structure(structure, perturbation)
+
+
+def test_structure_validation_raises_on_mismatch() -> None:
+    structure = SimpleNamespace(residues=[SimpleNamespace(name="HIS"), SimpleNamespace(name="GLU")])
+    perturbation = PerturbationConfig(
+        target_residue_number=2,
+        target_residue_name="ALA",
+        original_residue_name="HIE",
+    )
+    with pytest.raises(ConversionError, match="topology residue index"):
+        ensure_perturbation_matches_structure(structure, perturbation)
+
+
+def test_pose_residue_matches_expected_allows_explicit_histidine_variant() -> None:
+    residue = SimpleNamespace(name3=lambda: " HIE ")
+    pose = SimpleNamespace(residue=lambda _: residue)
+    ensure_pose_residue_matches_expected(
+        pose,
+        2,
+        "HIE",
+        context="Rosetta-relaxed perturbed state",
+    )
+
+
+def test_pose_residue_matches_expected_allows_opt_h_histidine_tautomer_choice() -> None:
+    residue = SimpleNamespace(name3=lambda: "HID")
+    pose = SimpleNamespace(residue=lambda _: residue)
+    ensure_pose_residue_matches_expected(
+        pose,
+        2,
+        "HIS",
+        context="Rosetta-relaxed perturbed state",
+    )
+
+
+def test_pose_residue_matches_expected_detects_protonated_aspartate_from_atoms() -> None:
+    residue = SimpleNamespace(
+        name3=lambda: "ASP",
+        natoms=lambda: 3,
+        atom_name=lambda index: ("OD1", "OD2", "HD2")[index - 1],
+    )
+    pose = SimpleNamespace(residue=lambda _: residue)
+    ensure_pose_residue_matches_expected(
+        pose,
+        2,
+        "ASH",
+        context="Rosetta-relaxed perturbed state",
+    )
+
+
+def test_pose_residue_matches_expected_rejects_histidine_tautomer_flip() -> None:
+    residue = SimpleNamespace(name3=lambda: "HID")
+    pose = SimpleNamespace(residue=lambda _: residue)
+    with pytest.raises(ConversionError, match="changed residue identity"):
+        ensure_pose_residue_matches_expected(
+            pose,
+            2,
+            "HIE",
+            context="Rosetta-relaxed perturbed state",
+        )
+
+
+def test_pose_residue_matches_expected_rejects_deprotonated_glutamate_for_glh() -> None:
+    residue = SimpleNamespace(
+        name3=lambda: "GLU",
+        natoms=lambda: 2,
+        atom_name=lambda index: ("OE1", "OE2")[index - 1],
+    )
+    pose = SimpleNamespace(residue=lambda _: residue)
+    with pytest.raises(ConversionError, match="expected 'GLH'"):
+        ensure_pose_residue_matches_expected(
+            pose,
+            2,
+            "GLH",
+            context="Rosetta-relaxed perturbed state",
+        )
 
 
 def _restraint_specs() -> list[DihedralRestraintSpec]:

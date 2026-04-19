@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from parmed import Structure
 from parmed.topologyobjects import Atom
+import pytest
 
 from felp.conversion import StructureConversionService
-from felp.core import DihedralRestraintSpec, EnergyConfig
+from felp.core import ConfigurationError, DihedralRestraintSpec, EnergyConfig
 from felp.energy import OpenMMEnergyEvaluator, RosettaEnergyEvaluator, build_energy_evaluator
 
 
@@ -47,6 +48,20 @@ def _minimal_openmm_evaluator() -> OpenMMEnergyEvaluator:
     )
 
 
+class _FakeModeller:
+    def __init__(self, topology, positions) -> None:
+        self.topology = topology
+        self.positions = positions
+
+
+class _FakeForceField:
+    def __init__(self, *args) -> None:
+        self.args = args
+
+    def createSystem(self, topology, **kwargs):
+        return object()
+
+
 def test_openmm_find_atom_index_falls_back_to_residue_number_without_bridge_metadata() -> None:
     """Unbridged structures may still resolve atoms through residue.number."""
     ev = _minimal_openmm_evaluator()
@@ -68,6 +83,33 @@ def test_openmm_find_atom_index_prefers_bridge_seqpos_over_pdb_number() -> None:
         {"residues": [{"seqpos": 1}, {"seqpos": 2}]},
     )
     assert ev._find_atom_index(struct, 2, "CA") == 1
+
+
+def test_openmm_validate_topology_reports_residue_names_on_template_failure(
+    monkeypatch,
+) -> None:
+    ev = _minimal_openmm_evaluator()
+
+    class _FailingForceField(_FakeForceField):
+        def createSystem(self, topology, **kwargs):
+            raise ValueError("No template found for residue 1")
+
+    structure = type(
+        "FakeStructure",
+        (),
+        {
+            "topology": object(),
+            "positions": object(),
+            "residues": [type("Residue", (), {"name": "HIS"})(), type("Residue", (), {"name": "GLH"})()],
+        },
+    )()
+    monkeypatch.setattr(
+        "felp.energy.evaluators._import_openmm",
+        lambda: (None, type("Unit", (), {"nanometer": 1.0})(), None, _FailingForceField, None, _FakeModeller, object(), None),
+    )
+
+    with pytest.raises(ConfigurationError, match="GLH, HIS"):
+        ev.validate_topology(structure)
 
 
 class _FakeCustomTorsionForce:

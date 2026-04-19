@@ -73,6 +73,17 @@ class OpenMMEnergyEvaluator(EnergyEvaluator):
     platform_name: str | None = None
     cpu_threads: int = 1
 
+    @staticmethod
+    def _residue_name_summary(structure) -> str:
+        names = sorted(
+            {
+                str(getattr(residue, "name", "")).strip().upper()
+                for residue in getattr(structure, "residues", ())
+                if str(getattr(residue, "name", "")).strip()
+            }
+        )
+        return ", ".join(names) if names else "<unknown>"
+
     def _find_atom_index(self, structure, residue_number: int, atom_name: str) -> int:
         """Find the 0-based index of an atom in a ParmEd Structure.
 
@@ -115,6 +126,31 @@ class OpenMMEnergyEvaluator(EnergyEvaluator):
             )
 
         system.addForce(force)
+
+    def validate_topology(self, structure) -> None:
+        """Fail early when the reference topology cannot be templated by OpenMM."""
+
+        if structure is None:
+            raise ValueError("OpenMMEnergyEvaluator requires a ParmEd structure.")
+        _, unit, _, ForceField, _, Modeller, NoCutoff, _ = _import_openmm()
+        modeller = Modeller(structure.topology, structure.positions)
+        force_field = ForceField(self.protein_forcefield, self.solvent_forcefield)
+        try:
+            force_field.createSystem(
+                modeller.topology,
+                nonbondedMethod=NoCutoff,
+                nonbondedCutoff=self.nonbonded_cutoff_nm * unit.nanometer,
+            )
+        except Exception as exc:
+            residue_names = self._residue_name_summary(structure)
+            raise ConfigurationError(
+                "OpenMM could not build a system from the reference topology with "
+                f"{self.protein_forcefield} and {self.solvent_forcefield}. "
+                f"Residue names present: {residue_names}. For protonation studies, the "
+                "topology must use residue names recognized by the selected OpenMM/AMBER "
+                "force field (for ff14SB this usually means HID/HIE/HIP/CYM/CYX/ASH/GLH "
+                f"as applicable). Original error: {exc}"
+            ) from exc
 
     def evaluate(
         self,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import Future, ProcessPoolExecutor, as_completed
+from dataclasses import replace
 import multiprocessing as mp
 import os
 import sys
@@ -10,12 +11,19 @@ import traceback
 from typing import Iterable, Iterator, TypeVar
 
 from felp.conversion import StructureConversionService
-from felp.core import FrameResult, RunConfig, SnapshotJob, default_backbone_cv_specs
+from felp.core import (
+    FrameResult,
+    RunConfig,
+    SnapshotJob,
+    default_backbone_cv_specs,
+    normalize_mutation_target_name,
+)
 from felp.energy import build_energy_evaluator
 from felp.perturbation import PyRosettaPerturbationProtocol
 from felp.perturbation.validation import (
     ensure_measurement_matches_restraints,
-    ensure_perturbation_matches_pose,
+    ensure_perturbation_matches_structure,
+    ensure_pose_residue_matches_expected,
     measurement_deviation_degrees,
     target_cv_measurement_from_restraints,
 )
@@ -35,7 +43,6 @@ _WORKER_ENERGY_EVALUATOR = None
 _WORKER_RESTRAINT_PROTOCOL: BackboneDihedralCVProtocol | None = None
 _WORKER_TEMPLATE_STRUCTURE = None
 _WORKER_ASSIGNMENT_POLICY: AssignmentPolicy | None = None
-_WORKER_PERTURBATION_CHECKED: bool = False
 
 _T = TypeVar("_T")
 
@@ -79,7 +86,6 @@ def initialize_worker(
     """Initialize heavy dependencies (PyRosetta, OpenMM) exactly once per worker process."""
     global _WORKER_ATLAS
     global _WORKER_ASSIGNMENT_POLICY
-    global _WORKER_PERTURBATION_CHECKED
     global _WORKER_CONFIG
     global _WORKER_CONVERSION_SERVICE
     global _WORKER_ENERGY_EVALUATOR
@@ -91,7 +97,6 @@ def initialize_worker(
     _WORKER_CONFIG = config
     _WORKER_ATLAS = atlas
     _WORKER_ASSIGNMENT_POLICY = assignment_policy or _default_assignment_policy(config)
-    _WORKER_PERTURBATION_CHECKED = False
     _WORKER_CONVERSION_SERVICE = StructureConversionService(
         pyrosetta_init_options=_build_pyrosetta_options(config),
         radii_set=config.input.radii_set,
@@ -99,9 +104,23 @@ def initialize_worker(
     _WORKER_TEMPLATE_STRUCTURE = _WORKER_CONVERSION_SERVICE.load_topology(
         config.input.topology_file
     )
+    ensure_perturbation_matches_structure(_WORKER_TEMPLATE_STRUCTURE, config.perturbation)
+    _WORKER_CONVERSION_SERVICE.validate_rosetta_structure_residue_types(
+        _WORKER_TEMPLATE_STRUCTURE,
+        context="the reference topology",
+    )
+    _WORKER_CONVERSION_SERVICE.validate_rosetta_residue_type(
+        config.perturbation.target_residue_name,
+        context="mutation target",
+    )
+    if config.perturbation.original_residue_name is not None:
+        _WORKER_CONVERSION_SERVICE.validate_rosetta_residue_type(
+            config.perturbation.original_residue_name,
+            context="reference/original state",
+        )
     _WORKER_RESTRAINT_PROTOCOL = BackboneDihedralCVProtocol(
         cv_specs=config.restraints.cv_specs,
-        force_constant=config.restraints.force_constant,
+        force_constant=config.restraints.effective_rosetta_force_constant(),
     )
     _WORKER_PERTURBATION_PROTOCOL = PyRosettaPerturbationProtocol(
         conversion_service=_WORKER_CONVERSION_SERVICE,
@@ -115,12 +134,64 @@ def initialize_worker(
         config.energy,
         _WORKER_CONVERSION_SERVICE,
     )
+    probe_reference_pose = _WORKER_CONVERSION_SERVICE.structure_to_pose(
+        _WORKER_TEMPLATE_STRUCTURE
+    )
+    probe_reference_pose = _WORKER_PERTURBATION_PROTOCOL.enforce_residue_identity(
+        probe_reference_pose,
+        config.perturbation.target_residue_number,
+        config.perturbation.original_residue_name,
+    )
+    if config.perturbation.original_residue_name is not None:
+        ensure_pose_residue_matches_expected(
+            probe_reference_pose,
+            config.perturbation.target_residue_number,
+            config.perturbation.original_residue_name,
+            context="reference-state setup",
+        )
+    probe_perturbed_pose = _WORKER_PERTURBATION_PROTOCOL.enforce_residue_identity(
+        probe_reference_pose,
+        config.perturbation.target_residue_number,
+        config.perturbation.target_residue_name,
+    )
+    ensure_pose_residue_matches_expected(
+        probe_perturbed_pose,
+        config.perturbation.target_residue_number,
+        config.perturbation.target_residue_name,
+        context="perturbed-state setup",
+    )
+    if config.energy.backend == "openmm":
+        probe_reference_structure = _WORKER_CONVERSION_SERVICE.prepare_structure_for_openmm(
+            _WORKER_CONVERSION_SERVICE.pose_to_structure(probe_reference_pose)
+        )
+        probe_perturbed_structure = _WORKER_CONVERSION_SERVICE.prepare_structure_for_openmm(
+            _WORKER_CONVERSION_SERVICE.pose_to_structure(probe_perturbed_pose)
+        )
+        _WORKER_ENERGY_EVALUATOR.validate_topology(probe_reference_structure)
+        _WORKER_ENERGY_EVALUATOR.validate_topology(probe_perturbed_structure)
 
 
 def _build_pyrosetta_options(config: RunConfig) -> str:
     options = config.rosetta.init_options.strip()
     if config.rosetta.database_path:
         options = f"{options} -database {config.rosetta.database_path}".strip()
+    protonation_names = {
+        normalize_mutation_target_name(name)
+        for name in (
+            config.perturbation.original_residue_name,
+            config.perturbation.target_residue_name,
+        )
+        if name is not None
+    }
+    if "HIS" in protonation_names and "-no_optH" not in options and "-optH" not in options:
+        options = f"{options} -no_optH false".strip()
+    if (
+        protonation_names & {"HIP", "ASH", "GLH", "CYM", "LYN"}
+        and "-keep_input_protonation_state" not in options
+    ):
+        options = f"{options} -keep_input_protonation_state".strip()
+    if protonation_names & {"HIP", "ASH", "GLH", "CYM", "LYN"} and "-pH_mode" not in options:
+        options = f"{options} -pH_mode".strip()
     if config.rosetta.mute_tracers and "-mute" not in options:
         options = f"{options} -mute all".strip()
     return options
@@ -132,7 +203,6 @@ def _measure_structure(structure):
 
 def process_frame_job(job: SnapshotJob) -> FrameResult:
     """Process a single frame: assign microstate, convert, relax, perturb, rescore."""
-    global _WORKER_PERTURBATION_CHECKED
     if any(
         item is None
         for item in (
@@ -152,9 +222,18 @@ def process_frame_job(job: SnapshotJob) -> FrameResult:
         job.coordinates_angstrom,
     )
     reference_pose = _WORKER_CONVERSION_SERVICE.structure_to_pose(structure)
-    if not _WORKER_PERTURBATION_CHECKED:
-        ensure_perturbation_matches_pose(reference_pose, _WORKER_CONFIG.perturbation)
-        _WORKER_PERTURBATION_CHECKED = True
+    reference_pose = _WORKER_PERTURBATION_PROTOCOL.enforce_residue_identity(
+        reference_pose,
+        _WORKER_CONFIG.perturbation.target_residue_number,
+        _WORKER_CONFIG.perturbation.original_residue_name,
+    )
+    if _WORKER_CONFIG.perturbation.original_residue_name is not None:
+        ensure_pose_residue_matches_expected(
+            reference_pose,
+            _WORKER_CONFIG.perturbation.target_residue_number,
+            _WORKER_CONFIG.perturbation.original_residue_name,
+            context="reference-state setup",
+        )
     reference_measurement = _WORKER_RESTRAINT_PROTOCOL.measure_pose(reference_pose)
     assignment = _WORKER_ASSIGNMENT_POLICY.assign(
         _WORKER_ATLAS,
@@ -162,8 +241,13 @@ def process_frame_job(job: SnapshotJob) -> FrameResult:
         reference_measurement,
     )
     restraint_specs = _WORKER_RESTRAINT_PROTOCOL.build_from_reference_pose(reference_pose)
+    cv_tol = _WORKER_CONFIG.restraints.cv_measurement_tolerance_degrees
 
     if _WORKER_CONFIG.energy.backend == "openmm":
+        openmm_fc = _WORKER_CONFIG.restraints.effective_openmm_force_constant()
+        openmm_restraint_specs = tuple(
+            replace(spec, force_constant=openmm_fc) for spec in restraint_specs
+        )
         reference_structure = _WORKER_CONVERSION_SERVICE.pose_to_structure(
             reference_pose
         )
@@ -177,6 +261,12 @@ def process_frame_job(job: SnapshotJob) -> FrameResult:
             restraint_specs,
             job.frame_index,
         )
+        ensure_pose_residue_matches_expected(
+            perturbed_pose,
+            _WORKER_CONFIG.perturbation.target_residue_number,
+            _WORKER_CONFIG.perturbation.target_residue_name,
+            context="Rosetta-relaxed perturbed state",
+        )
         perturbed_structure = _WORKER_CONVERSION_SERVICE.pose_to_structure(
             perturbed_pose
         )
@@ -185,11 +275,11 @@ def process_frame_job(job: SnapshotJob) -> FrameResult:
         )
         reference_energy = _WORKER_ENERGY_EVALUATOR.evaluate(
             structure=reference_structure,
-            restraint_specs=restraint_specs,
+            restraint_specs=openmm_restraint_specs,
         )
         perturbed_energy = _WORKER_ENERGY_EVALUATOR.evaluate(
             structure=perturbed_structure,
-            restraint_specs=restraint_specs,
+            restraint_specs=openmm_restraint_specs,
         )
         reference_minimized_structure = (
             _WORKER_CONVERSION_SERVICE.clone_structure_with_coordinates(
@@ -213,11 +303,13 @@ def process_frame_job(job: SnapshotJob) -> FrameResult:
             reference_relaxed_measurement,
             restraint_specs,
             context="OpenMM-minimized reference state",
+            tolerance_degrees=cv_tol,
         )
         ensure_measurement_matches_restraints(
             perturbed_relaxed_measurement,
             restraint_specs,
             context="OpenMM-minimized perturbed state",
+            tolerance_degrees=cv_tol,
         )
     else:
         prepared_reference_pose = _WORKER_PERTURBATION_PROTOCOL.prepare_reference_pose(
@@ -225,6 +317,13 @@ def process_frame_job(job: SnapshotJob) -> FrameResult:
             restraint_specs,
             job.frame_index,
         )
+        if _WORKER_CONFIG.perturbation.original_residue_name is not None:
+            ensure_pose_residue_matches_expected(
+                prepared_reference_pose,
+                _WORKER_CONFIG.perturbation.target_residue_number,
+                _WORKER_CONFIG.perturbation.original_residue_name,
+                context="Rosetta-relaxed reference state",
+            )
         perturbed_pose = _WORKER_PERTURBATION_PROTOCOL.apply_perturbation(
             prepared_reference_pose,
             _WORKER_CONFIG.perturbation.target_residue_number,
@@ -232,11 +331,29 @@ def process_frame_job(job: SnapshotJob) -> FrameResult:
             restraint_specs,
             job.frame_index,
         )
+        ensure_pose_residue_matches_expected(
+            perturbed_pose,
+            _WORKER_CONFIG.perturbation.target_residue_number,
+            _WORKER_CONFIG.perturbation.target_residue_name,
+            context="Rosetta-relaxed perturbed state",
+        )
         reference_relaxed_measurement = _WORKER_RESTRAINT_PROTOCOL.measure_pose(
             prepared_reference_pose
         )
         perturbed_relaxed_measurement = _WORKER_RESTRAINT_PROTOCOL.measure_pose(
             perturbed_pose
+        )
+        ensure_measurement_matches_restraints(
+            reference_relaxed_measurement,
+            restraint_specs,
+            context="Rosetta-relaxed reference state",
+            tolerance_degrees=cv_tol,
+        )
+        ensure_measurement_matches_restraints(
+            perturbed_relaxed_measurement,
+            restraint_specs,
+            context="Rosetta-relaxed perturbed state",
+            tolerance_degrees=cv_tol,
         )
         reference_energy = _WORKER_ENERGY_EVALUATOR.evaluate(
             pose=prepared_reference_pose,

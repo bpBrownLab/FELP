@@ -57,6 +57,52 @@ def test_build_run_config_from_cli(tmp_path: Path) -> None:
         (spec.name, spec.kind, spec.residue_number)
         for spec in config.restraints.cv_specs
     ] == [("phi", "phi", 2), ("psi", "psi", 2)]
+    assert config.restraints.cv_measurement_tolerance_degrees == 1.0
+    assert config.restraints.rosetta_restraint_force_constant is None
+    assert config.restraints.openmm_restraint_force_constant is None
+    assert config.restraints.effective_rosetta_force_constant() == 10000.0
+    assert config.restraints.effective_openmm_force_constant() == 10000.0
+
+
+def test_build_run_config_restraint_overrides_and_cv_tolerance(tmp_path: Path) -> None:
+    topology = tmp_path / "input.pdb"
+    trajectory = tmp_path / "input.xtc"
+    topology.write_text("placeholder\n", encoding="utf-8")
+    trajectory.write_text("placeholder\n", encoding="utf-8")
+
+    parser = build_parser()
+    namespace = parser.parse_args(
+        [
+            "run",
+            "--topology-file",
+            str(topology),
+            "--trajectory-file",
+            str(trajectory),
+            "--target-residue-number",
+            "2",
+            "--target-residue-name",
+            "ALA",
+            "--output-dir",
+            str(tmp_path / "out"),
+            "--prior-probability-mode",
+            "raw_counts",
+            "--restraint-force-constant",
+            "5000",
+            "--rosetta-restraint-force-constant",
+            "8000",
+            "--openmm-restraint-force-constant",
+            "12000",
+            "--cv-measurement-tolerance-degrees",
+            "2.5",
+        ]
+    )
+    config = build_run_config(namespace)
+    assert config.restraints.force_constant == 5000.0
+    assert config.restraints.rosetta_restraint_force_constant == 8000.0
+    assert config.restraints.openmm_restraint_force_constant == 12000.0
+    assert config.restraints.cv_measurement_tolerance_degrees == 2.5
+    assert config.restraints.effective_rosetta_force_constant() == 8000.0
+    assert config.restraints.effective_openmm_force_constant() == 12000.0
 
 
 def test_build_run_config_openmm_cpu_flag(tmp_path: Path) -> None:
@@ -479,6 +525,8 @@ def test_build_plot_configs_from_cli(tmp_path: Path) -> None:
             "36",
             "--fel-max-energy-kj-mol",
             "12",
+            "--plot-energy-unit",
+            "kcal_mol",
         ]
     )
 
@@ -490,3 +538,4 @@ def test_build_plot_configs_from_cli(tmp_path: Path) -> None:
     assert felp_config.output_dir.endswith("felp_plots")
     assert felp_config.fel_bins == 36
     assert felp_config.fel_max_energy_kj_mol == 12.0
+    assert felp_config.plot_energy_unit == "kcal_mol"

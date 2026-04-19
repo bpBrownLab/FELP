@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 import copy
 from dataclasses import dataclass
 import importlib
@@ -13,7 +14,13 @@ from typing import Optional
 
 import numpy as np
 
-from felp.core import ConversionError, DependencyError
+from felp.core import (
+    ConversionError,
+    DependencyError,
+    mutation_target_family,
+    normalize_mutation_target_name,
+    rosetta_residue_name_candidates,
+)
 
 PMD_TO_ROSETTA_1LETTER = {
     "ALA": "A",
@@ -298,6 +305,265 @@ def _repair_pose_derived_proline_ring_closure(structure) -> None:
         structure.bonds.append(parmed.Bond(nitrogen, delta_carbon))
 
 
+def _normalized_residue_name(name: object) -> str:
+    text = str(name).strip().upper()
+    if not text:
+        return ""
+    return normalize_mutation_target_name(text)
+
+
+def _unique_residue_names(values: Iterable[object]) -> tuple[str, ...]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for value in values:
+        normalized = _normalized_residue_name(value)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        ordered.append(normalized)
+    return tuple(ordered)
+
+
+def _residue_type_is_available(residue_type_set, residue_name: str) -> bool:
+    raw_candidate = str(residue_name).strip().upper()
+    candidate = _normalized_residue_name(residue_name)
+    if not raw_candidate and not candidate:
+        return False
+    for probe in (raw_candidate, candidate):
+        if not probe:
+            continue
+        if hasattr(residue_type_set, "has_name"):
+            try:
+                if residue_type_set.has_name(probe):
+                    return True
+            except Exception:
+                pass
+        if hasattr(residue_type_set, "has_name3"):
+            try:
+                if residue_type_set.has_name3(probe):
+                    return True
+            except Exception:
+                pass
+        if hasattr(residue_type_set, "get_representative_type_base_name"):
+            try:
+                residue_type_set.get_representative_type_base_name(probe)
+                return True
+            except Exception:
+                pass
+    return False
+
+
+def _resolve_available_rosetta_name(residue_type_set, residue_name: str) -> str | None:
+    for candidate in rosetta_residue_name_candidates(residue_name):
+        if _residue_type_is_available(residue_type_set, candidate):
+            return candidate
+    return None
+
+
+def _structure_residue_type_candidates(structure, residue_index: int) -> tuple[str, ...]:
+    residue = structure.residues[residue_index]
+    metadata = getattr(structure, "_rosetta_bridge_metadata", None)
+    residue_metadata = metadata.get("residues") if isinstance(metadata, dict) else None
+    residue_meta = (
+        residue_metadata[residue_index]
+        if isinstance(residue_metadata, list) and residue_index < len(residue_metadata)
+        and isinstance(residue_metadata[residue_index], dict)
+        else None
+    )
+    candidates = list(rosetta_residue_name_candidates(getattr(residue, "name", "")))
+    if residue_meta is not None:
+        candidates.extend(
+            (
+                residue_meta.get("type_name", ""),
+                residue_meta.get("name3", ""),
+                residue_meta.get("base_name", ""),
+            )
+        )
+    expanded: list[object] = []
+    for candidate in candidates:
+        expanded.extend(rosetta_residue_name_candidates(str(candidate)))
+        expanded.append(candidate)
+    return _unique_residue_names(expanded)
+
+
+def _residue_family_hint(residue, residue_meta=None) -> str:
+    candidates = [getattr(residue, "name", "")]
+    if isinstance(residue_meta, dict):
+        candidates.extend(
+            (
+                residue_meta.get("type_name", ""),
+                residue_meta.get("name3", ""),
+                residue_meta.get("base_name", ""),
+            )
+        )
+    for candidate in candidates:
+        raw_candidate = str(candidate).strip().upper()
+        if not raw_candidate:
+            continue
+        if raw_candidate.startswith("ASP_P") or mutation_target_family(raw_candidate) == "ASP":
+            return "ASP"
+        if raw_candidate.startswith("GLU_P") or mutation_target_family(raw_candidate) == "GLU":
+            return "GLU"
+        if raw_candidate.startswith("HIS_") or mutation_target_family(raw_candidate) == "HIS":
+            return "HIS"
+        if mutation_target_family(raw_candidate) == "CYS":
+            return "CYS"
+        if mutation_target_family(raw_candidate) == "LYS":
+            return "LYS"
+    return ""
+
+
+def _histidine_openmm_name(residue, residue_meta=None) -> str | None:
+    if _residue_family_hint(residue, residue_meta) != "HIS":
+        return None
+    atom_names = {
+        str(getattr(atom, "name", "")).strip().upper()
+        for atom in getattr(residue, "atoms", ())
+    }
+    has_hd1 = "HD1" in atom_names
+    has_he2 = "HE2" in atom_names
+    if has_hd1 and has_he2:
+        return "HIP"
+    if has_hd1:
+        return "HID"
+    if has_he2:
+        return "HIE"
+    return "HIS"
+
+
+def _acid_proton_location(
+    residue,
+    *,
+    oxygen1_name: str,
+    oxygen2_name: str,
+    hydrogen1_names: tuple[str, ...],
+    hydrogen2_names: tuple[str, ...],
+) -> str | None:
+    atom_names = {
+        str(getattr(atom, "name", "")).strip().upper()
+        for atom in getattr(residue, "atoms", ())
+    }
+    has_oxygen1 = oxygen1_name in atom_names
+    has_oxygen2 = oxygen2_name in atom_names
+    if not has_oxygen1 or not has_oxygen2:
+        return None
+    if any(name in atom_names for name in hydrogen2_names):
+        return "O2"
+    if any(name in atom_names for name in hydrogen1_names):
+        return "O1"
+    return None
+
+
+def _rename_residue_atom(residue, from_name: str, to_name: str, residue_meta=None) -> None:
+    source = from_name.strip().upper()
+    target = to_name.strip().upper()
+    if source == target:
+        return
+    for atom in getattr(residue, "atoms", ()):
+        if str(getattr(atom, "name", "")).strip().upper() == source:
+            atom.name = target
+            break
+    if not isinstance(residue_meta, dict):
+        return
+    for atom_meta in residue_meta.get("atoms", ()) or ():
+        if str(atom_meta.get("structure_name", "")).strip().upper() == source:
+            atom_meta["structure_name"] = target
+
+
+def _canonicalize_protonated_acid(
+    residue,
+    residue_meta,
+    *,
+    openmm_name: str,
+    oxygen1_name: str,
+    oxygen2_name: str,
+    hydrogen1_names: tuple[str, ...],
+    hydrogen2_names: tuple[str, ...],
+    canonical_hydrogen_name: str,
+) -> str | None:
+    proton_location = _acid_proton_location(
+        residue,
+        oxygen1_name=oxygen1_name,
+        oxygen2_name=oxygen2_name,
+        hydrogen1_names=hydrogen1_names,
+        hydrogen2_names=hydrogen2_names,
+    )
+    if proton_location is None:
+        return None
+    if proton_location == "O1":
+        temp_name = "__TMP_O__"
+        _rename_residue_atom(residue, oxygen2_name, temp_name, residue_meta)
+        _rename_residue_atom(residue, oxygen1_name, oxygen2_name, residue_meta)
+        _rename_residue_atom(residue, temp_name, oxygen1_name, residue_meta)
+        for hydrogen_name in hydrogen1_names:
+            _rename_residue_atom(
+                residue,
+                hydrogen_name,
+                canonical_hydrogen_name,
+                residue_meta,
+            )
+    else:
+        for hydrogen_name in hydrogen2_names:
+            _rename_residue_atom(
+                residue,
+                hydrogen_name,
+                canonical_hydrogen_name,
+                residue_meta,
+            )
+    residue.name = openmm_name
+    if isinstance(residue_meta, dict):
+        residue_meta["openmm_name"] = openmm_name
+    return openmm_name
+
+
+def _acid_openmm_name(residue, residue_meta=None) -> str | None:
+    family = _residue_family_hint(residue, residue_meta)
+    if family == "ASP":
+        return _canonicalize_protonated_acid(
+            residue,
+            residue_meta,
+            openmm_name="ASH",
+            oxygen1_name="OD1",
+            oxygen2_name="OD2",
+            hydrogen1_names=("HD1", "HD11", "HD12"),
+            hydrogen2_names=("HD2", "HD21", "HD22"),
+            canonical_hydrogen_name="HD2",
+        )
+    if family == "GLU":
+        return _canonicalize_protonated_acid(
+            residue,
+            residue_meta,
+            openmm_name="GLH",
+            oxygen1_name="OE1",
+            oxygen2_name="OE2",
+            hydrogen1_names=("HE1", "HE11", "HE12"),
+            hydrogen2_names=("HE2", "HE21", "HE22"),
+            canonical_hydrogen_name="HE2",
+        )
+    return None
+
+
+def _assign_openmm_residue_names(structure) -> None:
+    metadata = getattr(structure, "_rosetta_bridge_metadata", None)
+    residue_metadata = metadata.get("residues") if isinstance(metadata, dict) else None
+    for residue_index, residue in enumerate(getattr(structure, "residues", ())):
+        residue_meta = (
+            residue_metadata[residue_index]
+            if isinstance(residue_metadata, list)
+            and residue_index < len(residue_metadata)
+            and isinstance(residue_metadata[residue_index], dict)
+            else None
+        )
+        normalized_name = _histidine_openmm_name(residue, residue_meta)
+        if normalized_name is None:
+            normalized_name = _acid_openmm_name(residue, residue_meta)
+        if normalized_name is None:
+            continue
+        residue.name = normalized_name
+        if isinstance(residue_meta, dict):
+            residue_meta["openmm_name"] = normalized_name
+
+
 @dataclass
 class StructureConversionService:
     """Owns PyRosetta and ParmEd conversion policies."""
@@ -321,12 +587,77 @@ class StructureConversionService:
         _PYROSETTA_INITIALIZED = True
         _PYROSETTA_INIT_OPTIONS = options
 
+    def _rosetta_residue_type_set(self):
+        self.ensure_pyrosetta_initialized()
+        pyrosetta, _, _, _, _ = _import_pyrosetta()
+        return pyrosetta.rosetta.core.chemical.ChemicalManager.get_instance().residue_type_set(
+            "fa_standard"
+        )
+
     def load_topology(self, topology_file: str):
         """Load a ParmEd Structure from a topology file and apply the configured radii set."""
         parmed, _, changeradii = _import_parmed()
         structure = parmed.load_file(topology_file)
         changeradii(structure, self.radii_set)
         return structure
+
+    def validate_rosetta_residue_type(self, residue_name: str, *, context: str) -> None:
+        """Fail early when a requested Rosetta residue type is not loaded."""
+
+        normalized = _normalized_residue_name(residue_name)
+        residue_type_set = self._rosetta_residue_type_set()
+        if _resolve_available_rosetta_name(residue_type_set, normalized) is not None:
+            return
+        raise ConversionError(
+            f"Rosetta fa_standard could not resolve {context} residue {normalized!r}. "
+            "FELP resolves CLI residue names onto Rosetta-native residue types before mutation, "
+            "so protonation-state studies require a compatible residue type to be loaded in the "
+            "current PyRosetta session. Histidine/cysteine variants may map onto built-in "
+            "aliases such as HIS_D/HIS_E/HIS_P/CYZ/CYD, while protonated Asp/Glu may require "
+            "Rosetta pH-mode residue types or custom params loaded with "
+            "--pyrosetta-init-options/-extra_res_fa."
+        )
+
+    def resolve_rosetta_residue_type_name(self, residue_name: str, *, context: str) -> str:
+        """Return the concrete Rosetta residue type name to hand to MutateResidue."""
+
+        normalized = _normalized_residue_name(residue_name)
+        residue_type_set = self._rosetta_residue_type_set()
+        resolved = _resolve_available_rosetta_name(residue_type_set, normalized)
+        if resolved is not None:
+            return resolved
+        raise ConversionError(
+            f"Rosetta fa_standard could not resolve {context} residue {normalized!r}. "
+            "FELP needs a concrete Rosetta residue type name for mutation/protonation "
+            "enforcement. Histidine and cysteine variants may map onto Rosetta-native "
+            "aliases such as HIS_D/HIS_E/HIS_P/CYZ/CYD, while other protonation states "
+            "may require pH-mode residue types or custom params via --pyrosetta-init-options/-extra_res_fa."
+        )
+
+    def validate_rosetta_structure_residue_types(self, structure, *, context: str) -> None:
+        """Fail early when topology residue names cannot be converted into Rosetta types."""
+
+        residue_type_set = self._rosetta_residue_type_set()
+        unsupported: list[str] = []
+        for residue_index, residue in enumerate(getattr(structure, "residues", ()), start=1):
+            candidates = _structure_residue_type_candidates(structure, residue_index - 1)
+            if any(_residue_type_is_available(residue_type_set, candidate) for candidate in candidates):
+                continue
+            residue_name = _normalized_residue_name(getattr(residue, "name", "")) or "<unknown>"
+            unsupported.append(f"{residue_index}:{residue_name}")
+        if not unsupported:
+            return
+        detail = ", ".join(unsupported[:8])
+        if len(unsupported) > 8:
+            detail += ", ..."
+        raise ConversionError(
+            f"Rosetta fa_standard could not resolve residue types in {context}: {detail}. "
+            "FELP converts the reference topology through PyRosetta before mutation, so the "
+            "topology residue names must match residue types loaded in the current PyRosetta "
+            "session. Histidine/cysteine variants may map onto Rosetta-native aliases such as "
+            "HIS_D/HIS_E/HIS_P/CYZ/CYD, but protonated Asp/Glu may require Rosetta pH-mode "
+            "residue types or custom params loaded with --pyrosetta-init-options/-extra_res_fa."
+        )
 
     def clone_structure_with_coordinates(self, template_structure, coordinates_angstrom):
         """Create a lightweight copy of a ParmEd Structure with new coordinates."""
@@ -349,6 +680,7 @@ class StructureConversionService:
         """Mutate a pose-derived structure into an OpenMM-template-compatible form."""
 
         _normalize_pose_derived_structure_names(structure)
+        _assign_openmm_residue_names(structure)
         _strip_pose_derived_virtual_atoms(structure)
         _repair_pose_derived_proline_ring_closure(structure)
         return structure

@@ -199,16 +199,26 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
         "--target-residue-name",
         required=True,
         help=(
-            "Three-letter mutation target. Supports canonical amino acids plus "
-            "common protonation/disulfide variants such as HID/HIE/HIP/CYM/CYX."
+            "Three-letter Rosetta mutation target. Supports canonical amino acids plus "
+            "common protonation/disulfide variants such as HID/HIE/HIP/CYM/CYX/ASH/GLH. "
+            "For protonation studies, run one topology/trajectory per protonation state: "
+            "the topology must use force-field residue names, while this value must match "
+            "a residue type loaded in the current PyRosetta session. Generic HIS lets "
+            "Rosetta optH choose the neutral tautomer, which FELP then maps to HID/HIE "
+            "for OpenMM from the actual ring hydrogens. Use explicit HIE/HID/HIP when "
+            "you need Rosetta to keep a specific histidine state."
         ),
     )
     perturb_group.add_argument(
         "--original-residue-name",
         help=(
             "Optional three-letter residue expected at --target-residue-number before "
-            "mutation (e.g. GLY for GLY→ALA). When set, the first frame checks the "
-            "pose matches this name at the Rosetta index."
+            "mutation (e.g. GLY for GLY→ALA). When set, FELP enforces the reference state "
+            "to this exact compatible residue type before scoring and checks both the "
+            "topology family and converted Pose residue name3() at that sequential index. "
+            "For protonation studies, generic HIS allows Rosetta optH tautomer selection, "
+            "while explicit HIE/HID/HIP asks FELP to use the corresponding Rosetta residue "
+            "type up front and fail if Rosetta later changes that identity."
         ),
     )
 
@@ -216,7 +226,14 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
     rosetta_group.add_argument(
         "--pyrosetta-init-options",
         default="-ignore_unrecognized_res true -load_PDB_components false",
-        help="Options string passed to pyrosetta.init.",
+        help=(
+            "Options string passed to pyrosetta.init. Use this to load extra residue "
+            "params or protonation-state residue types when Rosetta needs custom "
+            "chemistry definitions (for example via -extra_res_fa ...). FELP "
+            "automatically enables -no_optH false for generic HIS runs and adds "
+            "-keep_input_protonation_state/-pH_mode for some explicit protonation-state "
+            "requests unless you already set those flags yourself."
+        ),
     )
     rosetta_group.add_argument(
         "--rosetta-database",
@@ -272,7 +289,41 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
         "--restraint-force-constant",
         type=float,
         default=10000.0,
-        help="Stiff force constant applied to phi/psi state-locking restraints.",
+        help=(
+            "Default harmonic force constant (Rosetta CircularHarmonicFunc weighting and "
+            "OpenMM dihedral restraint k) for fixed backbone CVs. Use "
+            "--rosetta-restraint-force-constant / --openmm-restraint-force-constant "
+            "to override one backend."
+        ),
+    )
+    restraint_group.add_argument(
+        "--rosetta-restraint-force-constant",
+        type=float,
+        default=None,
+        metavar="K",
+        help=(
+            "Optional override for Rosetta-only dihedral constraints during relax/perturb. "
+            "When omitted, --restraint-force-constant is used."
+        ),
+    )
+    restraint_group.add_argument(
+        "--openmm-restraint-force-constant",
+        type=float,
+        default=None,
+        metavar="K",
+        help=(
+            "Optional override for OpenMM CustomTorsionForce k during minimization. "
+            "When omitted, --restraint-force-constant is used."
+        ),
+    )
+    restraint_group.add_argument(
+        "--cv-measurement-tolerance-degrees",
+        type=float,
+        default=1.0,
+        help=(
+            "Maximum allowed |measured CV − restraint target| after Rosetta relax or "
+            "OpenMM minimization before the frame fails validation."
+        ),
     )
 
     energy_group = parser.add_argument_group("Energy")
@@ -660,6 +711,16 @@ def _add_felp_plot_arguments(parser: argparse.ArgumentParser) -> None:
             "delta free-energy projections use a symmetric cap (± this value)."
         ),
     )
+    parser.add_argument(
+        "--plot-energy-unit",
+        choices=("kj_mol", "kcal_mol"),
+        default="kj_mol",
+        help=(
+            "Energy unit for plot axes and colorbars. CSV inputs and "
+            "--fel-max-energy-kj-mol remain in kJ/mol; values are converted for display "
+            "when set to kcal_mol (1 kcal/mol = 4.184 kJ/mol)."
+        ),
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -812,6 +873,9 @@ def build_run_config(namespace: argparse.Namespace) -> RunConfig:
         restraints=RestraintConfig(
             mode=namespace.restraint_mode,
             force_constant=namespace.restraint_force_constant,
+            rosetta_restraint_force_constant=namespace.rosetta_restraint_force_constant,
+            openmm_restraint_force_constant=namespace.openmm_restraint_force_constant,
+            cv_measurement_tolerance_degrees=namespace.cv_measurement_tolerance_degrees,
             cv_specs=_parse_cv_specs(
                 namespace.cv_tokens,
                 namespace.target_residue_number,
@@ -958,6 +1022,7 @@ def build_felp_plot_config(namespace: argparse.Namespace) -> FELPPlotConfig:
         fel_bins=namespace.fel_bins,
         fel_max_points=namespace.fel_max_points,
         fel_max_energy_kj_mol=namespace.fel_max_energy_kj_mol,
+        plot_energy_unit=namespace.plot_energy_unit,
         overwrite=namespace.overwrite,
     )
     config.validate()

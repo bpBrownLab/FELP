@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from felp.conversion import StructureConversionService
 from felp.conversion import service as conversion_service_module
 from felp.conversion.service import _import_parmed
+from felp.core import ConversionError
 from tests.fake_rosetta_bridge import (
     FakeAtomID,
     FakeAtomType,
@@ -50,6 +52,201 @@ END
     structure = service.load_topology(str(topology_path))
     assert len(structure.atoms) > 0
     assert len(structure.residues) > 0
+
+
+def _patch_conversion_pyrosetta(monkeypatch, residue_types):
+    fake_import = build_fake_import(residue_types)
+    fake_pyrosetta, _, _, _, _, xyz_vector = fake_import
+    monkeypatch.setattr(
+        conversion_service_module,
+        "_import_pyrosetta",
+        lambda: (fake_pyrosetta, FakePose, None, FakeAtomID, xyz_vector),
+    )
+    monkeypatch.setattr(conversion_service_module, "_PYROSETTA_INITIALIZED", False)
+    monkeypatch.setattr(conversion_service_module, "_PYROSETTA_INIT_OPTIONS", None)
+    return fake_pyrosetta
+
+
+def test_validate_rosetta_residue_type_rejects_unloaded_protonation_state(monkeypatch) -> None:
+    residue_types = [
+        FakeResidueType(
+            unique_name="ALA:NtermProteinFull",
+            name3_value="ALA",
+            name1_value="A",
+            atom_order=("CA",),
+            atom_types={"CA": FakeAtomType(element="C", atom_type_name="CAbb", lj_radius=1.8, lj_wdepth=0.1)},
+        )
+    ]
+    _patch_conversion_pyrosetta(monkeypatch, residue_types)
+    service = StructureConversionService(pyrosetta_init_options="-mute all")
+    with pytest.raises(ConversionError, match="mutation target residue 'ASH'"):
+        service.validate_rosetta_residue_type("ASH", context="mutation target")
+
+
+def test_resolve_rosetta_residue_type_name_uses_rosetta_alias_candidates(monkeypatch) -> None:
+    residue_types = [
+        FakeResidueType(
+            unique_name="HIS_E",
+            name3_value="HIS",
+            name1_value="H",
+            atom_order=("CA",),
+            atom_types={"CA": FakeAtomType(element="C", atom_type_name="CAbb", lj_radius=1.8, lj_wdepth=0.1)},
+        )
+    ]
+    _patch_conversion_pyrosetta(monkeypatch, residue_types)
+    service = StructureConversionService(pyrosetta_init_options="-mute all")
+    assert (
+        service.resolve_rosetta_residue_type_name(
+            "HIE",
+            context="mutation target",
+        )
+        == "HIS_E"
+    )
+
+
+def test_resolve_rosetta_residue_type_name_prefers_canonical_protonated_acid_variant(
+    monkeypatch,
+) -> None:
+    residue_types = [
+        FakeResidueType(
+            unique_name="ASP_P2",
+            name3_value="ASP",
+            name1_value="D",
+            atom_order=("CA",),
+            atom_types={"CA": FakeAtomType(element="C", atom_type_name="CAbb", lj_radius=1.8, lj_wdepth=0.1)},
+        ),
+        FakeResidueType(
+            unique_name="ASP_P1",
+            name3_value="ASP",
+            name1_value="D",
+            atom_order=("CA",),
+            atom_types={"CA": FakeAtomType(element="C", atom_type_name="CAbb", lj_radius=1.8, lj_wdepth=0.1)},
+        ),
+    ]
+    _patch_conversion_pyrosetta(monkeypatch, residue_types)
+    service = StructureConversionService(pyrosetta_init_options="-mute all")
+    assert (
+        service.resolve_rosetta_residue_type_name(
+            "ASH",
+            context="mutation target",
+        )
+        == "ASP_P2"
+    )
+
+
+def test_validate_rosetta_structure_residue_types_passes_when_exact_type_is_loaded(
+    monkeypatch,
+) -> None:
+    residue_types = [
+        FakeResidueType(
+            unique_name="GLH:NtermProteinFull",
+            name3_value="GLH",
+            name1_value="E",
+            atom_order=("CA",),
+            atom_types={"CA": FakeAtomType(element="C", atom_type_name="CAbb", lj_radius=1.8, lj_wdepth=0.1)},
+        )
+    ]
+    _patch_conversion_pyrosetta(monkeypatch, residue_types)
+    service = StructureConversionService(pyrosetta_init_options="-mute all")
+    structure = SimpleNamespace(residues=[SimpleNamespace(name="GLH")])
+    service.validate_rosetta_structure_residue_types(
+        structure,
+        context="the reference topology",
+    )
+
+
+def test_validate_rosetta_structure_residue_types_raises_on_unloaded_variant(
+    monkeypatch,
+) -> None:
+    residue_types = [
+        FakeResidueType(
+            unique_name="GLU:NtermProteinFull",
+            name3_value="GLU",
+            name1_value="E",
+            atom_order=("CA",),
+            atom_types={"CA": FakeAtomType(element="C", atom_type_name="CAbb", lj_radius=1.8, lj_wdepth=0.1)},
+        )
+    ]
+    _patch_conversion_pyrosetta(monkeypatch, residue_types)
+    service = StructureConversionService(pyrosetta_init_options="-mute all")
+    structure = SimpleNamespace(residues=[SimpleNamespace(name="GLH")])
+    with pytest.raises(ConversionError, match="GLH"):
+        service.validate_rosetta_structure_residue_types(
+            structure,
+            context="the reference topology",
+        )
+
+
+@pytest.mark.parametrize(
+    ("atom_names", "expected_name"),
+    [
+        (("ND1", "NE2", "HD1"), "HID"),
+        (("ND1", "NE2", "HE2"), "HIE"),
+        (("ND1", "NE2", "HD1", "HE2"), "HIP"),
+    ],
+)
+def test_prepare_structure_for_openmm_assigns_histidine_openmm_name(
+    atom_names: tuple[str, ...],
+    expected_name: str,
+) -> None:
+    parmed, _, _ = _import_parmed()
+    structure = parmed.Structure()
+    for atom_number, atom_name in enumerate(atom_names, start=1):
+        atomic_number = 1 if atom_name.startswith("H") else 7
+        structure.add_atom(
+            parmed.Atom(
+                name=atom_name,
+                atomic_number=atomic_number,
+                mass=1.0 if atomic_number == 1 else 14.0,
+                number=atom_number,
+            ),
+            "HIS",
+            1,
+        )
+
+    service = StructureConversionService(pyrosetta_init_options="-mute all")
+    structure = service.prepare_structure_for_openmm(structure)
+
+    assert structure.residues[0].name == expected_name
+
+
+@pytest.mark.parametrize(
+    ("residue_name", "atom_names", "expected_name", "expected_atoms"),
+    [
+        ("ASP", ("OD1", "OD2", "HD2"), "ASH", {"OD1", "OD2", "HD2"}),
+        ("ASP_P1", ("OD1", "OD2", "HD1"), "ASH", {"OD1", "OD2", "HD2"}),
+        ("GLU", ("OE1", "OE2", "HE2"), "GLH", {"OE1", "OE2", "HE2"}),
+        ("GLU_P1", ("OE1", "OE2", "HE1"), "GLH", {"OE1", "OE2", "HE2"}),
+    ],
+)
+def test_prepare_structure_for_openmm_assigns_protonated_acid_openmm_name(
+    residue_name: str,
+    atom_names: tuple[str, ...],
+    expected_name: str,
+    expected_atoms: set[str],
+) -> None:
+    parmed, _, _ = _import_parmed()
+    structure = parmed.Structure()
+    for atom_number, atom_name in enumerate(atom_names, start=1):
+        atomic_number = 1 if atom_name.startswith("H") else 8
+        if atom_name in {"OD1", "OD2", "OE1", "OE2"}:
+            atomic_number = 8
+        structure.add_atom(
+            parmed.Atom(
+                name=atom_name,
+                atomic_number=atomic_number,
+                mass=1.0 if atomic_number == 1 else 16.0,
+                number=atom_number,
+            ),
+            residue_name,
+            1,
+        )
+
+    service = StructureConversionService(pyrosetta_init_options="-mute all")
+    structure = service.prepare_structure_for_openmm(structure)
+
+    assert structure.residues[0].name == expected_name
+    assert {atom.name for atom in structure.atoms} == expected_atoms
 
 
 def _build_roundtrip_types():

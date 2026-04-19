@@ -7,7 +7,12 @@ import math
 from pathlib import Path
 from typing import Iterable
 
-from felp.core import DihedralRestraintSpec
+from felp.core import (
+    ConversionError,
+    DihedralRestraintSpec,
+    mutation_target_family,
+    normalize_mutation_target_name,
+)
 from felp.conversion import StructureConversionService
 from .validation import target_cv_measurement_from_restraints
 
@@ -37,6 +42,11 @@ class PyRosettaPerturbationProtocol:
         pose_dir = Path(self.output_dir) / "poses"
         pose_dir.mkdir(parents=True, exist_ok=True)
         return str(pose_dir / f"frame_{frame_index:05d}_{suffix}.pdb")
+
+    def _observed_residue_name(self, pose, residue_number: int) -> str:
+        return normalize_mutation_target_name(
+            pose.residue(residue_number).name3().strip().upper()
+        )
 
     def _build_constraint_set(self, pose, restraint_specs: Iterable[DihedralRestraintSpec]):
         pyrosetta, AtomID, _ = _import_pyrosetta()
@@ -190,9 +200,42 @@ class PyRosettaPerturbationProtocol:
         """Mutate the target residue while preserving all configured CV targets."""
         self.conversion_service.ensure_pyrosetta_initialized()
         _, _, MutateResidue = _import_pyrosetta()
+        rosetta_target_name = self.conversion_service.resolve_rosetta_residue_type_name(
+            target_residue_name,
+            context="mutation target",
+        )
 
         mutated_pose = pose.clone()
-        mutate_mover = MutateResidue(target_residue_number, target_residue_name)
+        mutate_mover = MutateResidue(target_residue_number, rosetta_target_name)
         mutate_mover.apply(mutated_pose)
         self._enforce_target_backbone_cvs(mutated_pose, restraint_specs)
         return mutated_pose
+
+    def enforce_residue_identity(
+        self,
+        pose,
+        target_residue_number: int,
+        target_residue_name: str | None,
+        restraint_specs: Iterable[DihedralRestraintSpec] = (),
+    ):
+        """Return a pose whose target residue matches the requested chemistry."""
+
+        if target_residue_name is None:
+            return pose
+        expected = normalize_mutation_target_name(target_residue_name)
+        observed = self._observed_residue_name(pose, target_residue_number)
+        if observed == expected:
+            return pose
+        if mutation_target_family(observed) != mutation_target_family(expected):
+            raise ConversionError(
+                f"Cannot enforce residue {expected!r} at Rosetta residue index "
+                f"{target_residue_number}: found incompatible input residue {observed!r}. "
+                "FELP can normalize protonation/tautomer variants within one residue "
+                "family (for example HIS -> HIE/HID), but not replace a different amino acid."
+            )
+        return self.mutate_pose(
+            pose,
+            target_residue_number,
+            expected,
+            restraint_specs,
+        )

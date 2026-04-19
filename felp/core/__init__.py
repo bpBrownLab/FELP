@@ -36,9 +36,11 @@ from .models import (
     angular_width_degrees,
     default_backbone_cv_specs,
     flatten_trajectory_groups,
+    mutation_target_family,
     normalize_angle_degrees,
     normalize_mutation_target_name,
     normalize_trajectory_groups,
+    rosetta_residue_name_candidates,
 )
 
 __all__ = [
@@ -75,7 +77,9 @@ __all__ = [
     "angular_width_degrees",
     "default_backbone_cv_specs",
     "flatten_trajectory_groups",
+    "mutation_target_family",
     "normalize_angle_degrees",
     "normalize_mutation_target_name",
     "normalize_trajectory_groups",
+    "rosetta_residue_name_candidates",
 ]

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from felp.core import DihedralRestraintSpec
+import pytest
+
+from felp.core import ConversionError, DihedralRestraintSpec
 from felp.perturbation.protocols import PyRosettaPerturbationProtocol
 
 
@@ -10,15 +12,27 @@ class _DummyConversionService:
     def ensure_pyrosetta_initialized(self) -> None:
         return None
 
+    def resolve_rosetta_residue_type_name(self, residue_name: str, *, context: str) -> str:
+        return {"ASH": "ASP_P2", "GLH": "GLU_P2", "HIE": "HIS_E", "HID": "HIS_D", "HIP": "HIS_P"}.get(
+            residue_name,
+            residue_name,
+        )
+
 
 class _DummyPose:
-    def __init__(self, phi: float = -80.0, psi: float = 150.0) -> None:
+    def __init__(
+        self,
+        phi: float = -80.0,
+        psi: float = 150.0,
+        residue_name: str = "GLY",
+    ) -> None:
         self.constraint_value = None
         self._phi = float(phi)
         self._psi = float(psi)
+        self._residue_name = str(residue_name)
 
     def clone(self):
-        clone = _DummyPose(self._phi, self._psi)
+        clone = _DummyPose(self._phi, self._psi, self._residue_name)
         clone.constraint_value = self.constraint_value
         return clone
 
@@ -40,6 +54,10 @@ class _DummyPose:
     def set_psi(self, residue_number: int, value: float) -> None:
         assert residue_number == 2
         self._psi = float(value)
+
+    def residue(self, residue_number: int):
+        assert residue_number == 2
+        return SimpleNamespace(name3=lambda: self._residue_name)
 
 
 class _DummyScoreFunction:
@@ -152,3 +170,64 @@ def test_relax_pose_uses_cartesian_ready_scorefunction(monkeypatch) -> None:
     assert result_pose.constraint_value == "constraints"
     assert result_pose.phi(2) == -60.0
     assert result_pose.psi(2) == 140.0
+
+
+def test_enforce_residue_identity_mutates_within_same_family(monkeypatch) -> None:
+    mutate_calls: list[tuple[int, str]] = []
+
+    class _FakeMutateResidue:
+        def __init__(self, residue_number: int, residue_name: str) -> None:
+            self.residue_number = residue_number
+            self.residue_name = residue_name
+
+        def apply(self, pose) -> None:
+            mutate_calls.append((self.residue_number, self.residue_name))
+            pose._residue_name = self.residue_name
+
+    monkeypatch.setattr(
+        "felp.perturbation.protocols._import_pyrosetta",
+        lambda: (SimpleNamespace(), object(), _FakeMutateResidue),
+    )
+
+    protocol = PyRosettaPerturbationProtocol(
+        conversion_service=_DummyConversionService(),
+    )
+    result_pose = protocol.enforce_residue_identity(_DummyPose(residue_name="HIS"), 2, "HIE")
+
+    assert mutate_calls == [(2, "HIS_E")]
+    assert result_pose.residue(2).name3() == "HIS_E"
+
+
+def test_enforce_residue_identity_uses_rosetta_protonated_acid_name(monkeypatch) -> None:
+    mutate_calls: list[tuple[int, str]] = []
+
+    class _FakeMutateResidue:
+        def __init__(self, residue_number: int, residue_name: str) -> None:
+            self.residue_number = residue_number
+            self.residue_name = residue_name
+
+        def apply(self, pose) -> None:
+            mutate_calls.append((self.residue_number, self.residue_name))
+            pose._residue_name = self.residue_name
+
+    monkeypatch.setattr(
+        "felp.perturbation.protocols._import_pyrosetta",
+        lambda: (SimpleNamespace(), object(), _FakeMutateResidue),
+    )
+
+    protocol = PyRosettaPerturbationProtocol(
+        conversion_service=_DummyConversionService(),
+    )
+    result_pose = protocol.enforce_residue_identity(_DummyPose(residue_name="ASP"), 2, "ASH")
+
+    assert mutate_calls == [(2, "ASP_P2")]
+    assert result_pose.residue(2).name3() == "ASP_P2"
+
+
+def test_enforce_residue_identity_rejects_incompatible_family(monkeypatch) -> None:
+    protocol = PyRosettaPerturbationProtocol(
+        conversion_service=_DummyConversionService(),
+    )
+
+    with pytest.raises(ConversionError, match="incompatible input residue"):
+        protocol.enforce_residue_identity(_DummyPose(residue_name="GLU"), 2, "HIE")

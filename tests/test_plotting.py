@@ -332,6 +332,100 @@ def test_generate_felp_plots_fel_energy_cap(tmp_path: Path) -> None:
     assert (tmp_path / "felp_plots" / "delta_free_energy_projection.png").is_file()
 
 
+def test_generate_felp_plots_plot_energy_unit_kcal_mol(tmp_path: Path) -> None:
+    summary_csv = tmp_path / "microstate_summary.csv"
+
+    with open(summary_csv, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "state_id",
+                "label",
+                "frame_count",
+                "reference_probability",
+                "target_probability",
+                "free_energy_kj_mol",
+                "plot_x",
+                "plot_y",
+                "phi_center",
+                "psi_center",
+                "metadata",
+            ],
+        )
+        writer.writeheader()
+        writer.writerow(
+            {
+                "state_id": "cluster_0",
+                "label": "cluster_0",
+                "frame_count": 2,
+                "reference_probability": 0.6,
+                "target_probability": 0.45,
+                "free_energy_kj_mol": "50.0",
+                "plot_x": "-1.0",
+                "plot_y": "0.5",
+                "phi_center": "-60.0",
+                "psi_center": "-40.0",
+                "metadata": '{"reference_probability_source":"loaded"}',
+            }
+        )
+        writer.writerow(
+            {
+                "state_id": "cluster_1",
+                "label": "cluster_1",
+                "frame_count": 1,
+                "reference_probability": 0.4,
+                "target_probability": 0.55,
+                "free_energy_kj_mol": "80.0",
+                "plot_x": "1.0",
+                "plot_y": "-0.5",
+                "phi_center": "50.0",
+                "psi_center": "40.0",
+                "metadata": '{"reference_probability_source":"loaded"}',
+            }
+        )
+
+    writer = ResultsWriter(OutputConfig(output_dir=str(tmp_path / "frame_out")))
+    writer.prepare_output_dir()
+    writer.write_frame_results(
+        [
+            FrameResult(
+                frame_index=0,
+                stride_number=0,
+                microstate_id="cluster_0",
+                microstate_label="cluster_0",
+                phi_degrees=-58.0,
+                psi_degrees=-38.0,
+                reference_energy_kj_mol=0.0,
+                perturbed_energy_kj_mol=-0.5,
+                delta_u_kj_mol=-0.5,
+                reference_relaxed_phi_degrees=-58.0,
+                reference_relaxed_psi_degrees=-38.0,
+                perturbed_relaxed_phi_degrees=-58.0,
+                perturbed_relaxed_psi_degrees=-38.0,
+            ),
+        ]
+    )
+    frame_csv = tmp_path / "frame_results.csv"
+    frame_csv.write_text(
+        Path(writer.raw_frame_results_path).read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+
+    summary = generate_felp_plots(
+        FELPPlotConfig(
+            microstate_summary_csv=str(summary_csv),
+            raw_frame_results_csv=str(frame_csv),
+            output_dir=str(tmp_path / "felp_plots"),
+            fel_max_energy_kj_mol=12.0,
+            plot_energy_unit="kcal_mol",
+        )
+    )
+
+    assert summary["fel_max_energy_kj_mol"] == 12.0
+    assert summary["plot_energy_unit"] == "kcal_mol"
+    assert (tmp_path / "felp_plots" / "delta_free_energy_projection.png").is_file()
+
+
 def test_generate_felp_plots_builds_state_grid_landscapes(tmp_path: Path) -> None:
     summary_csv = tmp_path / "microstate_summary.csv"
 
