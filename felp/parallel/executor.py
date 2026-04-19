@@ -134,8 +134,16 @@ def initialize_worker(
         config.energy,
         _WORKER_CONVERSION_SERVICE,
     )
+    # Topology-only inputs (for example AMBER prmtop + trajectory) may not carry
+    # per-atom coordinates on the template structure. Build a zero-coordinate clone
+    # for initializer-side protonation/type probes so we do not disturb the old
+    # runtime path that injects real frame coordinates later.
+    probe_template_structure = _WORKER_CONVERSION_SERVICE.clone_structure_with_coordinates(
+        _WORKER_TEMPLATE_STRUCTURE,
+        tuple((0.0, 0.0, 0.0) for _ in getattr(_WORKER_TEMPLATE_STRUCTURE, "atoms", ())),
+    )
     probe_reference_pose = _WORKER_CONVERSION_SERVICE.structure_to_pose(
-        _WORKER_TEMPLATE_STRUCTURE
+        probe_template_structure
     )
     probe_reference_pose = _WORKER_PERTURBATION_PROTOCOL.enforce_residue_identity(
         probe_reference_pose,

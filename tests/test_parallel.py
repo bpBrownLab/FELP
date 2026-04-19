@@ -188,6 +188,7 @@ def test_build_pyrosetta_options_enables_ph_mode_for_explicit_protonation_states
 def test_initialize_worker_runs_protonation_preflight_checks(monkeypatch) -> None:
     calls: list[tuple] = []
     fake_structure = object()
+    probe_structure = object()
     probe_pose = object()
     reference_pose = object()
     perturbed_pose = object()
@@ -204,6 +205,11 @@ def test_initialize_worker_runs_protonation_preflight_checks(monkeypatch) -> Non
             calls.append(("load_topology", topology_file))
             return fake_structure
 
+        def clone_structure_with_coordinates(self, structure, coordinates_angstrom):
+            calls.append(("clone_structure", structure, len(coordinates_angstrom)))
+            assert structure is fake_structure
+            return probe_structure
+
         def validate_rosetta_structure_residue_types(self, structure, *, context: str) -> None:
             calls.append(("validate_structure", structure, context))
 
@@ -212,7 +218,7 @@ def test_initialize_worker_runs_protonation_preflight_checks(monkeypatch) -> Non
 
         def structure_to_pose(self, structure):
             calls.append(("structure_to_pose", structure))
-            assert structure is fake_structure
+            assert structure is probe_structure
             return probe_pose
 
         def pose_to_structure(self, pose):
@@ -312,7 +318,8 @@ def test_initialize_worker_runs_protonation_preflight_checks(monkeypatch) -> Non
     assert ("validate_structure", fake_structure, "the reference topology") in calls
     assert ("validate_residue_type", "HID", "reference/original state") in calls
     assert ("validate_residue_type", "HIE", "mutation target") in calls
-    assert ("structure_to_pose", fake_structure) in calls
+    assert ("clone_structure", fake_structure, 0) in calls
+    assert ("structure_to_pose", probe_structure) in calls
     assert ("enforce_identity", probe_pose, 2, "HID") in calls
     assert ("enforce_identity", reference_pose, 2, "HIE") in calls
     assert (
