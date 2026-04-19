@@ -185,17 +185,11 @@ def test_build_pyrosetta_options_enables_ph_mode_for_explicit_protonation_states
     assert "-pH_mode" in options
 
 
-def test_initialize_worker_runs_protonation_preflight_checks(monkeypatch) -> None:
+def test_initialize_worker_only_runs_structure_level_protonation_checks(
+    monkeypatch,
+) -> None:
     calls: list[tuple] = []
     fake_structure = object()
-    probe_structure = object()
-    probe_pose = object()
-    reference_pose = object()
-    perturbed_pose = object()
-    reference_structure = object()
-    perturbed_structure = object()
-    prepared_reference_structure = object()
-    prepared_perturbed_structure = object()
 
     class _FakeConversionService:
         def __init__(self, pyrosetta_init_options: str, radii_set: str) -> None:
@@ -205,68 +199,15 @@ def test_initialize_worker_runs_protonation_preflight_checks(monkeypatch) -> Non
             calls.append(("load_topology", topology_file))
             return fake_structure
 
-        def clone_structure_with_coordinates(self, structure, coordinates_angstrom):
-            calls.append(("clone_structure", structure, len(coordinates_angstrom)))
-            assert structure is fake_structure
-            return probe_structure
-
         def validate_rosetta_structure_residue_types(self, structure, *, context: str) -> None:
             calls.append(("validate_structure", structure, context))
 
         def validate_rosetta_residue_type(self, residue_name: str, *, context: str) -> None:
             calls.append(("validate_residue_type", residue_name, context))
 
-        def structure_to_pose(self, structure):
-            calls.append(("structure_to_pose", structure))
-            assert structure is probe_structure
-            return probe_pose
-
-        def pose_to_structure(self, pose):
-            calls.append(("pose_to_structure", pose))
-            if pose is reference_pose:
-                return reference_structure
-            if pose is perturbed_pose:
-                return perturbed_structure
-            raise AssertionError("unexpected pose")
-
-        def prepare_structure_for_openmm(self, structure):
-            calls.append(("prepare_for_openmm", structure))
-            if structure is reference_structure:
-                return prepared_reference_structure
-            if structure is perturbed_structure:
-                return prepared_perturbed_structure
-            raise AssertionError("unexpected structure")
-
     class _FakeEnergyEvaluator:
         def validate_topology(self, structure) -> None:
             calls.append(("validate_openmm", structure))
-
-    class _FakePerturbationProtocol:
-        def __init__(self, **kwargs) -> None:
-            calls.append(("protocol", kwargs))
-
-        def enforce_residue_identity(
-            self,
-            pose,
-            target_residue_number: int,
-            target_residue_name: str | None,
-            restraint_specs=(),
-        ):
-            calls.append(
-                (
-                    "enforce_identity",
-                    pose,
-                    target_residue_number,
-                    target_residue_name,
-                )
-            )
-            if target_residue_name == "HID":
-                assert pose is probe_pose
-                return reference_pose
-            if target_residue_name == "HIE":
-                assert pose is reference_pose
-                return perturbed_pose
-            return pose
 
     config = RunConfig(
         input=InputConfig(topology_file="input.parm7", trajectory_files=(("unused",),)),
@@ -297,18 +238,15 @@ def test_initialize_worker_runs_protonation_preflight_checks(monkeypatch) -> Non
         "BackboneDihedralCVProtocol",
         lambda **kwargs: calls.append(("restraints", kwargs)) or object(),
     )
-    monkeypatch.setattr(executor_module, "PyRosettaPerturbationProtocol", _FakePerturbationProtocol)
+    monkeypatch.setattr(
+        executor_module,
+        "PyRosettaPerturbationProtocol",
+        lambda **kwargs: calls.append(("protocol", kwargs)) or object(),
+    )
     monkeypatch.setattr(
         executor_module,
         "build_energy_evaluator",
         lambda energy_config, conversion_service: _FakeEnergyEvaluator(),
-    )
-    monkeypatch.setattr(
-        executor_module,
-        "ensure_pose_residue_matches_expected",
-        lambda pose, residue_number, expected_residue_name, *, context: calls.append(
-            ("match_pose", pose, residue_number, expected_residue_name, context)
-        ),
     )
 
     executor_module.initialize_worker(config, MicrostateAtlas(definitions=()))
@@ -318,23 +256,104 @@ def test_initialize_worker_runs_protonation_preflight_checks(monkeypatch) -> Non
     assert ("validate_structure", fake_structure, "the reference topology") in calls
     assert ("validate_residue_type", "HID", "reference/original state") in calls
     assert ("validate_residue_type", "HIE", "mutation target") in calls
-    assert ("clone_structure", fake_structure, 0) in calls
-    assert ("structure_to_pose", probe_structure) in calls
-    assert ("enforce_identity", probe_pose, 2, "HID") in calls
+    assert all(call[0] != "validate_openmm" for call in calls)
+
+
+def test_runtime_protonation_preflight_uses_first_frame_pose(monkeypatch) -> None:
+    calls: list[tuple] = []
+    reference_pose = object()
+    perturbed_pose = object()
+    reference_structure = object()
+    perturbed_structure = object()
+    prepared_reference_structure = object()
+    prepared_perturbed_structure = object()
+
+    class _FakeConversionService:
+        def pose_to_structure(self, pose):
+            calls.append(("pose_to_structure", pose))
+            if pose is reference_pose:
+                return reference_structure
+            if pose is perturbed_pose:
+                return perturbed_structure
+            raise AssertionError("unexpected pose")
+
+        def prepare_structure_for_openmm(self, structure):
+            calls.append(("prepare_for_openmm", structure))
+            if structure is reference_structure:
+                return prepared_reference_structure
+            if structure is perturbed_structure:
+                return prepared_perturbed_structure
+            raise AssertionError("unexpected structure")
+
+    class _FakeEnergyEvaluator:
+        def validate_topology(self, structure) -> None:
+            calls.append(("validate_openmm", structure))
+
+    class _FakePerturbationProtocol:
+        def enforce_residue_identity(
+            self,
+            pose,
+            target_residue_number: int,
+            target_residue_name: str | None,
+            restraint_specs=(),
+        ):
+            calls.append(
+                (
+                    "enforce_identity",
+                    pose,
+                    target_residue_number,
+                    target_residue_name,
+                )
+            )
+            assert pose is reference_pose
+            return perturbed_pose
+
+    config = RunConfig(
+        input=InputConfig(topology_file="unused", trajectory_files=(("unused",),)),
+        perturbation=PerturbationConfig(
+            target_residue_number=2,
+            target_residue_name="HIE",
+            original_residue_name="HID",
+        ),
+        rosetta=RosettaConfig(),
+        restraints=RestraintConfig(),
+        energy=EnergyConfig(backend="openmm"),
+        microstates=MicrostateConfig(),
+        parallel=ParallelConfig(workers=1),
+        output=OutputConfig(output_dir="unused"),
+    )
+
+    monkeypatch.setattr(executor_module, "_WORKER_CONFIG", config)
+    monkeypatch.setattr(
+        executor_module,
+        "_WORKER_CONVERSION_SERVICE",
+        _FakeConversionService(),
+    )
+    monkeypatch.setattr(
+        executor_module,
+        "_WORKER_PERTURBATION_PROTOCOL",
+        _FakePerturbationProtocol(),
+    )
+    monkeypatch.setattr(
+        executor_module,
+        "_WORKER_ENERGY_EVALUATOR",
+        _FakeEnergyEvaluator(),
+    )
+    monkeypatch.setattr(executor_module, "_WORKER_RUNTIME_PROTONATION_PRECHECKED", False)
+    monkeypatch.setattr(
+        executor_module,
+        "ensure_pose_residue_matches_expected",
+        lambda pose, residue_number, expected_residue_name, *, context: calls.append(
+            ("match_pose", pose, residue_number, expected_residue_name, context)
+        ),
+    )
+
+    executor_module._run_runtime_protonation_preflight(reference_pose)
+    executor_module._run_runtime_protonation_preflight(reference_pose)
+
+    assert ("match_pose", reference_pose, 2, "HID", "reference-state setup") in calls
     assert ("enforce_identity", reference_pose, 2, "HIE") in calls
-    assert (
-        "match_pose",
-        reference_pose,
-        2,
-        "HID",
-        "reference-state setup",
-    ) in calls
-    assert (
-        "match_pose",
-        perturbed_pose,
-        2,
-        "HIE",
-        "perturbed-state setup",
-    ) in calls
+    assert ("match_pose", perturbed_pose, 2, "HIE", "perturbed-state setup") in calls
     assert ("validate_openmm", prepared_reference_structure) in calls
     assert ("validate_openmm", prepared_perturbed_structure) in calls
+    assert calls.count(("enforce_identity", reference_pose, 2, "HIE")) == 1

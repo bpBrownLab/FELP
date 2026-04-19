@@ -43,6 +43,7 @@ _WORKER_ENERGY_EVALUATOR = None
 _WORKER_RESTRAINT_PROTOCOL: BackboneDihedralCVProtocol | None = None
 _WORKER_TEMPLATE_STRUCTURE = None
 _WORKER_ASSIGNMENT_POLICY: AssignmentPolicy | None = None
+_WORKER_RUNTIME_PROTONATION_PRECHECKED: bool = False
 
 _T = TypeVar("_T")
 
@@ -91,12 +92,14 @@ def initialize_worker(
     global _WORKER_ENERGY_EVALUATOR
     global _WORKER_PERTURBATION_PROTOCOL
     global _WORKER_RESTRAINT_PROTOCOL
+    global _WORKER_RUNTIME_PROTONATION_PRECHECKED
     global _WORKER_TEMPLATE_STRUCTURE
 
     _apply_cpu_thread_limits(config)
     _WORKER_CONFIG = config
     _WORKER_ATLAS = atlas
     _WORKER_ASSIGNMENT_POLICY = assignment_policy or _default_assignment_policy(config)
+    _WORKER_RUNTIME_PROTONATION_PRECHECKED = False
     _WORKER_CONVERSION_SERVICE = StructureConversionService(
         pyrosetta_init_options=_build_pyrosetta_options(config),
         radii_set=config.input.radii_set,
@@ -134,49 +137,6 @@ def initialize_worker(
         config.energy,
         _WORKER_CONVERSION_SERVICE,
     )
-    # Topology-only inputs (for example AMBER prmtop + trajectory) may not carry
-    # per-atom coordinates on the template structure. Build a zero-coordinate clone
-    # for initializer-side protonation/type probes so we do not disturb the old
-    # runtime path that injects real frame coordinates later.
-    probe_template_structure = _WORKER_CONVERSION_SERVICE.clone_structure_with_coordinates(
-        _WORKER_TEMPLATE_STRUCTURE,
-        tuple((0.0, 0.0, 0.0) for _ in getattr(_WORKER_TEMPLATE_STRUCTURE, "atoms", ())),
-    )
-    probe_reference_pose = _WORKER_CONVERSION_SERVICE.structure_to_pose(
-        probe_template_structure
-    )
-    probe_reference_pose = _WORKER_PERTURBATION_PROTOCOL.enforce_residue_identity(
-        probe_reference_pose,
-        config.perturbation.target_residue_number,
-        config.perturbation.original_residue_name,
-    )
-    if config.perturbation.original_residue_name is not None:
-        ensure_pose_residue_matches_expected(
-            probe_reference_pose,
-            config.perturbation.target_residue_number,
-            config.perturbation.original_residue_name,
-            context="reference-state setup",
-        )
-    probe_perturbed_pose = _WORKER_PERTURBATION_PROTOCOL.enforce_residue_identity(
-        probe_reference_pose,
-        config.perturbation.target_residue_number,
-        config.perturbation.target_residue_name,
-    )
-    ensure_pose_residue_matches_expected(
-        probe_perturbed_pose,
-        config.perturbation.target_residue_number,
-        config.perturbation.target_residue_name,
-        context="perturbed-state setup",
-    )
-    if config.energy.backend == "openmm":
-        probe_reference_structure = _WORKER_CONVERSION_SERVICE.prepare_structure_for_openmm(
-            _WORKER_CONVERSION_SERVICE.pose_to_structure(probe_reference_pose)
-        )
-        probe_perturbed_structure = _WORKER_CONVERSION_SERVICE.prepare_structure_for_openmm(
-            _WORKER_CONVERSION_SERVICE.pose_to_structure(probe_perturbed_pose)
-        )
-        _WORKER_ENERGY_EVALUATOR.validate_topology(probe_reference_structure)
-        _WORKER_ENERGY_EVALUATOR.validate_topology(probe_perturbed_structure)
 
 
 def _build_pyrosetta_options(config: RunConfig) -> str:
@@ -209,6 +169,47 @@ def _measure_structure(structure):
     return _WORKER_RESTRAINT_PROTOCOL.measure_structure(structure)
 
 
+def _run_runtime_protonation_preflight(reference_pose) -> None:
+    """Run one-time protonation/type checks on the first coordinate-bearing frame."""
+
+    global _WORKER_RUNTIME_PROTONATION_PRECHECKED
+    if _WORKER_RUNTIME_PROTONATION_PRECHECKED:
+        return
+    if _WORKER_CONFIG is None or _WORKER_CONVERSION_SERVICE is None:
+        raise RuntimeError("Worker has not been initialized.")
+    if _WORKER_PERTURBATION_PROTOCOL is None or _WORKER_ENERGY_EVALUATOR is None:
+        raise RuntimeError("Worker has not been initialized.")
+
+    if _WORKER_CONFIG.perturbation.original_residue_name is not None:
+        ensure_pose_residue_matches_expected(
+            reference_pose,
+            _WORKER_CONFIG.perturbation.target_residue_number,
+            _WORKER_CONFIG.perturbation.original_residue_name,
+            context="reference-state setup",
+        )
+    probe_perturbed_pose = _WORKER_PERTURBATION_PROTOCOL.enforce_residue_identity(
+        reference_pose,
+        _WORKER_CONFIG.perturbation.target_residue_number,
+        _WORKER_CONFIG.perturbation.target_residue_name,
+    )
+    ensure_pose_residue_matches_expected(
+        probe_perturbed_pose,
+        _WORKER_CONFIG.perturbation.target_residue_number,
+        _WORKER_CONFIG.perturbation.target_residue_name,
+        context="perturbed-state setup",
+    )
+    if _WORKER_CONFIG.energy.backend == "openmm":
+        probe_reference_structure = _WORKER_CONVERSION_SERVICE.prepare_structure_for_openmm(
+            _WORKER_CONVERSION_SERVICE.pose_to_structure(reference_pose)
+        )
+        probe_perturbed_structure = _WORKER_CONVERSION_SERVICE.prepare_structure_for_openmm(
+            _WORKER_CONVERSION_SERVICE.pose_to_structure(probe_perturbed_pose)
+        )
+        _WORKER_ENERGY_EVALUATOR.validate_topology(probe_reference_structure)
+        _WORKER_ENERGY_EVALUATOR.validate_topology(probe_perturbed_structure)
+    _WORKER_RUNTIME_PROTONATION_PRECHECKED = True
+
+
 def process_frame_job(job: SnapshotJob) -> FrameResult:
     """Process a single frame: assign microstate, convert, relax, perturb, rescore."""
     if any(
@@ -235,13 +236,7 @@ def process_frame_job(job: SnapshotJob) -> FrameResult:
         _WORKER_CONFIG.perturbation.target_residue_number,
         _WORKER_CONFIG.perturbation.original_residue_name,
     )
-    if _WORKER_CONFIG.perturbation.original_residue_name is not None:
-        ensure_pose_residue_matches_expected(
-            reference_pose,
-            _WORKER_CONFIG.perturbation.target_residue_number,
-            _WORKER_CONFIG.perturbation.original_residue_name,
-            context="reference-state setup",
-        )
+    _run_runtime_protonation_preflight(reference_pose)
     reference_measurement = _WORKER_RESTRAINT_PROTOCOL.measure_pose(reference_pose)
     assignment = _WORKER_ASSIGNMENT_POLICY.assign(
         _WORKER_ATLAS,
