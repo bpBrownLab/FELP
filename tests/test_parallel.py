@@ -259,7 +259,9 @@ def test_initialize_worker_only_runs_structure_level_protonation_checks(
     assert all(call[0] != "validate_openmm" for call in calls)
 
 
-def test_runtime_protonation_preflight_uses_first_frame_pose(monkeypatch) -> None:
+def test_runtime_protonation_preflight_uses_mutation_path_for_perturbed_state(
+    monkeypatch,
+) -> None:
     calls: list[tuple] = []
     reference_pose = object()
     perturbed_pose = object()
@@ -290,19 +292,20 @@ def test_runtime_protonation_preflight_uses_first_frame_pose(monkeypatch) -> Non
             calls.append(("validate_openmm", structure))
 
     class _FakePerturbationProtocol:
-        def enforce_residue_identity(
+        def mutate_pose(
             self,
             pose,
             target_residue_number: int,
-            target_residue_name: str | None,
+            target_residue_name: str,
             restraint_specs=(),
         ):
             calls.append(
                 (
-                    "enforce_identity",
+                    "mutate_pose",
                     pose,
                     target_residue_number,
                     target_residue_name,
+                    tuple(restraint_specs),
                 )
             )
             assert pose is reference_pose
@@ -312,8 +315,8 @@ def test_runtime_protonation_preflight_uses_first_frame_pose(monkeypatch) -> Non
         input=InputConfig(topology_file="unused", trajectory_files=(("unused",),)),
         perturbation=PerturbationConfig(
             target_residue_number=2,
-            target_residue_name="HIE",
-            original_residue_name="HID",
+            target_residue_name="TYR",
+            original_residue_name="GLY",
         ),
         rosetta=RosettaConfig(),
         restraints=RestraintConfig(),
@@ -351,9 +354,9 @@ def test_runtime_protonation_preflight_uses_first_frame_pose(monkeypatch) -> Non
     executor_module._run_runtime_protonation_preflight(reference_pose)
     executor_module._run_runtime_protonation_preflight(reference_pose)
 
-    assert ("match_pose", reference_pose, 2, "HID", "reference-state setup") in calls
-    assert ("enforce_identity", reference_pose, 2, "HIE") in calls
-    assert ("match_pose", perturbed_pose, 2, "HIE", "perturbed-state setup") in calls
+    assert ("match_pose", reference_pose, 2, "GLY", "reference-state setup") in calls
+    assert ("mutate_pose", reference_pose, 2, "TYR", ()) in calls
+    assert ("match_pose", perturbed_pose, 2, "TYR", "perturbed-state setup") in calls
     assert ("validate_openmm", prepared_reference_structure) in calls
     assert ("validate_openmm", prepared_perturbed_structure) in calls
-    assert calls.count(("enforce_identity", reference_pose, 2, "HIE")) == 1
+    assert calls.count(("mutate_pose", reference_pose, 2, "TYR", ())) == 1

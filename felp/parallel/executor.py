@@ -187,10 +187,14 @@ def _run_runtime_protonation_preflight(reference_pose) -> None:
             _WORKER_CONFIG.perturbation.original_residue_name,
             context="reference-state setup",
         )
-    probe_perturbed_pose = _WORKER_PERTURBATION_PROTOCOL.enforce_residue_identity(
+    # Use the real mutation path here so canonical mutations (e.g. GLY -> TYR)
+    # are preflighted through the same code path as production frames, while
+    # protonation/tautomer variants still resolve via mutate_pose().
+    probe_perturbed_pose = _WORKER_PERTURBATION_PROTOCOL.mutate_pose(
         reference_pose,
         _WORKER_CONFIG.perturbation.target_residue_number,
         _WORKER_CONFIG.perturbation.target_residue_name,
+        (),
     )
     ensure_pose_residue_matches_expected(
         probe_perturbed_pose,
