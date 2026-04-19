@@ -209,6 +209,46 @@ def test_reweighting_supports_discrete_states_with_plot_coordinates() -> None:
     assert result_by_id["0"].state_level == "cluster"
 
 
+def test_reweighting_reports_overlap_diagnostics_metadata() -> None:
+    atlas = MicrostateAtlas(
+        definitions=(
+            MicrostateDefinition("a", "a", (-180.0, 0.0), (-180.0, 180.0)),
+            MicrostateDefinition("b", "b", (0.0, 180.0), (-180.0, 180.0)),
+        ),
+        reference_probability_mode="raw_counts",
+    )
+    aggregator = ReweightingAggregator(temperature_kelvin=300.0)
+    results = aggregator.aggregate(
+        [
+            *(_frame_result(index, "a", 0.0) for index in range(40)),
+            *(_frame_result(index, "b", 5.0) for index in range(40, 49)),
+        ],
+        atlas,
+    )
+
+    metadata = results[0].metadata
+    attenuated_weight = math.exp(-aggregator.beta * 5.0)
+    total_weight = 40.0 + 9.0 * attenuated_weight
+    expected_global_ess = (total_weight**2) / (40.0 + 9.0 * attenuated_weight**2)
+    expected_target_b = (9.0 * attenuated_weight) / (40.0 + 9.0 * attenuated_weight)
+
+    assert metadata["eligible_frame_count"] == 49
+    assert metadata["global_effective_sample_size"] == pytest.approx(expected_global_ess)
+    assert metadata["global_effective_sample_fraction"] == pytest.approx(
+        expected_global_ess / 49.0
+    )
+    assert metadata["max_normalized_weight"] == pytest.approx(1.0 / total_weight)
+    assert metadata["top_1_percent_weight_mass"] == pytest.approx(1.0 / total_weight)
+    assert metadata["top_5_percent_weight_mass"] == pytest.approx(3.0 / total_weight)
+    assert metadata["top_10_percent_weight_mass"] == pytest.approx(5.0 / total_weight)
+    assert metadata["overlap_coefficient"] == pytest.approx((40.0 / 49.0) + expected_target_b)
+    assert metadata["target_probability_low_ess_mass_ess_lt_10"] == pytest.approx(
+        expected_target_b
+    )
+    assert metadata["target_probability_low_ess_mass_ess_lt_50"] == pytest.approx(1.0)
+    assert results[1].metadata == metadata
+
+
 def test_load_microstate_definitions_supports_generalized_cv_ranges(
     tmp_path: Path,
 ) -> None:

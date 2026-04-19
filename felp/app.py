@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 import json
-from typing import Sequence
+from typing import Any, Sequence
 
 from felp.cli import (
     build_felp_plot_config,
@@ -27,6 +27,31 @@ from felp.reweighting import (
     is_reweighting_eligible_frame,
 )
 
+_OVERLAP_SCOPE_NOTE = (
+    "These diagnostics only assess overlap on the sampled reference support and "
+    "the chosen microstate partition."
+)
+_OVERLAP_LIMITATIONS_NOTE = (
+    "They cannot prove the absence of unseen target-only states outside the "
+    "sampled reference support."
+)
+_OVERLAP_VALIDATION_NOTE = (
+    "When both directions are available, compare forward and reverse FELP runs "
+    "as a stronger overlap validation."
+)
+_OVERLAP_ASSESSMENT_THRESHOLDS = {
+    "poor": {
+        "global_effective_sample_fraction_lt": 0.01,
+        "target_probability_low_ess_mass_ess_lt_10_gt": 0.25,
+    },
+    "caution": {
+        "global_effective_sample_fraction_lt": 0.05,
+        "target_probability_low_ess_mass_ess_lt_10_gt": 0.10,
+        "overlap_coefficient_lt": 0.20,
+    },
+}
+
+
 def _write_stdout(payload: dict) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True))
 
@@ -40,6 +65,155 @@ def _build_execution_context(config):
         bundle.validate_against_input(config.input)
         return atlas, PrecomputedStateAssignmentPolicy(), bundle
     return atlas, None, None
+
+
+def _shared_microstate_metadata(microstate_results) -> dict[str, Any]:
+    """Return the shared metadata written onto every microstate result row."""
+
+    if not microstate_results:
+        return {}
+    return dict(microstate_results[0].metadata)
+
+
+def _build_overlap_diagnostics(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Return a structured overlap-diagnostic bundle for JSON summaries."""
+
+    if not metadata:
+        return {}
+    return {
+        "eligible_frame_count": int(metadata.get("eligible_frame_count", 0)),
+        "global_effective_sample_size": float(
+            metadata.get("global_effective_sample_size", 0.0)
+        ),
+        "global_effective_sample_fraction": float(
+            metadata.get("global_effective_sample_fraction", 0.0)
+        ),
+        "max_normalized_weight": float(metadata.get("max_normalized_weight", 0.0)),
+        "top_weight_mass_by_fraction": {
+            "top_1_percent": float(metadata.get("top_1_percent_weight_mass", 0.0)),
+            "top_5_percent": float(metadata.get("top_5_percent_weight_mass", 0.0)),
+            "top_10_percent": float(metadata.get("top_10_percent_weight_mass", 0.0)),
+        },
+        "overlap_coefficient": float(metadata.get("overlap_coefficient", 0.0)),
+        "target_probability_low_ess_mass_by_threshold": {
+            "ess_lt_10": float(
+                metadata.get("target_probability_low_ess_mass_ess_lt_10", 0.0)
+            ),
+            "ess_lt_50": float(
+                metadata.get("target_probability_low_ess_mass_ess_lt_50", 0.0)
+            ),
+        },
+        "assessment_thresholds": _OVERLAP_ASSESSMENT_THRESHOLDS,
+        "scope": _OVERLAP_SCOPE_NOTE,
+        "limitations": _OVERLAP_LIMITATIONS_NOTE,
+        "recommended_validation": _OVERLAP_VALIDATION_NOTE,
+    }
+
+
+def _format_overlap_metric(value: float) -> str:
+    """Return a compact numeric string for advisory messages."""
+
+    return f"{float(value):.4g}"
+
+
+def _assess_overlap_diagnostics(
+    overlap_diagnostics: dict[str, Any],
+) -> tuple[str | None, list[str]]:
+    """Assign an advisory trust label to the overlap-diagnostic bundle."""
+
+    if not overlap_diagnostics:
+        return None, []
+
+    ess_fraction = float(overlap_diagnostics["global_effective_sample_fraction"])
+    overlap_coefficient = float(overlap_diagnostics["overlap_coefficient"])
+    low_ess_mass_10 = float(
+        overlap_diagnostics["target_probability_low_ess_mass_by_threshold"]["ess_lt_10"]
+    )
+
+    poor_reasons: list[str] = []
+    caution_reasons: list[str] = []
+
+    poor_thresholds = _OVERLAP_ASSESSMENT_THRESHOLDS["poor"]
+    caution_thresholds = _OVERLAP_ASSESSMENT_THRESHOLDS["caution"]
+
+    if ess_fraction < poor_thresholds["global_effective_sample_fraction_lt"]:
+        poor_reasons.append(
+            "global ESS fraction is below the advisory poor threshold "
+            f"({_format_overlap_metric(ess_fraction)} < "
+            f"{poor_thresholds['global_effective_sample_fraction_lt']})."
+        )
+    elif ess_fraction < caution_thresholds["global_effective_sample_fraction_lt"]:
+        caution_reasons.append(
+            "global ESS fraction is below the advisory caution threshold "
+            f"({_format_overlap_metric(ess_fraction)} < "
+            f"{caution_thresholds['global_effective_sample_fraction_lt']})."
+        )
+
+    if low_ess_mass_10 > poor_thresholds["target_probability_low_ess_mass_ess_lt_10_gt"]:
+        poor_reasons.append(
+            "target probability mass in states with ESS < 10 exceeds the advisory "
+            "poor threshold "
+            f"({_format_overlap_metric(low_ess_mass_10)} > "
+            f"{poor_thresholds['target_probability_low_ess_mass_ess_lt_10_gt']})."
+        )
+    elif (
+        low_ess_mass_10
+        > caution_thresholds["target_probability_low_ess_mass_ess_lt_10_gt"]
+    ):
+        caution_reasons.append(
+            "target probability mass in states with ESS < 10 exceeds the advisory "
+            "caution threshold "
+            f"({_format_overlap_metric(low_ess_mass_10)} > "
+            f"{caution_thresholds['target_probability_low_ess_mass_ess_lt_10_gt']})."
+        )
+
+    if overlap_coefficient < caution_thresholds["overlap_coefficient_lt"]:
+        caution_reasons.append(
+            "discrete overlap coefficient is below the advisory caution threshold "
+            f"({_format_overlap_metric(overlap_coefficient)} < "
+            f"{caution_thresholds['overlap_coefficient_lt']})."
+        )
+
+    if poor_reasons:
+        return "poor", [*poor_reasons, *caution_reasons]
+    if caution_reasons:
+        return "caution", caution_reasons
+    return "ok", []
+
+
+def _build_reweighting_summary(
+    *,
+    frame_count: int,
+    reweighted_frame_count: int,
+    microstate_results,
+    output_dir: str,
+) -> dict[str, Any]:
+    """Build the shared JSON summary fields for FELP reweighting outputs."""
+
+    metadata = _shared_microstate_metadata(microstate_results)
+    overlap_diagnostics = _build_overlap_diagnostics(metadata)
+    overlap_assessment, overlap_assessment_reasons = _assess_overlap_diagnostics(
+        overlap_diagnostics
+    )
+    return {
+        "frame_count": frame_count,
+        "reweighted_frame_count": reweighted_frame_count,
+        "microstate_count": len(microstate_results),
+        "reference_probability_source": metadata.get("reference_probability_source"),
+        "prior_probability_mode": metadata.get("prior_probability_mode"),
+        "reference_probability_total": float(
+            sum(result.reference_probability for result in microstate_results)
+        ),
+        "target_probability_total": float(
+            sum(result.target_probability for result in microstate_results)
+        ),
+        "unsupported_state_count": int(metadata.get("unsupported_state_count", 0)),
+        "unsupported_state_ids": list(metadata.get("unsupported_state_ids", [])),
+        "overlap_assessment": overlap_assessment,
+        "overlap_assessment_reasons": overlap_assessment_reasons,
+        "overlap_diagnostics": overlap_diagnostics,
+        "output_dir": output_dir,
+    }
 
 
 def run_pipeline(config) -> dict:
@@ -90,46 +264,29 @@ def run_pipeline(config) -> dict:
         if result.metadata.get("status") != "failed"
     ]
     empirical_histogram = Counter(result.microstate_label for result in histogram_frames)
-    reference_probability_source = None
-    prior_probability_mode = None
-    unsupported_state_count = 0
-    unsupported_state_ids: list[str] = []
-    if microstate_results:
-        metadata = microstate_results[0].metadata
-        reference_probability_source = metadata.get("reference_probability_source")
-        prior_probability_mode = metadata.get("prior_probability_mode")
-        unsupported_state_count = int(metadata.get("unsupported_state_count", 0))
-        unsupported_state_ids = list(metadata.get("unsupported_state_ids", []))
-
-    summary = {
-        "frame_count": len(all_frame_results),
-        "new_frame_count": len(frame_results),
-        "failed_frame_count": failed_frame_count,
-        "new_failed_frame_count": new_failed_frame_count,
-        "reweighted_frame_count": reweighted_frame_count,
-        "microstate_count": len(microstate_results),
-        "microstate_histogram": dict(empirical_histogram),
-        "microstate_histogram_kind": "empirical_frame_counts",
-        "reference_probability_source": reference_probability_source,
-        "prior_probability_mode": prior_probability_mode,
-        "reference_probability_total": float(
-            sum(result.reference_probability for result in microstate_results)
-        ),
-        "target_probability_total": float(
-            sum(result.target_probability for result in microstate_results)
-        ),
-        "unsupported_state_count": unsupported_state_count,
-        "unsupported_state_ids": unsupported_state_ids,
-        "state_reweighting_estimator": (
-            "pi_target(i) proportional to "
-            "pi_reference(i) * <exp(-beta * delta_u)>_i"
-        ),
-        "microstate_source": config.microstates.source,
-        "microstate_definition_state_level": config.microstates.state_level,
-        "msm_bundle_dir": config.microstates.msm_bundle_dir,
-        "configured_cvs": [spec.name for spec in config.restraints.cv_specs],
-        "output_dir": config.output.output_dir,
-    }
+    summary = _build_reweighting_summary(
+        frame_count=len(all_frame_results),
+        reweighted_frame_count=reweighted_frame_count,
+        microstate_results=microstate_results,
+        output_dir=config.output.output_dir,
+    )
+    summary.update(
+        {
+            "new_frame_count": len(frame_results),
+            "failed_frame_count": failed_frame_count,
+            "new_failed_frame_count": new_failed_frame_count,
+            "microstate_histogram": dict(empirical_histogram),
+            "microstate_histogram_kind": "empirical_frame_counts",
+            "state_reweighting_estimator": (
+                "pi_target(i) proportional to "
+                "pi_reference(i) * <exp(-beta * delta_u)>_i"
+            ),
+            "microstate_source": config.microstates.source,
+            "microstate_definition_state_level": config.microstates.state_level,
+            "msm_bundle_dir": config.microstates.msm_bundle_dir,
+            "configured_cvs": [spec.name for spec in config.restraints.cv_specs],
+        }
+    )
     writer.write_summary(summary)
     return summary
 
@@ -164,34 +321,14 @@ def summarize_results(namespace) -> dict:
         atlas,
     )
     writer.write_microstate_results(microstate_results)
-    reference_probability_source = None
-    prior_probability_mode = None
-    unsupported_state_count = 0
-    unsupported_state_ids: list[str] = []
-    if microstate_results:
-        metadata = microstate_results[0].metadata
-        reference_probability_source = metadata.get("reference_probability_source")
-        prior_probability_mode = metadata.get("prior_probability_mode")
-        unsupported_state_count = int(metadata.get("unsupported_state_count", 0))
-        unsupported_state_ids = list(metadata.get("unsupported_state_ids", []))
-    summary = {
-        "frame_count": len(frame_results),
-        "reweighted_frame_count": sum(
+    summary = _build_reweighting_summary(
+        frame_count=len(frame_results),
+        reweighted_frame_count=sum(
             1 for result in frame_results if is_reweighting_eligible_frame(result)
         ),
-        "microstate_count": len(microstate_results),
-        "reference_probability_source": reference_probability_source,
-        "prior_probability_mode": prior_probability_mode,
-        "reference_probability_total": float(
-            sum(result.reference_probability for result in microstate_results)
-        ),
-        "target_probability_total": float(
-            sum(result.target_probability for result in microstate_results)
-        ),
-        "unsupported_state_count": unsupported_state_count,
-        "unsupported_state_ids": unsupported_state_ids,
-        "output_dir": namespace.output_dir,
-    }
+        microstate_results=microstate_results,
+        output_dir=namespace.output_dir,
+    )
     writer.write_summary(summary)
     _write_stdout(summary)
     return summary

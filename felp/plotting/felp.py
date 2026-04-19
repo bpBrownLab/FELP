@@ -155,6 +155,10 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
         reference_probabilities,
         target_probabilities,
     )
+    overlap_coefficient = _overlap_coefficient(
+        reference_probabilities,
+        target_probabilities,
+    )
     summary_metadata = _load_microstate_summary_metadata(rows)
 
     outputs = [
@@ -271,6 +275,7 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
         "kl_reference_to_target": float(kl_ref_to_target),
         "kl_target_to_reference": float(kl_target_to_ref),
         "jensen_shannon_divergence": float(js_divergence),
+        "overlap_coefficient": float(overlap_coefficient),
         "reference_probability_source": summary_metadata.get("reference_probability_source"),
         "prior_probability_mode": summary_metadata.get("prior_probability_mode"),
         "phi_psi_frame_projection_available": phi_psi_projection_available,
@@ -333,6 +338,12 @@ def _jensen_shannon_divergence(p: np.ndarray, q: np.ndarray) -> float:
     kl_pm, _ = _kl_divergence(safe_p, midpoint)
     kl_qm, _ = _kl_divergence(safe_q, midpoint)
     return 0.5 * (kl_pm + kl_qm)
+
+
+def _overlap_coefficient(p: np.ndarray, q: np.ndarray) -> float:
+    """Compute the bounded discrete overlap coefficient between distributions."""
+
+    return float(np.minimum(np.asarray(p, dtype=float), np.asarray(q, dtype=float)).sum())
 
 
 def _plot_occupancy_shift(

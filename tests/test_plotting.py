@@ -212,6 +212,7 @@ def test_generate_felp_plots(tmp_path: Path) -> None:
     )
 
     assert "kl_reference_to_target" in summary
+    assert summary["overlap_coefficient"] == pytest.approx(0.85)
     assert summary["reference_probability_source"] == "loaded"
     assert summary["phi_psi_frame_projection_available"] is True
     assert (tmp_path / "felp_plots" / "occupancy_shifts.png").is_file()

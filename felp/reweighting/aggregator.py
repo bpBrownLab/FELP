@@ -17,6 +17,8 @@ from felp.core import (
 )
 from .atlas import MicrostateAtlas
 
+_LOW_ESS_THRESHOLDS = (10, 50)
+
 
 def is_reweighting_eligible_frame(result: FrameResult) -> bool:
     """Return whether a frame can contribute to the reweighting estimate."""
@@ -112,6 +114,24 @@ def _unsupported_positive_prior_states(
     ]
 
 
+def _effective_sample_size(weights: np.ndarray) -> float:
+    """Return the standard importance-sampling ESS for a weight vector."""
+
+    if weights.size == 0:
+        return 0.0
+    return float((weights.sum() ** 2) / max(np.square(weights).sum(), 1.0e-12))
+
+
+def _top_weight_mass(normalized_weights: np.ndarray, fraction: float) -> float:
+    """Return the cumulative mass of the largest-weight fraction of frames."""
+
+    if normalized_weights.size == 0:
+        return 0.0
+    count = max(1, math.ceil(normalized_weights.size * fraction))
+    ordered = np.sort(normalized_weights)[::-1]
+    return float(ordered[:count].sum())
+
+
 @dataclass
 class ReweightingAggregator:
     """Aggregate per-frame deltaU values into reweighted microstate populations."""
@@ -140,6 +160,18 @@ class ReweightingAggregator:
             return []
 
         delta_shift = min(result.delta_u_kj_mol for result in eligible_frames)
+        global_delta_values = np.asarray(
+            [result.delta_u_kj_mol for result in eligible_frames],
+            dtype=float,
+        )
+        global_weights = np.exp(-self.beta * (global_delta_values - delta_shift))
+        global_weight_sum = float(global_weights.sum())
+        normalized_global_weights = (
+            global_weights / global_weight_sum
+            if global_weight_sum > 0.0
+            else np.zeros_like(global_weights)
+        )
+        global_effective_sample_size = _effective_sample_size(global_weights)
         grouped: dict[str, list[FrameResult]] = defaultdict(list)
         for result in eligible_frames:
             grouped[result.microstate_id].append(result)
@@ -177,7 +209,7 @@ class ReweightingAggregator:
                 std_delta_u = float(delta_values.std(ddof=0))
                 mean_weight = float(weights.mean())
                 std_weight = float(weights.std(ddof=0))
-                ess = float((weights.sum() ** 2) / max(np.square(weights).sum(), 1.0e-12))
+                ess = _effective_sample_size(weights)
             else:
                 reweight_factor = 0.0
                 mean_delta_u = None
@@ -212,12 +244,74 @@ class ReweightingAggregator:
                 "Check the chosen prior mode and frame support."
             )
 
-        microstate_results: list[MicrostateResult] = []
-        for item in preliminary_results:
-            definition = item["definition"]
-            target_probability = (
+        target_probabilities = np.asarray(
+            [
                 item["reference_probability"] * item["reweight_factor"] / normalization
+                for item in preliminary_results
+            ],
+            dtype=float,
+        )
+        reference_probability_vector = np.asarray(
+            [item["reference_probability"] for item in preliminary_results],
+            dtype=float,
+        )
+        overlap_coefficient = float(
+            np.minimum(reference_probability_vector, target_probabilities).sum()
+        )
+        target_probability_low_ess_mass = {
+            threshold: float(
+                sum(
+                    target_probability
+                    for item, target_probability in zip(
+                        preliminary_results,
+                        target_probabilities,
+                        strict=True,
+                    )
+                    if item["effective_sample_size"] < threshold
+                )
             )
+            for threshold in _LOW_ESS_THRESHOLDS
+        }
+        shared_metadata = {
+            "delta_shift_kj_mol": delta_shift,
+            "reference_probability_source": reference_probability_source,
+            "prior_probability_mode": atlas.reference_probability_mode,
+            "unsupported_state_count": 0,
+            "unsupported_state_ids": [],
+            "eligible_frame_count": len(eligible_frames),
+            "global_effective_sample_size": global_effective_sample_size,
+            "global_effective_sample_fraction": (
+                global_effective_sample_size / len(eligible_frames)
+            ),
+            "max_normalized_weight": (
+                float(normalized_global_weights.max())
+                if normalized_global_weights.size
+                else 0.0
+            ),
+            "top_1_percent_weight_mass": _top_weight_mass(
+                normalized_global_weights, 0.01
+            ),
+            "top_5_percent_weight_mass": _top_weight_mass(
+                normalized_global_weights, 0.05
+            ),
+            "top_10_percent_weight_mass": _top_weight_mass(
+                normalized_global_weights, 0.10
+            ),
+            "overlap_coefficient": overlap_coefficient,
+            "target_probability_low_ess_mass_ess_lt_10": (
+                target_probability_low_ess_mass[10]
+            ),
+            "target_probability_low_ess_mass_ess_lt_50": (
+                target_probability_low_ess_mass[50]
+            ),
+        }
+        microstate_results: list[MicrostateResult] = []
+        for item, target_probability in zip(
+            preliminary_results,
+            target_probabilities,
+            strict=True,
+        ):
+            definition = item["definition"]
             free_energy = None
             if target_probability > 0.0:
                 free_energy = -(
@@ -244,13 +338,7 @@ class ReweightingAggregator:
                     plot_x=definition.plot_x,
                     plot_y=definition.plot_y,
                     state_level=definition.state_level,
-                    metadata={
-                        "delta_shift_kj_mol": delta_shift,
-                        "reference_probability_source": reference_probability_source,
-                        "prior_probability_mode": atlas.reference_probability_mode,
-                        "unsupported_state_count": 0,
-                        "unsupported_state_ids": [],
-                    },
+                    metadata=dict(shared_metadata),
                 )
             )
 
