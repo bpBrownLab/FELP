@@ -300,9 +300,24 @@ class RosettaConfig:
     init_options: str = "-ignore_unrecognized_res true -load_PDB_components false"
     database_path: Optional[str] = None
     score_function: str = "ref2015"
+    perturbation_mode: str = "relax"
     relax_iterations: int = 5
+    repack_trials: int = 1
     cartesian: bool = True
+    symmetric_gly_tables: bool = False
     mute_tracers: bool = False
+
+    def __post_init__(self) -> None:
+        if self.perturbation_mode not in {"relax", "repack"}:
+            raise ConfigurationError(
+                "rosetta.perturbation_mode must be 'relax' or 'repack'."
+            )
+        if int(self.relax_iterations) < 1:
+            raise ConfigurationError("rosetta.relax_iterations must be at least 1.")
+        if int(self.repack_trials) < 1:
+            raise ConfigurationError("rosetta.repack_trials must be at least 1.")
+        object.__setattr__(self, "relax_iterations", int(self.relax_iterations))
+        object.__setattr__(self, "repack_trials", int(self.repack_trials))
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "RosettaConfig":
@@ -315,8 +330,11 @@ class RosettaConfig:
             ),
             database_path=payload.get("database_path"),
             score_function=payload.get("score_function", "ref2015"),
+            perturbation_mode=payload.get("perturbation_mode", "relax"),
             relax_iterations=payload.get("relax_iterations", 5),
+            repack_trials=payload.get("repack_trials", 1),
             cartesian=payload.get("cartesian", True),
+            symmetric_gly_tables=payload.get("symmetric_gly_tables", False),
             mute_tracers=payload.get("mute_tracers", False),
         )
 

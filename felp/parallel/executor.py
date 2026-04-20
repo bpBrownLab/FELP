@@ -127,8 +127,11 @@ def initialize_worker(
     )
     _WORKER_PERTURBATION_PROTOCOL = PyRosettaPerturbationProtocol(
         conversion_service=_WORKER_CONVERSION_SERVICE,
+        target_residue_number=config.perturbation.target_residue_number,
         score_function_name=config.rosetta.score_function,
+        perturbation_mode=config.rosetta.perturbation_mode,
         relax_iterations=config.rosetta.relax_iterations,
+        repack_trials=config.rosetta.repack_trials,
         cartesian=config.rosetta.cartesian,
         output_dir=config.output.output_dir,
         write_pose_pdbs=config.output.write_pose_pdbs,
@@ -143,6 +146,13 @@ def _build_pyrosetta_options(config: RunConfig) -> str:
     options = config.rosetta.init_options.strip()
     if config.rosetta.database_path:
         options = f"{options} -database {config.rosetta.database_path}".strip()
+    if (
+        config.rosetta.perturbation_mode == "repack"
+        and config.rosetta.repack_trials > 1
+        and "-packing:ndruns" not in options
+        and "-ndruns" not in options
+    ):
+        options = f"{options} -packing:ndruns {config.rosetta.repack_trials}".strip()
     protonation_names = {
         normalize_mutation_target_name(name)
         for name in (
@@ -160,6 +170,8 @@ def _build_pyrosetta_options(config: RunConfig) -> str:
         options = f"{options} -keep_input_protonation_state".strip()
     if protonation_names & {"HIP", "ASH", "GLH", "CYM", "LYN"} and "-pH_mode" not in options:
         options = f"{options} -pH_mode".strip()
+    if config.rosetta.symmetric_gly_tables and "-symmetric_gly_tables" not in options:
+        options = f"{options} -symmetric_gly_tables true".strip()
     if config.rosetta.mute_tracers and "-mute" not in options:
         options = f"{options} -mute all".strip()
     return options

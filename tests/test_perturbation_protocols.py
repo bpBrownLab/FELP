@@ -24,20 +24,16 @@ class _DummyPose:
         self,
         phi: float = -80.0,
         psi: float = 150.0,
+        omega: float = 180.0,
         residue_name: str = "GLY",
     ) -> None:
-        self.constraint_value = None
         self._phi = float(phi)
         self._psi = float(psi)
+        self._omega = float(omega)
         self._residue_name = str(residue_name)
 
     def clone(self):
-        clone = _DummyPose(self._phi, self._psi, self._residue_name)
-        clone.constraint_value = self.constraint_value
-        return clone
-
-    def constraint_set(self, value) -> None:
-        self.constraint_value = value
+        return _DummyPose(self._phi, self._psi, self._omega, self._residue_name)
 
     def phi(self, residue_number: int) -> float:
         assert residue_number == 2
@@ -47,6 +43,10 @@ class _DummyPose:
         assert residue_number == 2
         return self._psi
 
+    def omega(self, residue_number: int) -> float:
+        assert residue_number == 2
+        return self._omega
+
     def set_phi(self, residue_number: int, value: float) -> None:
         assert residue_number == 2
         self._phi = float(value)
@@ -55,9 +55,16 @@ class _DummyPose:
         assert residue_number == 2
         self._psi = float(value)
 
+    def set_omega(self, residue_number: int, value: float) -> None:
+        assert residue_number == 2
+        self._omega = float(value)
+
     def residue(self, residue_number: int):
         assert residue_number == 2
         return SimpleNamespace(name3=lambda: self._residue_name)
+
+    def dump_pdb(self, path: str) -> None:
+        self.dumped_path = path
 
 
 class _DummyScoreFunction:
@@ -93,7 +100,7 @@ def _restraint_specs() -> list[DihedralRestraintSpec]:
     ]
 
 
-def test_relax_pose_uses_cartesian_ready_scorefunction(monkeypatch) -> None:
+def test_relax_pose_uses_locked_movemap_and_task_factory(monkeypatch) -> None:
     create_calls: list[str] = []
     relax_calls: dict[str, object] = {}
 
@@ -110,6 +117,18 @@ def test_relax_pose_uses_cartesian_ready_scorefunction(monkeypatch) -> None:
             relax_calls["score_function"] = score_function
             relax_calls["iterations"] = iterations
 
+        def set_task_factory(self, task_factory) -> None:
+            relax_calls["task_factory"] = task_factory
+
+        def set_movemap(self, movemap) -> None:
+            relax_calls["movemap"] = movemap
+
+        def set_movemap_disables_packing_of_fixed_chi_positions(
+            self,
+            enabled: bool,
+        ) -> None:
+            relax_calls["disable_fixed_chi_packing"] = enabled
+
         def cartesian(self, enabled: bool) -> None:
             relax_calls["cartesian"] = enabled
 
@@ -117,8 +136,6 @@ def test_relax_pose_uses_cartesian_ready_scorefunction(monkeypatch) -> None:
             relax_calls["min_type"] = value
 
         def apply(self, pose) -> None:
-            pose.set_phi(2, -10.0)
-            pose.set_psi(2, 25.0)
             relax_calls["pose"] = pose
 
     fake_pyrosetta = SimpleNamespace(
@@ -145,29 +162,134 @@ def test_relax_pose_uses_cartesian_ready_scorefunction(monkeypatch) -> None:
         "felp.perturbation.protocols._import_pyrosetta",
         lambda: (fake_pyrosetta, object(), object()),
     )
-    monkeypatch.setattr(
-        PyRosettaPerturbationProtocol,
-        "_build_constraint_set",
-        lambda self, pose, restraint_specs: "constraints",
-    )
 
     protocol = PyRosettaPerturbationProtocol(
         conversion_service=_DummyConversionService(),
+        target_residue_number=2,
         score_function_name="ref2015",
+        perturbation_mode="relax",
         relax_iterations=3,
         cartesian=True,
+    )
+    selector = object()
+    task_factory = object()
+    movemap = object()
+    monkeypatch.setattr(
+        protocol,
+        "_build_packable_selector",
+        lambda pyrosetta: selector,
+    )
+    monkeypatch.setattr(
+        protocol,
+        "_build_task_factory",
+        lambda pyrosetta, packable_selector: task_factory,
+    )
+    monkeypatch.setattr(
+        protocol,
+        "_build_movemap",
+        lambda pyrosetta, pose, packable_selector: movemap,
     )
     result_pose = protocol._relax_pose(_DummyPose(), _restraint_specs(), 0, "reference")
 
     assert create_calls == ["ref2015_cart"]
     assert relax_calls["iterations"] == 3
+    assert relax_calls["task_factory"] is task_factory
+    assert relax_calls["movemap"] is movemap
+    assert relax_calls["disable_fixed_chi_packing"] is True
     assert relax_calls["cartesian"] is True
     assert relax_calls["min_type"] == "lbfgs_armijo_nonmonotone"
-    assert relax_calls["score_function"].weights["dihedral_constraint"] == 1.0
     assert relax_calls["score_function"].weights["cart_bonded"] == 0.5
     assert relax_calls["score_function"].weights["pro_close"] == 0.0
     assert isinstance(result_pose, _DummyPose)
-    assert result_pose.constraint_value == "constraints"
+    assert result_pose.phi(2) == -60.0
+    assert result_pose.psi(2) == 140.0
+
+
+def test_repack_pose_uses_packrotamers_trials(monkeypatch) -> None:
+    create_calls: list[str] = []
+    repack_calls: dict[str, object] = {}
+
+    def create_score_function(name: str):
+        create_calls.append(name)
+        return _DummyScoreFunction(name)
+
+    class _FakePackRotamersMover:
+        def __init__(self, score_function, packer_task) -> None:
+            repack_calls["score_function"] = score_function
+            repack_calls["packer_task"] = packer_task
+
+        def nloop(self, value: int) -> None:
+            repack_calls["nloop"] = value
+
+        def apply(self, pose) -> None:
+            repack_calls["pose"] = pose
+
+    fake_pyrosetta = SimpleNamespace(
+        create_score_function=create_score_function,
+        rosetta=SimpleNamespace(
+            protocols=SimpleNamespace(
+                minimization_packing=SimpleNamespace(
+                    PackRotamersMover=_FakePackRotamersMover,
+                )
+            )
+        ),
+    )
+
+    monkeypatch.setattr(
+        "felp.perturbation.protocols._import_pyrosetta",
+        lambda: (fake_pyrosetta, object(), object()),
+    )
+
+    protocol = PyRosettaPerturbationProtocol(
+        conversion_service=_DummyConversionService(),
+        target_residue_number=2,
+        perturbation_mode="repack",
+        repack_trials=4,
+    )
+    selector = object()
+    task_factory = SimpleNamespace(
+        create_task_and_apply_taskoperations=lambda pose: "packer-task"
+    )
+    monkeypatch.setattr(protocol, "_build_packable_selector", lambda pyrosetta: selector)
+    monkeypatch.setattr(
+        protocol,
+        "_build_task_factory",
+        lambda pyrosetta, packable_selector: task_factory,
+    )
+
+    result_pose = protocol._repack_pose(_DummyPose(), _restraint_specs(), 0, "reference")
+
+    assert create_calls == ["ref2015"]
+    assert repack_calls["packer_task"] == "packer-task"
+    assert repack_calls["nloop"] == 4
+    assert repack_calls["pose"] is result_pose
+    assert result_pose.phi(2) == -60.0
+    assert result_pose.psi(2) == 140.0
+
+
+def test_mutate_pose_skips_identity_mutation(monkeypatch) -> None:
+    mutate_calls: list[tuple[int, str]] = []
+
+    class _FakeMutateResidue:
+        def __init__(self, residue_number: int, residue_name: str) -> None:
+            self.residue_number = residue_number
+            self.residue_name = residue_name
+
+        def apply(self, pose) -> None:
+            mutate_calls.append((self.residue_number, self.residue_name))
+
+    monkeypatch.setattr(
+        "felp.perturbation.protocols._import_pyrosetta",
+        lambda: (SimpleNamespace(), object(), _FakeMutateResidue),
+    )
+
+    protocol = PyRosettaPerturbationProtocol(
+        conversion_service=_DummyConversionService(),
+        target_residue_number=2,
+    )
+    result_pose = protocol.mutate_pose(_DummyPose(residue_name="GLY"), 2, "GLY", _restraint_specs())
+
+    assert mutate_calls == []
     assert result_pose.phi(2) == -60.0
     assert result_pose.psi(2) == 140.0
 
@@ -191,6 +313,7 @@ def test_enforce_residue_identity_mutates_within_same_family(monkeypatch) -> Non
 
     protocol = PyRosettaPerturbationProtocol(
         conversion_service=_DummyConversionService(),
+        target_residue_number=2,
     )
     result_pose = protocol.enforce_residue_identity(_DummyPose(residue_name="HIS"), 2, "HIE")
 
@@ -217,6 +340,7 @@ def test_enforce_residue_identity_uses_rosetta_protonated_acid_name(monkeypatch)
 
     protocol = PyRosettaPerturbationProtocol(
         conversion_service=_DummyConversionService(),
+        target_residue_number=2,
     )
     result_pose = protocol.enforce_residue_identity(_DummyPose(residue_name="ASP"), 2, "ASH")
 
@@ -227,6 +351,7 @@ def test_enforce_residue_identity_uses_rosetta_protonated_acid_name(monkeypatch)
 def test_enforce_residue_identity_rejects_incompatible_family(monkeypatch) -> None:
     protocol = PyRosettaPerturbationProtocol(
         conversion_service=_DummyConversionService(),
+        target_residue_number=2,
     )
 
     with pytest.raises(ConversionError, match="incompatible input residue"):

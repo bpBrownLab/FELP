@@ -242,18 +242,46 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
     rosetta_group.add_argument(
         "--rosetta-score-function",
         default="ref2015",
-        help="Rosetta score function for minimization and optional scoring.",
+        help="Rosetta score function for relax/repack preparation and optional scoring.",
+    )
+    rosetta_group.add_argument(
+        "--rosetta-perturbation-mode",
+        choices=("relax", "repack"),
+        default="relax",
+        help=(
+            "Rosetta local preparation mode for reference/perturbed poses: "
+            "'relax' uses FastRelax with backbone CVs locked, while 'repack' "
+            "uses sidechain repacking only."
+        ),
     )
     rosetta_group.add_argument(
         "--rosetta-relax-iterations",
         default=5,
         type=int,
-        help="Number of FastRelax iterations to perform.",
+        help="Number of FastRelax iterations to perform when --rosetta-perturbation-mode=relax.",
+    )
+    rosetta_group.add_argument(
+        "--rosetta-repack-trials",
+        default=1,
+        type=int,
+        help=(
+            "Number of Rosetta packing trials to request when "
+            "--rosetta-perturbation-mode=repack. Values >1 ask PackRotamersMover "
+            "to keep the best local repack result."
+        ),
     )
     rosetta_group.add_argument(
         "--no-cartesian-relax",
         action="store_true",
-        help="Disable Cartesian FastRelax.",
+        help="Disable Cartesian FastRelax when --rosetta-perturbation-mode=relax.",
+    )
+    rosetta_group.add_argument(
+        "--rosetta-symmetric-gly-tables",
+        action="store_true",
+        help=(
+            "Append '-symmetric_gly_tables true' to pyrosetta.init so Rosetta "
+            "uses symmetric glycine Ramachandran tables when supported."
+        ),
     )
     rosetta_group.add_argument(
         "--mute-pyrosetta",
@@ -866,8 +894,11 @@ def build_run_config(namespace: argparse.Namespace) -> RunConfig:
             init_options=namespace.pyrosetta_init_options,
             database_path=namespace.rosetta_database,
             score_function=namespace.rosetta_score_function,
+            perturbation_mode=namespace.rosetta_perturbation_mode,
             relax_iterations=namespace.rosetta_relax_iterations,
+            repack_trials=namespace.rosetta_repack_trials,
             cartesian=not namespace.no_cartesian_relax,
+            symmetric_gly_tables=namespace.rosetta_symmetric_gly_tables,
             mute_tracers=namespace.mute_pyrosetta,
         ),
         restraints=RestraintConfig(

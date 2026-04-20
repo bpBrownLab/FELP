@@ -62,6 +62,9 @@ def test_build_run_config_from_cli(tmp_path: Path) -> None:
     assert config.restraints.openmm_restraint_force_constant is None
     assert config.restraints.effective_rosetta_force_constant() == 10000.0
     assert config.restraints.effective_openmm_force_constant() == 10000.0
+    assert config.rosetta.perturbation_mode == "relax"
+    assert config.rosetta.repack_trials == 1
+    assert config.rosetta.symmetric_gly_tables is False
 
 
 def test_build_run_config_restraint_overrides_and_cv_tolerance(tmp_path: Path) -> None:
@@ -288,6 +291,42 @@ def test_build_run_config_mute_pyrosetta(tmp_path: Path) -> None:
 
     config = build_run_config(namespace)
     assert config.rosetta.mute_tracers is True
+
+
+def test_build_run_config_rosetta_perturbation_controls(tmp_path: Path) -> None:
+    topology = tmp_path / "input.pdb"
+    trajectory = tmp_path / "input.xtc"
+    topology.write_text("placeholder\n", encoding="utf-8")
+    trajectory.write_text("placeholder\n", encoding="utf-8")
+
+    parser = build_parser()
+    namespace = parser.parse_args(
+        [
+            "run",
+            "--topology-file",
+            str(topology),
+            "--trajectory-file",
+            str(trajectory),
+            "--target-residue-number",
+            "2",
+            "--target-residue-name",
+            "GLY",
+            "--output-dir",
+            str(tmp_path / "out"),
+            "--prior-probability-mode",
+            "raw_counts",
+            "--rosetta-perturbation-mode",
+            "repack",
+            "--rosetta-repack-trials",
+            "5",
+            "--rosetta-symmetric-gly-tables",
+        ]
+    )
+
+    config = build_run_config(namespace)
+    assert config.rosetta.perturbation_mode == "repack"
+    assert config.rosetta.repack_trials == 5
+    assert config.rosetta.symmetric_gly_tables is True
 
 
 def test_build_run_config_prior_mode_alias(tmp_path: Path) -> None:

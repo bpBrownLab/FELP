@@ -185,6 +185,32 @@ def test_build_pyrosetta_options_enables_ph_mode_for_explicit_protonation_states
     assert "-pH_mode" in options
 
 
+def test_build_pyrosetta_options_enable_repack_trials_and_symmetric_gly() -> None:
+    config = RunConfig(
+        input=InputConfig(topology_file="unused", trajectory_files=(("unused",),)),
+        perturbation=PerturbationConfig(
+            target_residue_number=2,
+            target_residue_name="GLY",
+            original_residue_name="GLY",
+        ),
+        rosetta=RosettaConfig(
+            perturbation_mode="repack",
+            repack_trials=4,
+            symmetric_gly_tables=True,
+        ),
+        restraints=RestraintConfig(),
+        energy=EnergyConfig(),
+        microstates=MicrostateConfig(),
+        parallel=ParallelConfig(workers=1),
+        output=OutputConfig(output_dir="unused"),
+    )
+
+    options = executor_module._build_pyrosetta_options(config)
+
+    assert "-packing:ndruns 4" in options
+    assert "-symmetric_gly_tables true" in options
+
+
 def test_initialize_worker_only_runs_structure_level_protonation_checks(
     monkeypatch,
 ) -> None:
@@ -216,7 +242,11 @@ def test_initialize_worker_only_runs_structure_level_protonation_checks(
             target_residue_name="HIE",
             original_residue_name="HID",
         ),
-        rosetta=RosettaConfig(),
+        rosetta=RosettaConfig(
+            perturbation_mode="repack",
+            repack_trials=3,
+            symmetric_gly_tables=True,
+        ),
         restraints=RestraintConfig(),
         energy=EnergyConfig(backend="openmm"),
         microstates=MicrostateConfig(),
@@ -257,6 +287,11 @@ def test_initialize_worker_only_runs_structure_level_protonation_checks(
     assert ("validate_residue_type", "HID", "reference/original state") in calls
     assert ("validate_residue_type", "HIE", "mutation target") in calls
     assert all(call[0] != "validate_openmm" for call in calls)
+    protocol_call = next(call for call in calls if call[0] == "protocol")
+    assert protocol_call[1]["target_residue_number"] == 2
+    assert protocol_call[1]["perturbation_mode"] == "repack"
+    assert protocol_call[1]["repack_trials"] == 3
+
 
 
 def test_runtime_protonation_preflight_uses_mutation_path_for_perturbed_state(
