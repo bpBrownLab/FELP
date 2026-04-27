@@ -38,6 +38,7 @@ def _reference_probability_map(
     atlas: MicrostateAtlas,
     grouped: dict[str, list[FrameResult]],
     empirical_total: int,
+    reference_counts: dict[str, int] | None = None,
 ) -> tuple[dict[str, float], str]:
     """Return the normalized reference prior for each state."""
 
@@ -83,12 +84,25 @@ def _reference_probability_map(
         return reference_probabilities, "loaded"
 
     if mode == "raw_counts":
+        count_source = reference_counts if reference_counts is not None else None
+        if count_source is not None:
+            empirical_total = sum(
+                int(count_source.get(definition.state_id, 0))
+                for definition in atlas.definitions
+            )
         if empirical_total <= 0:
             raise ReweightingError(
                 "Raw-count prior reweighting requires at least one eligible frame."
             )
         reference_probabilities = {
-            definition.state_id: len(grouped.get(definition.state_id, [])) / empirical_total
+            definition.state_id: (
+                (
+                    int(count_source.get(definition.state_id, 0))
+                    if count_source is not None
+                    else len(grouped.get(definition.state_id, []))
+                )
+                / empirical_total
+            )
             for definition in atlas.definitions
         }
         return reference_probabilities, "raw_counts"
@@ -146,6 +160,9 @@ class ReweightingAggregator:
         self,
         frame_results: Iterable[FrameResult],
         atlas: MicrostateAtlas,
+        *,
+        reference_counts: dict[str, int] | None = None,
+        sampling_metadata: dict[str, object] | None = None,
     ) -> list[MicrostateResult]:
         """Compute Zwanzig reweighting factors and reconstruct target state populations."""
 
@@ -180,6 +197,7 @@ class ReweightingAggregator:
             atlas,
             grouped,
             len(eligible_frames),
+            reference_counts=reference_counts,
         )
         unsupported_state_ids = _unsupported_positive_prior_states(
             atlas,
@@ -222,6 +240,11 @@ class ReweightingAggregator:
                 {
                     "definition": definition,
                     "frame_count": len(state_frames),
+                    "assigned_frame_count": (
+                        int(reference_counts.get(definition.state_id, 0))
+                        if reference_counts is not None
+                        else len(state_frames)
+                    ),
                     "reference_probability": reference_probabilities.get(
                         definition.state_id, 0.0
                     ),
@@ -279,6 +302,11 @@ class ReweightingAggregator:
             "unsupported_state_count": 0,
             "unsupported_state_ids": [],
             "eligible_frame_count": len(eligible_frames),
+            "reference_count_scope": (
+                "full_assigned_frames"
+                if reference_counts is not None
+                else "evaluated_eligible_frames"
+            ),
             "global_effective_sample_size": global_effective_sample_size,
             "global_effective_sample_fraction": (
                 global_effective_sample_size / len(eligible_frames)
@@ -305,6 +333,8 @@ class ReweightingAggregator:
                 target_probability_low_ess_mass[50]
             ),
         }
+        if sampling_metadata is not None:
+            shared_metadata["sampling"] = dict(sampling_metadata)
         microstate_results: list[MicrostateResult] = []
         for item, target_probability in zip(
             preliminary_results,
@@ -338,7 +368,11 @@ class ReweightingAggregator:
                     plot_x=definition.plot_x,
                     plot_y=definition.plot_y,
                     state_level=definition.state_level,
-                    metadata=dict(shared_metadata),
+                    metadata={
+                        **shared_metadata,
+                        "assigned_frame_count": item["assigned_frame_count"],
+                        "evaluated_frame_count": item["frame_count"],
+                    },
                 )
             )
 

@@ -16,6 +16,7 @@ from felp.core import (
     RestraintConfig,
     RosettaConfig,
     RunConfig,
+    SamplingConfig,
     ConfigurationError,
     default_backbone_cv_specs,
 )
@@ -352,6 +353,41 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
             "Maximum allowed |measured CV − restraint target| after Rosetta relax or "
             "OpenMM minimization before the frame fails validation."
         ),
+    )
+
+    sampling_group = parser.add_argument_group("Evaluation sampling")
+    sampling_group.add_argument(
+        "--microstate-sample-fraction",
+        type=float,
+        default=1.0,
+        help=(
+            "Uniform random fraction of frames to evaluate within each assigned "
+            "microstate. The default 1.0 preserves all frames."
+        ),
+    )
+    sampling_group.add_argument(
+        "--microstate-min-samples",
+        type=int,
+        default=1,
+        help=(
+            "Minimum number of frames to evaluate per assigned microstate when "
+            "subsampling, capped by the number available in that state."
+        ),
+    )
+    sampling_group.add_argument(
+        "--microstate-max-samples",
+        type=int,
+        default=None,
+        help=(
+            "Optional maximum number of frames to evaluate per assigned microstate "
+            "after applying --microstate-sample-fraction."
+        ),
+    )
+    sampling_group.add_argument(
+        "--microstate-sampling-seed",
+        type=int,
+        default=0,
+        help="Random seed for deterministic microstate-stratified frame sampling.",
     )
 
     energy_group = parser.add_argument_group("Energy")
@@ -949,6 +985,12 @@ def build_run_config(namespace: argparse.Namespace) -> RunConfig:
             write_pose_pdbs=namespace.write_pose_pdbs,
             overwrite=namespace.overwrite,
             resume=namespace.resume,
+        ),
+        sampling=SamplingConfig(
+            microstate_sample_fraction=namespace.microstate_sample_fraction,
+            microstate_min_samples=namespace.microstate_min_samples,
+            microstate_max_samples=namespace.microstate_max_samples,
+            microstate_sampling_seed=namespace.microstate_sampling_seed,
         ),
     )
     config.validate()

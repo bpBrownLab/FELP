@@ -65,6 +65,10 @@ def test_build_run_config_from_cli(tmp_path: Path) -> None:
     assert config.rosetta.perturbation_mode == "relax"
     assert config.rosetta.repack_trials == 1
     assert config.rosetta.symmetric_gly_tables is False
+    assert config.sampling.microstate_sample_fraction == 1.0
+    assert config.sampling.microstate_min_samples == 1
+    assert config.sampling.microstate_max_samples is None
+    assert config.sampling.microstate_sampling_seed == 0
 
 
 def test_build_run_config_restraint_overrides_and_cv_tolerance(tmp_path: Path) -> None:
@@ -327,6 +331,77 @@ def test_build_run_config_rosetta_perturbation_controls(tmp_path: Path) -> None:
     assert config.rosetta.perturbation_mode == "repack"
     assert config.rosetta.repack_trials == 5
     assert config.rosetta.symmetric_gly_tables is True
+
+
+def test_build_run_config_microstate_sampling_controls(tmp_path: Path) -> None:
+    topology = tmp_path / "input.pdb"
+    trajectory = tmp_path / "input.xtc"
+    topology.write_text("placeholder\n", encoding="utf-8")
+    trajectory.write_text("placeholder\n", encoding="utf-8")
+
+    parser = build_parser()
+    namespace = parser.parse_args(
+        [
+            "run",
+            "--topology-file",
+            str(topology),
+            "--trajectory-file",
+            str(trajectory),
+            "--target-residue-number",
+            "2",
+            "--target-residue-name",
+            "ALA",
+            "--output-dir",
+            str(tmp_path / "out"),
+            "--prior-probability-mode",
+            "raw_counts",
+            "--microstate-sample-fraction",
+            "0.25",
+            "--microstate-min-samples",
+            "5",
+            "--microstate-max-samples",
+            "20",
+            "--microstate-sampling-seed",
+            "123",
+        ]
+    )
+
+    config = build_run_config(namespace)
+    assert config.sampling.microstate_sample_fraction == 0.25
+    assert config.sampling.microstate_min_samples == 5
+    assert config.sampling.microstate_max_samples == 20
+    assert config.sampling.microstate_sampling_seed == 123
+
+
+def test_build_run_config_rejects_invalid_sampling_controls(tmp_path: Path) -> None:
+    topology = tmp_path / "input.pdb"
+    trajectory = tmp_path / "input.xtc"
+    topology.write_text("placeholder\n", encoding="utf-8")
+    trajectory.write_text("placeholder\n", encoding="utf-8")
+
+    parser = build_parser()
+    namespace = parser.parse_args(
+        [
+            "run",
+            "--topology-file",
+            str(topology),
+            "--trajectory-file",
+            str(trajectory),
+            "--target-residue-number",
+            "2",
+            "--target-residue-name",
+            "ALA",
+            "--output-dir",
+            str(tmp_path / "out"),
+            "--prior-probability-mode",
+            "raw_counts",
+            "--microstate-sample-fraction",
+            "0",
+        ]
+    )
+
+    with pytest.raises(ConfigurationError, match="microstate_sample_fraction"):
+        build_run_config(namespace)
 
 
 def test_build_run_config_prior_mode_alias(tmp_path: Path) -> None:

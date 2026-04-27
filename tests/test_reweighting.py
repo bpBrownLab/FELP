@@ -58,6 +58,35 @@ def test_reweighting_uses_empirical_reference_probabilities() -> None:
     assert result_by_id["a"].metadata["reference_probability_source"] == "raw_counts"
 
 
+def test_reweighting_raw_counts_can_use_full_assigned_reference_counts() -> None:
+    atlas = MicrostateAtlas(
+        definitions=(
+            MicrostateDefinition("a", "a", (-180.0, 0.0), (-180.0, 180.0)),
+            MicrostateDefinition("b", "b", (0.0, 180.0), (-180.0, 180.0)),
+        ),
+        reference_probability_mode="raw_counts",
+    )
+    aggregator = ReweightingAggregator(temperature_kelvin=300.0)
+    results = aggregator.aggregate(
+        [
+            _frame_result(0, "a", 0.0),
+            _frame_result(1, "b", 10.0),
+        ],
+        atlas,
+        reference_counts={"a": 9, "b": 1},
+        sampling_metadata={"selected_frame_count": 2, "total_assigned_frame_count": 10},
+    )
+
+    result_by_id = {result.state_id: result for result in results}
+    assert result_by_id["a"].reference_probability == 0.9
+    assert result_by_id["b"].reference_probability == 0.1
+    assert result_by_id["a"].frame_count == 1
+    assert result_by_id["a"].metadata["assigned_frame_count"] == 9
+    assert result_by_id["a"].metadata["evaluated_frame_count"] == 1
+    assert result_by_id["a"].metadata["reference_count_scope"] == "full_assigned_frames"
+    assert result_by_id["a"].metadata["sampling"]["total_assigned_frame_count"] == 10
+
+
 def test_reweighting_ignores_failed_frames() -> None:
     atlas = MicrostateAtlas(
         definitions=(
@@ -246,7 +275,13 @@ def test_reweighting_reports_overlap_diagnostics_metadata() -> None:
         expected_target_b
     )
     assert metadata["target_probability_low_ess_mass_ess_lt_50"] == pytest.approx(1.0)
-    assert results[1].metadata == metadata
+    shared_metadata_keys = set(metadata) - {
+        "assigned_frame_count",
+        "evaluated_frame_count",
+    }
+    assert {
+        key: results[1].metadata[key] for key in shared_metadata_keys
+    } == {key: metadata[key] for key in shared_metadata_keys}
 
 
 def test_load_microstate_definitions_supports_generalized_cv_ranges(

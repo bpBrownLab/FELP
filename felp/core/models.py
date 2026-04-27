@@ -514,6 +514,67 @@ class MicrostateConfig:
 
 
 @dataclass(frozen=True)
+class SamplingConfig:
+    """Configuration for microstate-stratified evaluation sampling."""
+
+    microstate_sample_fraction: float = 1.0
+    microstate_min_samples: int = 1
+    microstate_max_samples: Optional[int] = None
+    microstate_sampling_seed: int = 0
+    sampling_manifest_name: str = "sampling_manifest.json"
+
+    def __post_init__(self) -> None:
+        fraction = float(self.microstate_sample_fraction)
+        if not 0.0 < fraction <= 1.0:
+            raise ConfigurationError(
+                "microstate_sample_fraction must be in the interval (0, 1]."
+            )
+        min_samples = int(self.microstate_min_samples)
+        if min_samples < 0:
+            raise ConfigurationError("microstate_min_samples must be non-negative.")
+        max_samples = self.microstate_max_samples
+        if max_samples is not None:
+            max_samples = int(max_samples)
+            if max_samples < min_samples:
+                raise ConfigurationError(
+                    "microstate_max_samples must be greater than or equal to "
+                    "microstate_min_samples when set."
+                )
+        seed = int(self.microstate_sampling_seed)
+        manifest_name = self.sampling_manifest_name.strip()
+        if not manifest_name:
+            raise ConfigurationError("sampling_manifest_name may not be empty.")
+        object.__setattr__(self, "microstate_sample_fraction", fraction)
+        object.__setattr__(self, "microstate_min_samples", min_samples)
+        object.__setattr__(self, "microstate_max_samples", max_samples)
+        object.__setattr__(self, "microstate_sampling_seed", seed)
+        object.__setattr__(self, "sampling_manifest_name", manifest_name)
+
+    @property
+    def is_noop(self) -> bool:
+        """Return whether sampling preserves all assigned frames."""
+
+        return (
+            self.microstate_sample_fraction == 1.0
+            and self.microstate_max_samples is None
+        )
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "SamplingConfig":
+        """Rehydrate the config from a serialized dictionary."""
+
+        return cls(
+            microstate_sample_fraction=payload.get("microstate_sample_fraction", 1.0),
+            microstate_min_samples=payload.get("microstate_min_samples", 1),
+            microstate_max_samples=payload.get("microstate_max_samples"),
+            microstate_sampling_seed=payload.get("microstate_sampling_seed", 0),
+            sampling_manifest_name=payload.get(
+                "sampling_manifest_name", "sampling_manifest.json"
+            ),
+        )
+
+
+@dataclass(frozen=True)
 class ParallelConfig:
     """Configuration for multiprocessing execution."""
 
@@ -585,6 +646,7 @@ class RunConfig:
     microstates: MicrostateConfig
     parallel: ParallelConfig
     output: OutputConfig
+    sampling: SamplingConfig = field(default_factory=SamplingConfig)
 
     def validate(self) -> None:
         """Validate the run configuration before any heavy work begins."""
@@ -726,6 +788,7 @@ class RunConfig:
             microstates=MicrostateConfig.from_dict(payload["microstates"]),
             parallel=ParallelConfig.from_dict(payload["parallel"]),
             output=OutputConfig.from_dict(payload["output"]),
+            sampling=SamplingConfig.from_dict(payload.get("sampling", {})),
         )
 
 

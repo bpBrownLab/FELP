@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 import json
+import os
 from typing import Any, Sequence
 
 from felp.cli import (
@@ -24,7 +25,12 @@ from felp.reweighting import (
     MicrostateAtlas,
     PrecomputedStateAssignmentPolicy,
     ReweightingAggregator,
+    SamplingManifest,
+    ensure_existing_results_match_manifest,
     is_reweighting_eligible_frame,
+    load_or_create_sampling_manifest,
+    manifest_counts_for_atlas,
+    selected_jobs_from_manifest,
 )
 
 _OVERLAP_SCOPE_NOTE = (
@@ -201,6 +207,7 @@ def _build_reweighting_summary(
         "microstate_count": len(microstate_results),
         "reference_probability_source": metadata.get("reference_probability_source"),
         "prior_probability_mode": metadata.get("prior_probability_mode"),
+        "reference_count_scope": metadata.get("reference_count_scope"),
         "reference_probability_total": float(
             sum(result.reference_probability for result in microstate_results)
         ),
@@ -209,6 +216,7 @@ def _build_reweighting_summary(
         ),
         "unsupported_state_count": int(metadata.get("unsupported_state_count", 0)),
         "unsupported_state_ids": list(metadata.get("unsupported_state_ids", [])),
+        "sampling": metadata.get("sampling"),
         "overlap_assessment": overlap_assessment,
         "overlap_assessment_reasons": overlap_assessment_reasons,
         "overlap_diagnostics": overlap_diagnostics,
@@ -228,10 +236,27 @@ def run_pipeline(config) -> dict:
         bundle=bundle,
         state_level=config.microstates.state_level,
     ).load_jobs()
+    manifest_path = os.path.join(
+        config.output.output_dir,
+        config.sampling.sampling_manifest_name,
+    )
+    sampling_manifest = load_or_create_sampling_manifest(
+        manifest_path=manifest_path,
+        jobs=jobs,
+        atlas=atlas,
+        config=config,
+    )
+    sampled_jobs = selected_jobs_from_manifest(jobs, sampling_manifest)
 
     existing_results = writer.read_frame_results() if config.output.resume else []
+    ensure_existing_results_match_manifest(
+        (result.frame_index for result in existing_results),
+        sampling_manifest,
+    )
     completed_indices = {result.frame_index for result in existing_results}
-    pending_jobs = [job for job in jobs if job.frame_index not in completed_indices]
+    pending_jobs = [
+        job for job in sampled_jobs if job.frame_index not in completed_indices
+    ]
 
     frame_results = FrameExecutor(
         config,
@@ -244,7 +269,18 @@ def run_pipeline(config) -> dict:
     )
 
     aggregator = ReweightingAggregator(config.energy.temperature_kelvin)
-    microstate_results = aggregator.aggregate(all_frame_results, atlas)
+    sampling_metadata = sampling_manifest.metadata()
+    reference_counts = (
+        manifest_counts_for_atlas(sampling_manifest, atlas)
+        if not config.sampling.is_noop
+        else None
+    )
+    microstate_results = aggregator.aggregate(
+        all_frame_results,
+        atlas,
+        reference_counts=reference_counts,
+        sampling_metadata=sampling_metadata,
+    )
 
     writer.write_frame_results(all_frame_results)
     writer.write_microstate_results(microstate_results)
@@ -277,6 +313,9 @@ def run_pipeline(config) -> dict:
             "new_failed_frame_count": new_failed_frame_count,
             "microstate_histogram": dict(empirical_histogram),
             "microstate_histogram_kind": "empirical_frame_counts",
+            "sampling": sampling_metadata,
+            "microstate_assigned_histogram": dict(sampling_manifest.assigned_counts),
+            "microstate_selected_histogram": dict(sampling_manifest.selected_counts),
             "state_reweighting_estimator": (
                 "pi_target(i) proportional to "
                 "pi_reference(i) * <exp(-beta * delta_u)>_i"
@@ -315,10 +354,28 @@ def summarize_results(namespace) -> dict:
     writer.prepare_output_dir()
 
     frame_results = load_frame_results_csv(namespace.raw_frame_results)
+    sampling_manifest = None
+    sampling_manifest_path = os.path.join(
+        os.path.dirname(namespace.raw_frame_results),
+        "sampling_manifest.json",
+    )
+    if os.path.isfile(sampling_manifest_path):
+        with open(sampling_manifest_path, encoding="utf-8") as handle:
+            sampling_manifest = SamplingManifest.from_dict(json.load(handle))
+    reference_counts = (
+        manifest_counts_for_atlas(sampling_manifest, atlas)
+        if sampling_manifest is not None and sampling_manifest.skipped_frame_count > 0
+        else None
+    )
+    sampling_metadata = (
+        sampling_manifest.metadata() if sampling_manifest is not None else None
+    )
 
     microstate_results = ReweightingAggregator(namespace.temperature_kelvin).aggregate(
         frame_results,
         atlas,
+        reference_counts=reference_counts,
+        sampling_metadata=sampling_metadata,
     )
     writer.write_microstate_results(microstate_results)
     summary = _build_reweighting_summary(
