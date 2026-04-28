@@ -114,6 +114,7 @@ Important implementation details:
 - `grid` microstates do not embed probabilities, so they must use `--prior-probability-mode raw_counts`.
 - a state with positive reference prior but zero evaluated frames is treated as unsupported and raises an error;
 - failed frames and frames with non-finite energies are excluded from the reweighting estimate.
+- when microstate-stratified evaluation sampling is active, `raw_counts` priors are computed from the full cheap-assigned trajectory support, while state-local `delta_u` averages are computed only from the selected evaluated frames.
 
 ### The state-local Zwanzig estimator
 
@@ -143,6 +144,42 @@ pi_target(i) proportional to pi_reference(i) * <exp(-beta * delta_u)>_i
 ```
 
 where the code evaluates the Boltzmann factor with the global stability shift described above.
+
+### Microstate-stratified evaluation sampling
+
+FELP can reduce expensive Rosetta/OpenMM work by evaluating only a random subset of frames within each assigned microstate:
+
+```bash
+python felp.py run ... \
+  --microstate-sample-fraction 0.1 \
+  --microstate-min-samples 10 \
+  --microstate-sampling-seed 0
+```
+
+The default `--microstate-sample-fraction 1.0` evaluates every frame and preserves the historical behavior. When subsampling is enabled, FELP first assigns every frame to a microstate using a cheap assignment pass, writes `sampling_manifest.json`, and then evaluates only the selected frame indices. Resume runs reuse the manifest and fail if the current input or sampling configuration would produce a different selected set.
+
+This is statistically valid because the state-local Zwanzig factor is still an unbiased uniform-within-state average of `exp(-beta * delta_u)`. The uncertainty, however, depends on the variance of the Boltzmann factors. Trust the per-state evaluated count and ESS diagnostics, not the raw selected count alone. For convergence checks, compare a cheap run against a larger fraction or the full `1.0` run on a smaller trajectory window.
+
+### Sampling-density benchmark
+
+Use `scripts/felp_sampling_benchmark.py` to generate a reproducible baseline plus sampling sweep and then analyze the finished outputs:
+
+```bash
+python scripts/felp_sampling_benchmark.py generate \
+  --mutation ALA \
+  --topology-file data/GLY/GLY.dry.parm7 \
+  --trajectory '/home/murdocte/Projects/Rotation/GLY/GLY_prod.{0001..0250}.nc' \
+  --output-root data/GLY/felp_sampling_benchmark_ALA \
+  --analysis-dir data/GLY/felp_sampling_benchmark_ALA/analysis \
+  --script-out data/GLY/felp_sampling_benchmark_ALA/run_sampling_benchmark.sh \
+  --fractions 1.0 0.5 0.25 0.1 0.05 0.02 0.01 \
+  --min-samples 10 \
+  --seed 0
+
+bash data/GLY/felp_sampling_benchmark_ALA/run_sampling_benchmark.sh
+```
+
+The generated shell script runs the full `1.0` baseline first, then the requested sampling fractions with identical topology, trajectory, bins, restraints, and random seed. After the runs finish, it writes `sampling_density_metrics.csv` and `sampling_density_convergence.{png,pdf,svg}` under the analysis directory. The figure tracks target-probability L1 error against the full baseline, maximum relative-free-energy error, global ESS fraction, and target mass in states with ESS below 10.
 
 ### Relative free energies
 
@@ -456,6 +493,7 @@ The `build_msm.py` script is a thin compatibility wrapper around `python felp.py
 Each `run` workflow writes:
 
 - `run_config.json`: the fully resolved FELP configuration.
+- `sampling_manifest.json`: the full frame-to-microstate assignment map and deterministic selected frame indices used for expensive evaluation.
 - `frame_results.csv`: one row per evaluated frame, including assignment, reference and perturbed energies, `delta_u`, relaxed CV measurements, status columns, and metadata.
 - `microstate_summary.csv`: one row per microstate with `frame_count`, `reference_probability`, `reweight_factor`, `target_probability`, `free_energy_kj_mol`, `effective_sample_size`, summary statistics of `delta_u`, and metadata.
 - `reweighted_surface.csv`: a plotting-friendly subset of the microstate summary containing coordinates, probabilities, and free energies.
