@@ -66,8 +66,16 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         type=int,
         default=2,
         help=(
-            "PDB residue id (``resid``) used in the MDTraj selection for "
-            "``backbone_torsions``. Match FELP ``--target-residue-number``."
+            "Target residue number used to disambiguate the residue when possible. "
+            "Match FELP ``--target-residue-number``."
+        ),
+    )
+    p.add_argument(
+        "--target-residue-name",
+        default="GLY",
+        help=(
+            "Expected residue name for the phi/psi residue. Defaults to GLY so "
+            "terminal caps such as ACE/NME are not selected by residue number."
         ),
     )
     p.add_argument(
@@ -168,7 +176,39 @@ def _atom_index(residue, atom_name: str) -> int:
     )
 
 
-def _resolve_target_residue(topology_file: str, target_residue_number: int, selection: str | None):
+def _normalized_residue_name(residue) -> str:
+    return str(getattr(residue, "name", "")).upper()
+
+
+def _is_internal_residue(residue, residues: list) -> bool:
+    position = residues.index(residue)
+    return 0 < position < len(residues) - 1
+
+
+def _residue_matches_name(residue, expected_name: str | None) -> bool:
+    if not expected_name:
+        return True
+    return _normalized_residue_name(residue) == expected_name.upper()
+
+
+def _residue_table(residues: list) -> list[str]:
+    rows = []
+    for residue in residues:
+        rows.append(
+            f"{residue}: index={int(residue.index)}, "
+            f"one_based={int(residue.index) + 1}, "
+            f"resSeq={getattr(residue, 'resSeq', None)}, "
+            f"internal={_is_internal_residue(residue, residues)}"
+        )
+    return rows
+
+
+def _resolve_target_residue(
+    topology_file: str,
+    target_residue_number: int,
+    target_residue_name: str | None,
+    selection: str | None,
+):
     topology = _load_topology(topology_file)
     residues = list(topology.residues)
     if selection:
@@ -179,38 +219,67 @@ def _resolve_target_residue(topology_file: str, target_residue_number: int, sele
                 f"--selection must identify exactly one residue; got {len(residue_indices)} "
                 f"residues from selection {selection!r}."
             )
-        return topology, residues, residues[residue_indices[0]]
+        residue = residues[residue_indices[0]]
+        if not _is_internal_residue(residue, residues):
+            raise ValueError(
+                f"--selection resolved terminal residue {residue}; phi/psi needs an internal residue."
+            )
+        return topology, residues, residue
 
-    resseq_matches = [
-        residue
-        for residue in residues
-        if getattr(residue, "resSeq", None) == target_residue_number
-    ]
-    if len(resseq_matches) == 1:
-        return topology, residues, resseq_matches[0]
+    def usable(matches: list) -> list:
+        return [
+            residue
+            for residue in matches
+            if _is_internal_residue(residue, residues)
+            and _residue_matches_name(residue, target_residue_name)
+        ]
 
-    one_based_index_matches = [
-        residue for residue in residues if int(residue.index) + 1 == target_residue_number
+    candidate_sets = [
+        usable(
+            [
+                residue
+                for residue in residues
+                if getattr(residue, "resSeq", None) == target_residue_number
+            ]
+        ),
+        usable(
+            [
+                residue
+                for residue in residues
+                if int(residue.index) + 1 == target_residue_number
+            ]
+        ),
+        usable(
+            [
+                residue
+                for residue in residues
+                if int(residue.index) == target_residue_number
+            ]
+        ),
+        usable(list(residues)),
     ]
-    if len(one_based_index_matches) == 1:
-        return topology, residues, one_based_index_matches[0]
-
-    zero_based_index_matches = [
-        residue for residue in residues if int(residue.index) == target_residue_number
-    ]
-    if len(zero_based_index_matches) == 1:
-        return topology, residues, zero_based_index_matches[0]
+    for matches in candidate_sets:
+        if len(matches) == 1:
+            return topology, residues, matches[0]
 
     raise ValueError(
-        "Could not resolve target residue "
-        f"{target_residue_number}. Pass --selection to identify the residue explicitly."
+        "Could not resolve an internal target residue "
+        f"number={target_residue_number}, name={target_residue_name!r}. "
+        "Pass --selection to identify the residue explicitly. Residues:\n  "
+        + "\n  ".join(_residue_table(residues))
     )
 
 
-def _target_phi_psi_indices(topology_file: str, target_residue_number: int, selection: str | None) -> tuple[list[int], list[int], str]:
+def _target_phi_psi_indices(
+    topology_file: str,
+    target_residue_number: int,
+    target_residue_name: str | None,
+    selection: str | None,
+) -> tuple[list[int], list[int], str]:
     _topology, residues, residue = _resolve_target_residue(
         topology_file,
         target_residue_number,
+        target_residue_name,
         selection,
     )
     position = residues.index(residue)
@@ -313,6 +382,7 @@ def main(argv: list[str]) -> int:
     phi_indices, psi_indices, residue_label = _target_phi_psi_indices(
         top,
         int(args.target_residue_number),
+        args.target_residue_name,
         args.selection,
     )
     print(f"Resolved target residue for phi/psi: {residue_label}")
