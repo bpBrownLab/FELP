@@ -239,6 +239,8 @@ def main(argv: list[str]) -> int:
     )
 
     result = PyEMMAPipeline(config).run()
+    # Pipeline may rm output_dir on --overwrite; restore feature JSON next to bundle.
+    _write_feature_spec(feature_path, selection)
 
     if not args.skip_validation_report:
         val_dir = out / "validation"

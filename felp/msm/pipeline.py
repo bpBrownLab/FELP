@@ -51,6 +51,12 @@ class PyEMMAPipeline:
         self.config.validate()
         pyemma = _import_pyemma()
 
+        spec_path = self.config.feature_spec_file
+        if not os.path.isfile(spec_path):
+            raise FileNotFoundError(f"Feature spec file not found: {spec_path}")
+        # Load before optional rmtree so specs living under output_dir survive overwrite.
+        feature_spec = FeatureSpec.from_file(spec_path)
+
         if os.path.isdir(self.config.output_dir):
             if self.config.overwrite:
                 shutil.rmtree(self.config.output_dir)
@@ -59,8 +65,6 @@ class PyEMMAPipeline:
                     f"Output directory already exists and is not empty: {self.config.output_dir}"
                 )
         os.makedirs(self.config.output_dir, exist_ok=True)
-
-        feature_spec = FeatureSpec.from_file(self.config.feature_spec_file)
         featurizer = build_featurizer(self.config.topology_file, feature_spec)
 
         reader = pyemma.coordinates.source(
