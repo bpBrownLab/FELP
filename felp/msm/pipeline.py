@@ -26,6 +26,12 @@ def _import_pyemma():
     return pyemma
 
 
+def _as_pyemma_trajectory_list(trajectories: tuple[np.ndarray, ...]) -> list[np.ndarray]:
+    """Return trajectory arrays in the container type expected by PyEMMA APIs."""
+
+    return [np.asarray(trajectory) for trajectory in trajectories]
+
+
 @dataclass(frozen=True)
 class PyEMMAPipelineResult:
     """Structured result returned by the PyEMMA fitting pipeline."""
@@ -84,7 +90,7 @@ class PyEMMAPipeline:
         )
 
         discrete_msm = pyemma.msm.estimate_markov_model(
-            cluster_dtrajs,
+            _as_pyemma_trajectory_list(cluster_dtrajs),
             lag=int(self.config.msm_lag),
             dt_traj=str(self.config.dt_traj),
         )
@@ -92,7 +98,7 @@ class PyEMMAPipeline:
         hidden_model = None
         if self.config.hmm_states is not None:
             hidden_model = pyemma.msm.estimate_hidden_markov_model(
-                cluster_dtrajs,
+                _as_pyemma_trajectory_list(cluster_dtrajs),
                 int(self.config.hmm_states),
                 lag=int(self.config.msm_lag),
                 dt_traj=str(self.config.dt_traj),
@@ -219,13 +225,13 @@ class PyEMMAPipeline:
             return None, feature_trajectories
         if self.config.reducer == "tica":
             reducer_model = pyemma.coordinates.tica(
-                feature_trajectories,
+                _as_pyemma_trajectory_list(feature_trajectories),
                 lag=int(self.config.reducer_lag),
                 var_cutoff=float(self.config.variance_cutoff),
             )
         else:
             reducer_model = pyemma.coordinates.pca(
-                feature_trajectories,
+                _as_pyemma_trajectory_list(feature_trajectories),
                 var_cutoff=float(self.config.variance_cutoff),
             )
         return reducer_model, tuple(np.asarray(values) for values in reducer_model.get_output())
@@ -239,12 +245,12 @@ class PyEMMAPipeline:
 
         if self.config.clustering_method == "kmeans":
             return pyemma.coordinates.cluster_kmeans(
-                reduced_trajectories,
+                _as_pyemma_trajectory_list(reduced_trajectories),
                 k=int(self.config.k_clusters),
                 max_iter=int(self.config.k_iter),
             )
         return pyemma.coordinates.cluster_regspace(
-            reduced_trajectories,
+            _as_pyemma_trajectory_list(reduced_trajectories),
             dmin=float(self.config.regspace_dmin),
         )
 

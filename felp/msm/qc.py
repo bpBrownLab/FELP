@@ -47,7 +47,7 @@ def write_qc_outputs(
     os.makedirs(plots_dir, exist_ok=True)
 
     lags = [max(1, int(discrete_msm.lag)), max(2, int(discrete_msm.lag) * 2), max(3, int(discrete_msm.lag) * 4)]
-    its = pyemma.msm.its(cluster_dtrajs, lags=lags, errors="bayes")
+    its = pyemma.msm.its(list(cluster_dtrajs), lags=lags, errors="bayes")
     fig, ax = plt.subplots(1, 1)
     pyemma.plots.plot_implied_timescales(its, ylog=True, ax=ax)
     fig.tight_layout()

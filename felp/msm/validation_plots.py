@@ -69,7 +69,7 @@ def write_msm_validation_report(
     os.makedirs(output_dir, exist_ok=True)
     written: dict[str, str] = {}
 
-    dtrajs = result.cluster_dtrajs
+    dtrajs = list(result.cluster_dtrajs)
     lags = _lag_grid(its_max_lag, its_lag_points)
     its = pyemma.msm.its(dtrajs, lags=lags, errors="bayes")
     fig, ax = plt.subplots(1, 1, figsize=(6.5, 4.2))
