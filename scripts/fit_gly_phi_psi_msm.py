@@ -164,6 +164,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--its-processes",
+        type=int,
+        default=8,
+        help="Number of slow ITS processes to plot and write to the numeric ITS table.",
+    )
+    p.add_argument(
         "--ck-nsets",
         type=int,
         default=4,
@@ -473,6 +479,7 @@ def main(argv: list[str]) -> int:
                 its_max_lag=int(args.its_max_lag),
                 its_lag_points=int(args.its_lag_points),
                 its_lags=tuple(args.its_lags or ()),
+                its_processes=int(args.its_processes),
                 ck_nsets=int(args.ck_nsets),
             )
         except Exception as exc:

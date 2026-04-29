@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import math
 import os
 from typing import Any, Optional
@@ -59,6 +60,78 @@ def _normalize_lags(lags: Optional[tuple[int, ...]], max_lag: int, max_points: i
     return _lag_grid(max_lag, max_points)
 
 
+def _plot_implied_timescales(pyemma: Any, its: Any, ax: Any, its_processes: int) -> None:
+    """Plot only the slowest processes when the PyEMMA version supports it."""
+
+    try:
+        pyemma.plots.plot_implied_timescales(
+            its,
+            ylog=True,
+            ax=ax,
+            nits=int(its_processes),
+        )
+    except TypeError:
+        pyemma.plots.plot_implied_timescales(its, ylog=True, ax=ax)
+
+
+def _write_its_numeric_outputs(
+    output_dir: str,
+    its: Any,
+    *,
+    its_processes: int,
+) -> dict[str, str]:
+    """Persist ITS lags/timescales in machine-readable files."""
+
+    outputs: dict[str, str] = {}
+    try:
+        lags = np.asarray(its.lags, dtype=int)
+        timescales = np.asarray(its.timescales, dtype=float)
+    except Exception:
+        return outputs
+
+    if timescales.ndim == 1:
+        timescales = timescales[:, np.newaxis]
+    max_processes = min(int(its_processes), timescales.shape[1])
+    timescales = timescales[:, :max_processes]
+
+    npz_path = os.path.join(output_dir, "implied_timescales.npz")
+    np.savez(npz_path, lags=lags, timescales=timescales)
+    outputs["implied_timescales_npz"] = npz_path
+
+    csv_path = os.path.join(output_dir, "implied_timescales.csv")
+    with open(csv_path, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["lag_steps", *(f"timescale_{i + 1}_steps" for i in range(max_processes))])
+        for row_index, lag in enumerate(lags):
+            writer.writerow([int(lag), *[float(value) for value in timescales[row_index]]])
+    outputs["implied_timescales_csv"] = csv_path
+    return outputs
+
+
+def _cluster_to_metastable_order(
+    cluster_dtrajs: tuple[np.ndarray, ...],
+    metastable_dtrajs: Optional[tuple[np.ndarray, ...]],
+    state_count: int,
+) -> np.ndarray | None:
+    """Return cluster order grouped by metastable assignment, if available."""
+
+    if metastable_dtrajs is None:
+        return None
+    cluster_flat = np.concatenate([np.asarray(values, dtype=int) for values in cluster_dtrajs])
+    metastable_flat = np.concatenate([np.asarray(values, dtype=int) for values in metastable_dtrajs])
+    assignment = np.full(state_count, -1, dtype=int)
+    counts = np.bincount(cluster_flat[cluster_flat >= 0], minlength=state_count)
+    for state_index in range(state_count):
+        mask = cluster_flat == state_index
+        if not mask.any():
+            continue
+        state_values = metastable_flat[mask]
+        state_values = state_values[state_values >= 0]
+        if state_values.size:
+            assignment[state_index] = int(np.bincount(state_values).argmax())
+    return np.lexsort((np.arange(state_count), -counts, assignment))
+
+
 def write_msm_validation_report(
     result: PyEMMAPipelineResult,
     output_dir: str,
@@ -66,6 +139,7 @@ def write_msm_validation_report(
     its_max_lag: int = 80,
     its_lag_points: int = 35,
     its_lags: Optional[tuple[int, ...]] = None,
+    its_processes: int = 8,
     ck_nsets: int = 4,
     max_tm_states: int = 48,
     rama_scatter_max_points: int = 25000,
@@ -87,9 +161,16 @@ def write_msm_validation_report(
     dtrajs = list(result.cluster_dtrajs)
     lags = _normalize_lags(its_lags, its_max_lag, its_lag_points)
     its = pyemma.msm.its(dtrajs, lags=lags, errors="bayes")
+    written.update(
+        _write_its_numeric_outputs(
+            output_dir,
+            its,
+            its_processes=int(its_processes),
+        )
+    )
     fig, ax = plt.subplots(1, 1, figsize=(6.5, 4.2))
-    pyemma.plots.plot_implied_timescales(its, ylog=True, ax=ax)
-    ax.set_title("Implied timescales (Bayesian error bars)")
+    _plot_implied_timescales(pyemma, its, ax, its_processes)
+    ax.set_title(f"Implied timescales (slowest {int(its_processes)} processes)")
     fig.tight_layout()
     path = os.path.join(output_dir, "implied_timescales.png")
     fig.savefig(path, dpi=300)
@@ -164,6 +245,27 @@ def write_msm_validation_report(
     plt.close(fig)
     written["transition_matrix"] = path
 
+    metastable_order = _cluster_to_metastable_order(
+        result.cluster_dtrajs,
+        result.metastable_dtrajs,
+        P.shape[0],
+    )
+    if metastable_order is not None:
+        n_tm_meta = min(P.shape[0], max_tm_states)
+        sub_meta = P[np.ix_(metastable_order[:n_tm_meta], metastable_order[:n_tm_meta])]
+        fig, ax = plt.subplots(1, 1, figsize=(5.5, 4.8))
+        vmax = max(float(np.percentile(sub_meta, 99.5)), 1e-6)
+        im = ax.imshow(sub_meta, aspect="auto", vmin=0.0, vmax=vmax, cmap="viridis")
+        ax.set_xlabel("j (metastable-grouped)")
+        ax.set_ylabel("i (metastable-grouped)")
+        ax.set_title(f"Transition matrix (top {n_tm_meta}, metastable grouped)")
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        fig.tight_layout()
+        path = os.path.join(output_dir, "transition_matrix_metastable_grouped.png")
+        fig.savefig(path, dpi=300)
+        plt.close(fig)
+        written["transition_matrix_metastable_grouped"] = path
+
     k_ts = min(25, max(2, nstates - 1))
     try:
         ts = np.asarray(msm.timescales(k=k_ts), dtype=float)
@@ -231,6 +333,7 @@ def write_msm_validation_report(
         f"Discrete states (active): {nstates}",
         f"MSM lag (steps): {int(msm.lag)}",
         f"ITS lags (steps): {', '.join(str(lag) for lag in lags)}",
+        f"ITS plotted processes: {int(its_processes)}",
         f"Active state fraction: {float(msm.active_state_fraction):.4f}",
         f"Active count fraction: {float(msm.active_count_fraction):.4f}",
     ]
