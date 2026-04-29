@@ -73,21 +73,39 @@ class PyEMMAPipeline:
         os.makedirs(self.config.output_dir, exist_ok=True)
         featurizer = build_featurizer(self.config.topology_file, feature_spec)
 
+        source_input = [list(group) for group in self.config.trajectory_groups]
+        print(f"[MSM pipeline] trajectory groups: {len(source_input)}")
+        for i, group in enumerate(source_input):
+            print(f"  group {i}: {len(group)} file(s)")
+
         reader = pyemma.coordinates.source(
-            [list(group) for group in self.config.trajectory_groups],
+            source_input,
             features=featurizer,
         )
+        print(f"[MSM pipeline] reader.ntraj = {reader.ntraj}")
+        print(f"[MSM pipeline] reader.trajectory_lengths() = {reader.trajectory_lengths()}")
+
         feature_trajectories = tuple(
             np.asarray(values)
             for values in reader.get_output(stride=self.config.stride)
         )
+        print(f"[MSM pipeline] feature_trajectories: {len(feature_trajectories)} array(s)")
+        for i, ft in enumerate(feature_trajectories):
+            print(f"  traj {i}: shape={ft.shape}, dtype={ft.dtype}")
 
         reducer_model, reduced_trajectories = self._reduce(pyemma, feature_trajectories)
+        print(f"[MSM pipeline] reduced_trajectories: {len(reduced_trajectories)} array(s)")
+        for i, rt in enumerate(reduced_trajectories):
+            print(f"  traj {i}: shape={rt.shape}")
+
         cluster = self._cluster(pyemma, reduced_trajectories)
         cluster_dtrajs = tuple(
             np.asarray(dtraj, dtype=int)
             for dtraj in cluster.dtrajs
         )
+        print(f"[MSM pipeline] cluster_dtrajs: {len(cluster_dtrajs)} dtraj(s)")
+        for i, dt in enumerate(cluster_dtrajs):
+            print(f"  dtraj {i}: len={len(dt)}, unique states={len(np.unique(dt))}")
 
         discrete_msm = pyemma.msm.estimate_markov_model(
             _as_pyemma_trajectory_list(cluster_dtrajs),
