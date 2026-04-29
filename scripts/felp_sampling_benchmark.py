@@ -34,7 +34,20 @@ def _load_json(path: Path) -> dict[str, Any]:
         return json.load(handle)
 
 
+def _ensure_csv_field_size_limit() -> None:
+    """microstate_summary.csv may store large JSON in a single field (default limit is 128 KiB)."""
+    max_size = sys.maxsize
+    while max_size > 0:
+        try:
+            csv.field_size_limit(max_size)
+            return
+        except OverflowError:
+            max_size = int(max_size / 10)
+    csv.field_size_limit(2**27)
+
+
 def _load_microstate_summary(path: Path) -> list[dict[str, Any]]:
+    _ensure_csv_field_size_limit()
     rows: list[dict[str, Any]] = []
     with path.open(newline="", encoding="utf-8") as handle:
         for row in csv.DictReader(handle):
@@ -264,6 +277,7 @@ def _plot_metrics(analysis_dir: Path, rows: list[dict[str, Any]]) -> None:
 
 
 def _analyze(args: argparse.Namespace) -> int:
+    _ensure_csv_field_size_limit()
     output_root = Path(args.output_root)
     analysis_dir = Path(args.analysis_dir)
     analysis_dir.mkdir(parents=True, exist_ok=True)
