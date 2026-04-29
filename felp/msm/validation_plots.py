@@ -47,12 +47,25 @@ def _lag_grid(max_lag: int, max_points: int) -> list[int]:
     return sorted(set(lags))
 
 
+def _normalize_lags(lags: Optional[tuple[int, ...]], max_lag: int, max_points: int) -> list[int]:
+    """Return explicit ITS lags when provided, otherwise a compact default grid."""
+
+    if lags:
+        normalized = sorted({int(lag) for lag in lags})
+        invalid = [lag for lag in normalized if lag < 1]
+        if invalid:
+            raise ValueError(f"ITS lags must be positive integers; got {invalid!r}.")
+        return normalized
+    return _lag_grid(max_lag, max_points)
+
+
 def write_msm_validation_report(
     result: PyEMMAPipelineResult,
     output_dir: str,
     *,
     its_max_lag: int = 80,
     its_lag_points: int = 35,
+    its_lags: Optional[tuple[int, ...]] = None,
     ck_nsets: int = 4,
     max_tm_states: int = 48,
     rama_scatter_max_points: int = 25000,
@@ -72,7 +85,7 @@ def write_msm_validation_report(
     warnings: list[str] = []
 
     dtrajs = list(result.cluster_dtrajs)
-    lags = _lag_grid(its_max_lag, its_lag_points)
+    lags = _normalize_lags(its_lags, its_max_lag, its_lag_points)
     its = pyemma.msm.its(dtrajs, lags=lags, errors="bayes")
     fig, ax = plt.subplots(1, 1, figsize=(6.5, 4.2))
     pyemma.plots.plot_implied_timescales(its, ylog=True, ax=ax)
@@ -217,6 +230,7 @@ def write_msm_validation_report(
         "======================",
         f"Discrete states (active): {nstates}",
         f"MSM lag (steps): {int(msm.lag)}",
+        f"ITS lags (steps): {', '.join(str(lag) for lag in lags)}",
         f"Active state fraction: {float(msm.active_state_fraction):.4f}",
         f"Active count fraction: {float(msm.active_count_fraction):.4f}",
     ]

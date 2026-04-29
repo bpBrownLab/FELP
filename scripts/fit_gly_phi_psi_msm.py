@@ -112,6 +112,16 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         choices=("kmeans", "regspace"),
         default="kmeans",
     )
+    p.add_argument(
+        "--dihedral-representation",
+        choices=("raw", "cossin"),
+        default="raw",
+        help=(
+            "How phi/psi are represented for clustering/MSM. ``raw`` keeps "
+            "degrees as two linear coordinates; ``cossin`` uses periodic "
+            "sin/cos features and is usually the safer MSM choice."
+        ),
+    )
     p.add_argument("--k-clusters", type=int, default=100)
     p.add_argument("--k-iter", type=int, default=100)
     p.add_argument("--regspace-dmin", type=float, default=0.5)
@@ -144,6 +154,15 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     )
     p.add_argument("--its-max-lag", type=int, default=120)
     p.add_argument("--its-lag-points", type=int, default=40)
+    p.add_argument(
+        "--its-lags",
+        type=int,
+        nargs="+",
+        help=(
+            "Explicit lag times for ITS, e.g. --its-lags 1 2 5 10 20 50 "
+            "100 200 500 1000. Overrides --its-max-lag/--its-lag-points."
+        ),
+    )
     p.add_argument(
         "--ck-nsets",
         type=int,
@@ -309,15 +328,28 @@ def _target_phi_psi_indices(
     return phi, psi, label
 
 
-def _write_feature_spec(path: Path, *, phi: list[int], psi: list[int], residue_label: str) -> None:
+def _write_feature_spec(
+    path: Path,
+    *,
+    phi: list[int],
+    psi: list[int],
+    residue_label: str,
+    dihedral_representation: str,
+) -> None:
+    use_cossin = dihedral_representation == "cossin"
     spec = {
         "use_degrees": True,
-        "use_cossin": False,
+        "use_cossin": use_cossin,
         "periodic": False,
         "metadata": {
             "description": "Explicit target-residue Ramachandran phi/psi dihedrals.",
             "residue": residue_label,
-            "columns": ["phi", "psi"],
+            "dihedral_representation": dihedral_representation,
+            "columns": (
+                ["cos(phi)", "sin(phi)", "cos(psi)", "sin(psi)"]
+                if use_cossin
+                else ["phi", "psi"]
+            ),
         },
         "operations": [
             {
@@ -395,6 +427,7 @@ def main(argv: list[str]) -> int:
         phi=phi_indices,
         psi=psi_indices,
         residue_label=residue_label,
+        dihedral_representation=args.dihedral_representation,
     )
 
     traj_groups = tuple(tuple(str(Path(p).resolve()) for p in group) for group in args.trajectory_groups)
@@ -428,6 +461,7 @@ def main(argv: list[str]) -> int:
         phi=phi_indices,
         psi=psi_indices,
         residue_label=residue_label,
+        dihedral_representation=args.dihedral_representation,
     )
 
     if not args.skip_validation_report:
@@ -438,6 +472,7 @@ def main(argv: list[str]) -> int:
                 str(val_dir),
                 its_max_lag=int(args.its_max_lag),
                 its_lag_points=int(args.its_lag_points),
+                its_lags=tuple(args.its_lags or ()),
                 ck_nsets=int(args.ck_nsets),
             )
         except Exception as exc:
