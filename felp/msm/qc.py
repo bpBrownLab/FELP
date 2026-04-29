@@ -87,7 +87,20 @@ def write_qc_outputs(
                 ck_result = model_for_ck.cktest()
             else:
                 ck_result = model_for_ck.cktest(state_count)
-            pyemma.plots.plot_cktest(ck_result, ax=ax)
+            pyemma.plots.plot_cktest(ck_result, ax=ax, diag=True)
             fig.tight_layout()
             fig.savefig(os.path.join(plots_dir, "ck_test.png"), dpi=300)
             plt.close(fig)
+    elif int(discrete_msm.nstates) >= 2:
+        nsets = min(4, int(discrete_msm.nstates))
+        if nsets >= 2:
+            try:
+                ck_result = discrete_msm.cktest(nsets)
+            except Exception:
+                pass
+            else:
+                fig, ax = plt.subplots(1, 1)
+                pyemma.plots.plot_cktest(ck_result, ax=ax, diag=True)
+                fig.tight_layout()
+                fig.savefig(os.path.join(plots_dir, "ck_test.png"), dpi=300)
+                plt.close(fig)

@@ -13,6 +13,7 @@ from .config import MSMFitConfig, MSMSampleExportConfig
 from .features import FeatureOperation, FeatureSpec, build_featurizer
 from .pipeline import PyEMMAPipeline, PyEMMAPipelineResult
 from .sampling import export_state_samples
+from .validation_plots import write_msm_validation_report
 
 __all__ = [
     "ASSIGNMENTS_NAME",
@@ -30,4 +31,5 @@ __all__ = [
     "export_state_samples",
     "load_bundle",
     "save_bundle",
+    "write_msm_validation_report",
 ]
