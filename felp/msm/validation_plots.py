@@ -10,6 +10,7 @@ import numpy as np
 
 from felp.core import DependencyError
 
+from .plot_compat import plot_pyemma_cktest
 from .pipeline import PyEMMAPipelineResult
 
 
@@ -68,6 +69,7 @@ def write_msm_validation_report(
     plt, pyemma = _import_plotting()
     os.makedirs(output_dir, exist_ok=True)
     written: dict[str, str] = {}
+    warnings: list[str] = []
 
     dtrajs = list(result.cluster_dtrajs)
     lags = _lag_grid(its_max_lag, its_lag_points)
@@ -91,17 +93,22 @@ def write_msm_validation_report(
                 ck = model.cktest()
             else:
                 ck = model.cktest(nsets)
-        except Exception:
+        except Exception as exc:
+            warnings.append(f"CK calculation skipped for {label}: {exc}")
             return
-        pyemma.plots.plot_cktest(ck, diag=True)
-        fig = plt.gcf()
-        fig.set_size_inches(6.5, 5.0, forward=True)
-        fig.suptitle(f"Chapman-Kolmogorov test ({label})")
-        fig.tight_layout()
-        p = os.path.join(output_dir, f"ck_test_{label.replace(' ', '_')}.png")
-        fig.savefig(p, dpi=300)
-        plt.close(fig)
-        written[f"ck_test_{label}"] = p
+        try:
+            plot_pyemma_cktest(pyemma, ck, diag=True)
+            fig = plt.gcf()
+            fig.set_size_inches(6.5, 5.0, forward=True)
+            fig.suptitle(f"Chapman-Kolmogorov test ({label})")
+            fig.tight_layout()
+            p = os.path.join(output_dir, f"ck_test_{label.replace(' ', '_')}.png")
+            fig.savefig(p, dpi=300)
+            plt.close(fig)
+            written[f"ck_test_{label}"] = p
+        except Exception as exc:
+            plt.close("all")
+            warnings.append(f"CK plot skipped for {label}: {exc}")
 
     _try_cktest(msm, ck_nsets, "discrete_msm")
 
@@ -222,5 +229,10 @@ def write_msm_validation_report(
     with open(summary_path, "w", encoding="utf-8") as handle:
         handle.write("\n".join(lines) + "\n")
     written["validation_summary"] = summary_path
+    if warnings:
+        warnings_path = os.path.join(output_dir, "validation_plot_warnings.txt")
+        with open(warnings_path, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(warnings) + "\n")
+        written["validation_plot_warnings"] = warnings_path
     return written
 

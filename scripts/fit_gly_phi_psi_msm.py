@@ -432,16 +432,26 @@ def main(argv: list[str]) -> int:
 
     if not args.skip_validation_report:
         val_dir = out / "validation"
-        written = write_msm_validation_report(
-            result,
-            str(val_dir),
-            its_max_lag=int(args.its_max_lag),
-            its_lag_points=int(args.its_lag_points),
-            ck_nsets=int(args.ck_nsets),
-        )
-        print("Wrote validation report:")
-        for key, path in sorted(written.items()):
-            print(f"  {key}: {path}")
+        try:
+            written = write_msm_validation_report(
+                result,
+                str(val_dir),
+                its_max_lag=int(args.its_max_lag),
+                its_lag_points=int(args.its_lag_points),
+                ck_nsets=int(args.ck_nsets),
+            )
+        except Exception as exc:
+            val_dir.mkdir(parents=True, exist_ok=True)
+            warning_path = val_dir / "validation_plot_warnings.txt"
+            warning_path.write_text(
+                f"Validation plotting failed after MSM bundle export: {exc}\n",
+                encoding="utf-8",
+            )
+            print(f"WARNING: validation plotting failed; bundle was still written. See {warning_path}")
+        else:
+            print("Wrote validation report:")
+            for key, path in sorted(written.items()):
+                print(f"  {key}: {path}")
 
     if not args.skip_bundle_style_plots:
         style_root = out / "validation" / "bundle_style_plots"
@@ -449,15 +459,25 @@ def main(argv: list[str]) -> int:
             if level == "metastable" and "metastable" not in result.bundle.assignments:
                 continue
             sub = style_root / level
-            generate_msm_plots(
-                MSMPlotConfig(
-                    bundle_dir=str(out),
-                    output_dir=str(sub),
-                    state_level=level,
-                    overwrite=True,
+            try:
+                generate_msm_plots(
+                    MSMPlotConfig(
+                        bundle_dir=str(out),
+                        output_dir=str(sub),
+                        state_level=level,
+                        overwrite=True,
+                    )
                 )
-            )
-            print(f"Wrote bundle-style plots: {sub}")
+            except Exception as exc:
+                sub.mkdir(parents=True, exist_ok=True)
+                warning_path = sub / "plot_warnings.txt"
+                warning_path.write_text(
+                    f"Bundle-style plotting failed: {exc}\n",
+                    encoding="utf-8",
+                )
+                print(f"WARNING: bundle-style plots failed for {level}; see {warning_path}")
+            else:
+                print(f"Wrote bundle-style plots: {sub}")
 
     readme = out / "FELP_MSM_BUNDLE_README.txt"
     readme.write_text(

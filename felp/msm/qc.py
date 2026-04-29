@@ -8,6 +8,7 @@ from typing import Optional
 import numpy as np
 
 from felp.core import DependencyError
+from .plot_compat import plot_pyemma_cktest
 
 
 def _import_plot_dependencies():
@@ -86,11 +87,14 @@ def write_qc_outputs(
                 ck_result = model_for_ck.cktest()
             else:
                 ck_result = model_for_ck.cktest(state_count)
-            pyemma.plots.plot_cktest(ck_result, diag=True)
-            fig = plt.gcf()
-            fig.tight_layout()
-            fig.savefig(os.path.join(plots_dir, "ck_test.png"), dpi=300)
-            plt.close(fig)
+            try:
+                plot_pyemma_cktest(pyemma, ck_result, diag=True)
+                fig = plt.gcf()
+                fig.tight_layout()
+                fig.savefig(os.path.join(plots_dir, "ck_test.png"), dpi=300)
+                plt.close(fig)
+            except Exception:
+                plt.close("all")
     elif int(discrete_msm.nstates) >= 2:
         nsets = min(4, int(discrete_msm.nstates))
         if nsets >= 2:
@@ -99,8 +103,11 @@ def write_qc_outputs(
             except Exception:
                 pass
             else:
-                pyemma.plots.plot_cktest(ck_result, diag=True)
-                fig = plt.gcf()
-                fig.tight_layout()
-                fig.savefig(os.path.join(plots_dir, "ck_test.png"), dpi=300)
-                plt.close(fig)
+                try:
+                    plot_pyemma_cktest(pyemma, ck_result, diag=True)
+                    fig = plt.gcf()
+                    fig.tight_layout()
+                    fig.savefig(os.path.join(plots_dir, "ck_test.png"), dpi=300)
+                    plt.close(fig)
+                except Exception:
+                    plt.close("all")
