@@ -93,9 +93,10 @@ def write_msm_validation_report(
                 ck = model.cktest(nsets)
         except Exception:
             return
-        fig, axes = plt.subplots(1, 1, figsize=(6.5, 5.0))
-        pyemma.plots.plot_cktest(ck, ax=axes, diag=True)
-        fig.suptitle(f"Chapman–Kolmogorov test ({label})")
+        pyemma.plots.plot_cktest(ck, diag=True)
+        fig = plt.gcf()
+        fig.set_size_inches(6.5, 5.0, forward=True)
+        fig.suptitle(f"Chapman-Kolmogorov test ({label})")
         fig.tight_layout()
         p = os.path.join(output_dir, f"ck_test_{label.replace(' ', '_')}.png")
         fig.savefig(p, dpi=300)

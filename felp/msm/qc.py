@@ -82,12 +82,12 @@ def write_qc_outputs(
         state_count = int(len(np.unique(np.concatenate(metastable_dtrajs, axis=0))))
         if state_count >= 2:
             model_for_ck = hidden_model if hidden_model is not None else discrete_msm
-            fig, ax = plt.subplots(1, 1)
             if hidden_model is not None:
                 ck_result = model_for_ck.cktest()
             else:
                 ck_result = model_for_ck.cktest(state_count)
-            pyemma.plots.plot_cktest(ck_result, ax=ax, diag=True)
+            pyemma.plots.plot_cktest(ck_result, diag=True)
+            fig = plt.gcf()
             fig.tight_layout()
             fig.savefig(os.path.join(plots_dir, "ck_test.png"), dpi=300)
             plt.close(fig)
@@ -99,8 +99,8 @@ def write_qc_outputs(
             except Exception:
                 pass
             else:
-                fig, ax = plt.subplots(1, 1)
-                pyemma.plots.plot_cktest(ck_result, ax=ax, diag=True)
+                pyemma.plots.plot_cktest(ck_result, diag=True)
+                fig = plt.gcf()
                 fig.tight_layout()
                 fig.savefig(os.path.join(plots_dir, "ck_test.png"), dpi=300)
                 plt.close(fig)
