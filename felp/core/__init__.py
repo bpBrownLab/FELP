@@ -10,10 +10,13 @@ from .exceptions import (
 )
 from .models import (
     ALLOWED_MUTATION_TARGET_NAMES,
+    AtomReference,
     BACKBONE_DIHEDRAL_KINDS,
     CVMeasurement,
     CVSpec,
     DihedralRestraintSpec,
+    DistanceRestraintSpec,
+    DistanceCVSpec,
     EnergyConfig,
     EnergyResult,
     FrameResult,
@@ -23,6 +26,7 @@ from .models import (
     MicrostateConfig,
     MicrostateDefinition,
     MicrostateResult,
+    MobilityConfig,
     OutputConfig,
     ParallelConfig,
     PerturbationConfig,
@@ -46,6 +50,7 @@ from .models import (
 
 __all__ = [
     "ALLOWED_MUTATION_TARGET_NAMES",
+    "AtomReference",
     "BACKBONE_DIHEDRAL_KINDS",
     "ConfigurationError",
     "ConversionError",
@@ -53,6 +58,8 @@ __all__ = [
     "CVSpec",
     "DependencyError",
     "DihedralRestraintSpec",
+    "DistanceRestraintSpec",
+    "DistanceCVSpec",
     "EnergyConfig",
     "EnergyResult",
     "FelpError",
@@ -64,6 +71,7 @@ __all__ = [
     "MicrostateConfig",
     "MicrostateDefinition",
     "MicrostateResult",
+    "MobilityConfig",
     "OutputConfig",
     "ParallelConfig",
     "PerturbationConfig",

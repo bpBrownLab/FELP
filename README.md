@@ -388,6 +388,38 @@ python felp.py run \
   --output-dir outputs/gly_to_ala_explicit
 ```
 
+For protein mutations, the default mobility policy is conservative: only the
+target residue sidechain is mobile, while the backbone remains fixed. To allow a
+local shell to co-relax, opt into radius mobility and, if needed, backbone motion:
+
+```bash
+python felp.py run \
+  --topology-file data/kras_reference.pdb \
+  --trajectory data/kras_reference.dcd \
+  --target-residue-number 61 \
+  --target-residue-name LEU \
+  --microstate-source file \
+  --microstate-file examples/kras_projected_states.json \
+  --mobility-mode radius \
+  --mobility-radius-angstrom 8.0 \
+  --mobility-include-backbone \
+  --output-dir outputs/kras_q61l_radius
+```
+
+Distance CV restraints can be added alongside the legacy target phi/psi
+restraints. Declare each distance as `name:res1:atom1:res2:atom2` using the same
+sequential pose residue numbering as `--target-residue-number`:
+
+```bash
+python felp.py run ... \
+  --distance-cv q61_sw1:61:CA:35:CA \
+  --distance-cv sw1_sw2:35:CA:71:CA
+```
+
+For arbitrary projected 2D CVs, start by composing primitive CVs such as these
+distances in a file-based microstate definition rather than hard-coding a new
+phi/psi-specific mode.
+
 Recompute microstate summaries from an existing frame-results CSV:
 
 ```bash

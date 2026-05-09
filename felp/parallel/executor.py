@@ -24,7 +24,7 @@ from felp.perturbation.validation import (
     ensure_measurement_matches_restraints,
     ensure_perturbation_matches_structure,
     ensure_pose_residue_matches_expected,
-    measurement_deviation_degrees,
+    measurement_deviation,
     target_cv_measurement_from_restraints,
 )
 from felp.restraints import BackboneDihedralCVProtocol
@@ -123,6 +123,7 @@ def initialize_worker(
         )
     _WORKER_RESTRAINT_PROTOCOL = BackboneDihedralCVProtocol(
         cv_specs=config.restraints.cv_specs,
+        distance_cv_specs=config.restraints.distance_cv_specs,
         force_constant=config.restraints.effective_rosetta_force_constant(),
     )
     _WORKER_PERTURBATION_PROTOCOL = PyRosettaPerturbationProtocol(
@@ -133,13 +134,25 @@ def initialize_worker(
         relax_iterations=config.rosetta.relax_iterations,
         repack_trials=config.rosetta.repack_trials,
         cartesian=config.rosetta.cartesian,
+        mobility=config.mobility,
         output_dir=config.output.output_dir,
         write_pose_pdbs=config.output.write_pose_pdbs,
+        rosetta_distance_constraint_sd_angstrom=(
+            config.restraints.rosetta_distance_constraint_sd_angstrom
+        ),
     )
-    _WORKER_ENERGY_EVALUATOR = build_energy_evaluator(
-        config.energy,
-        _WORKER_CONVERSION_SERVICE,
-    )
+    try:
+        _WORKER_ENERGY_EVALUATOR = build_energy_evaluator(
+            config.energy,
+            _WORKER_CONVERSION_SERVICE,
+            mobility_config=config.mobility,
+            target_residue_number=config.perturbation.target_residue_number,
+        )
+    except TypeError:
+        _WORKER_ENERGY_EVALUATOR = build_energy_evaluator(
+            config.energy,
+            _WORKER_CONVERSION_SERVICE,
+        )
 
 
 def _build_pyrosetta_options(config: RunConfig) -> str:
@@ -261,6 +274,7 @@ def process_frame_job(job: SnapshotJob) -> FrameResult:
     )
     restraint_specs = _WORKER_RESTRAINT_PROTOCOL.build_from_reference_pose(reference_pose)
     cv_tol = _WORKER_CONFIG.restraints.cv_measurement_tolerance_degrees
+    distance_tol = _WORKER_CONFIG.restraints.distance_measurement_tolerance_angstrom
 
     if _WORKER_CONFIG.energy.backend == "openmm":
         openmm_fc = _WORKER_CONFIG.restraints.effective_openmm_force_constant()
@@ -323,12 +337,14 @@ def process_frame_job(job: SnapshotJob) -> FrameResult:
             restraint_specs,
             context="OpenMM-minimized reference state",
             tolerance_degrees=cv_tol,
+            distance_tolerance_angstrom=distance_tol,
         )
         ensure_measurement_matches_restraints(
             perturbed_relaxed_measurement,
             restraint_specs,
             context="OpenMM-minimized perturbed state",
             tolerance_degrees=cv_tol,
+            distance_tolerance_angstrom=distance_tol,
         )
     else:
         prepared_reference_pose = _WORKER_PERTURBATION_PROTOCOL.prepare_reference_pose(
@@ -367,12 +383,14 @@ def process_frame_job(job: SnapshotJob) -> FrameResult:
             restraint_specs,
             context="Rosetta-relaxed reference state",
             tolerance_degrees=cv_tol,
+            distance_tolerance_angstrom=distance_tol,
         )
         ensure_measurement_matches_restraints(
             perturbed_relaxed_measurement,
             restraint_specs,
             context="Rosetta-relaxed perturbed state",
             tolerance_degrees=cv_tol,
+            distance_tolerance_angstrom=distance_tol,
         )
         reference_energy = _WORKER_ENERGY_EVALUATOR.evaluate(
             pose=prepared_reference_pose,
@@ -385,11 +403,11 @@ def process_frame_job(job: SnapshotJob) -> FrameResult:
 
     delta_u = perturbed_energy.energy_kj_mol - reference_energy.energy_kj_mol
     target_measurement = target_cv_measurement_from_restraints(restraint_specs)
-    reference_deviation = measurement_deviation_degrees(
+    reference_deviation = measurement_deviation(
         reference_relaxed_measurement,
         restraint_specs,
     )
-    perturbed_deviation = measurement_deviation_degrees(
+    perturbed_deviation = measurement_deviation(
         perturbed_relaxed_measurement,
         restraint_specs,
     )
@@ -405,6 +423,12 @@ def process_frame_job(job: SnapshotJob) -> FrameResult:
         "perturbed_cv_values_degrees": perturbed_relaxed_measurement.as_dict(),
         "reference_cv_deviation_degrees": reference_deviation,
         "perturbed_cv_deviation_degrees": perturbed_deviation,
+        "target_cv_values": target_measurement.as_dict(),
+        "reference_cv_values": reference_relaxed_measurement.as_dict(),
+        "perturbed_cv_values": perturbed_relaxed_measurement.as_dict(),
+        "reference_cv_deviation": reference_deviation,
+        "perturbed_cv_deviation": perturbed_deviation,
+        "mobility": _WORKER_CONFIG.mobility.__dict__,
     }
     if target_measurement.phi_degrees is not None:
         metadata["target_phi_degrees"] = target_measurement.phi_degrees

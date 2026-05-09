@@ -6,13 +6,16 @@ import argparse
 from typing import Optional
 
 from felp.core import (
+    AtomReference,
     CVSpec,
+    DistanceCVSpec,
     EnergyConfig,
     InputConfig,
     MicrostateConfig,
     OutputConfig,
     ParallelConfig,
     PerturbationConfig,
+    MobilityConfig,
     RestraintConfig,
     RosettaConfig,
     RunConfig,
@@ -71,6 +74,45 @@ def _parse_cv_specs(
         seen_names.add(spec.name)
         cv_specs.append(spec)
     return tuple(cv_specs)
+
+
+def _parse_distance_cv_specs(
+    raw_tokens: Optional[list[str]],
+) -> tuple[DistanceCVSpec, ...]:
+    """Parse repeatable ``--distance-cv`` tokens into typed distance CV specs."""
+
+    if not raw_tokens:
+        return ()
+    specs: list[DistanceCVSpec] = []
+    seen_names: set[str] = set()
+    for token in raw_tokens:
+        parts = [part.strip() for part in token.split(":")]
+        if len(parts) != 5 or not all(parts):
+            raise ConfigurationError(
+                f"Invalid --distance-cv value {token!r}. Expected "
+                "name:res1:atom1:res2:atom2."
+            )
+        name, residue1_text, atom1, residue2_text, atom2 = parts
+        try:
+            residue1 = int(residue1_text)
+            residue2 = int(residue2_text)
+        except ValueError as exc:
+            raise ConfigurationError(
+                f"Invalid --distance-cv value {token!r}. Residues must be integers."
+            ) from exc
+        spec = DistanceCVSpec(
+            name=name,
+            atom1=AtomReference(residue_number=residue1, atom_name=atom1),
+            atom2=AtomReference(residue_number=residue2, atom_name=atom2),
+        )
+        if spec.name in seen_names:
+            raise ConfigurationError(
+                f"Duplicate distance CV specification {spec.name!r}. "
+                "Each configured CV name must be unique."
+            )
+        seen_names.add(spec.name)
+        specs.append(spec)
+    return tuple(specs)
 
 
 def _add_common_microstate_arguments(parser: argparse.ArgumentParser) -> None:
@@ -315,12 +357,25 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
         ),
     )
     restraint_group.add_argument(
+        "--distance-cv",
+        action="append",
+        dest="distance_cv_tokens",
+        metavar="<name:res1:atom1:res2:atom2>",
+        help=(
+            "Repeatable distance CV restraint between two pose-indexed atoms, in "
+            "name:res1:atom1:res2:atom2 form. Use primitive distance CVs to compose "
+            "protein-oriented projected CVs initially."
+        ),
+    )
+    restraint_group.add_argument(
         "--restraint-force-constant",
         type=float,
         default=10000.0,
         help=(
-            "Default harmonic force constant (Rosetta CircularHarmonicFunc weighting and "
-            "OpenMM dihedral restraint k) for fixed backbone CVs. Use "
+            "Default harmonic strength for backbone dihedral CVs: Rosetta "
+            "CircularHarmonicFunc weight (via the restraint protocol) and OpenMM "
+            "CustomTorsionForce k. Rosetta *distance* AtomPair constraints use a "
+            "separate width; see --rosetta-distance-constraint-sd-angstrom. Use "
             "--rosetta-restraint-force-constant / --openmm-restraint-force-constant "
             "to override one backend."
         ),
@@ -331,7 +386,9 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
         default=None,
         metavar="K",
         help=(
-            "Optional override for Rosetta-only dihedral constraints during relax/perturb. "
+            "Optional override for Rosetta backbone dihedral strength during "
+            "CV/restraint protocol construction. Does not set Rosetta atom-pair "
+            "distance widths; use --rosetta-distance-constraint-sd-angstrom. "
             "When omitted, --restraint-force-constant is used."
         ),
     )
@@ -341,8 +398,9 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
         default=None,
         metavar="K",
         help=(
-            "Optional override for OpenMM CustomTorsionForce k during minimization. "
-            "When omitted, --restraint-force-constant is used."
+            "Optional override for OpenMM harmonic spring k (dihedral and distance "
+            "Custom*Forces) during minimization. When omitted, --restraint-force-constant "
+            "is used."
         ),
     )
     restraint_group.add_argument(
@@ -353,6 +411,62 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
             "Maximum allowed |measured CV − restraint target| after Rosetta relax or "
             "OpenMM minimization before the frame fails validation."
         ),
+    )
+    restraint_group.add_argument(
+        "--distance-measurement-tolerance-angstrom",
+        type=float,
+        default=0.05,
+        help=(
+            "Maximum allowed distance-CV drift in Angstrom after Rosetta relax or "
+            "OpenMM minimization before the frame fails validation."
+        ),
+    )
+    restraint_group.add_argument(
+        "--rosetta-distance-constraint-sd-angstrom",
+        type=float,
+        default=0.001,
+        metavar="SD",
+        help=(
+            "Width (σ, Å) for Rosetta AtomPairConstraint HarmonicFunc during "
+            "relax/repack — not an OpenMM-style spring constant. Smaller σ is stiffer. "
+            "Default 0.001 Å is intentionally tight; increase slightly if minimization "
+            "becomes unstable."
+        ),
+    )
+
+    mobility_group = parser.add_argument_group("Mobility")
+    mobility_group.add_argument(
+        "--mobility-mode",
+        choices=("target_only", "radius"),
+        default="target_only",
+        help=(
+            "Which residues may relax/minimize after mutation. target_only allows only "
+            "the target residue; radius includes residues near the target."
+        ),
+    )
+    mobility_group.add_argument(
+        "--mobility-radius-angstrom",
+        type=float,
+        default=0.0,
+        help="Radius in Angstrom used when --mobility-mode=radius.",
+    )
+    mobility_group.add_argument(
+        "--mobility-include-backbone",
+        action="store_true",
+        help="Allow backbone motion for residues selected by the mobility policy.",
+    )
+    mobility_group.add_argument(
+        "--mobility-include-sidechains",
+        dest="mobility_include_sidechains",
+        action="store_true",
+        default=True,
+        help="Allow sidechain motion for residues selected by the mobility policy.",
+    )
+    mobility_group.add_argument(
+        "--no-mobility-include-sidechains",
+        dest="mobility_include_sidechains",
+        action="store_false",
+        help="Disallow sidechain motion for residues selected by the mobility policy.",
     )
 
     sampling_group = parser.add_argument_group("Evaluation sampling")
@@ -910,6 +1024,12 @@ def build_run_config(namespace: argparse.Namespace) -> RunConfig:
             raise ConfigurationError("Do not combine --gpu with --platform-name.")
         platform_name = resolve_openmm_gpu_platform_name()
 
+    cv_specs = _parse_cv_specs(
+        namespace.cv_tokens,
+        namespace.target_residue_number,
+    )
+    distance_cv_specs = _parse_distance_cv_specs(namespace.distance_cv_tokens)
+
     config = RunConfig(
         input=InputConfig(
             topology_file=namespace.topology_file,
@@ -943,10 +1063,20 @@ def build_run_config(namespace: argparse.Namespace) -> RunConfig:
             rosetta_restraint_force_constant=namespace.rosetta_restraint_force_constant,
             openmm_restraint_force_constant=namespace.openmm_restraint_force_constant,
             cv_measurement_tolerance_degrees=namespace.cv_measurement_tolerance_degrees,
-            cv_specs=_parse_cv_specs(
-                namespace.cv_tokens,
-                namespace.target_residue_number,
+            distance_measurement_tolerance_angstrom=(
+                namespace.distance_measurement_tolerance_angstrom
             ),
+            rosetta_distance_constraint_sd_angstrom=(
+                namespace.rosetta_distance_constraint_sd_angstrom
+            ),
+            cv_specs=cv_specs,
+            distance_cv_specs=distance_cv_specs,
+        ),
+        mobility=MobilityConfig(
+            mode=namespace.mobility_mode,
+            radius_angstrom=namespace.mobility_radius_angstrom,
+            include_backbone=namespace.mobility_include_backbone,
+            include_sidechains=namespace.mobility_include_sidechains,
         ),
         energy=EnergyConfig(
             backend=namespace.energy_backend,

@@ -11,6 +11,8 @@ from felp.core import (
     CVMeasurement,
     CVSpec,
     DihedralRestraintSpec,
+    DistanceCVSpec,
+    DistanceRestraintSpec,
     default_backbone_cv_specs,
 )
 
@@ -69,12 +71,24 @@ def measure_dihedral_degrees(points: list[tuple[float, float, float]]) -> float:
     return float(np.degrees(np.arctan2(y, x)))
 
 
+def measure_distance_angstrom(
+    point1: tuple[float, float, float],
+    point2: tuple[float, float, float],
+) -> float:
+    """Measure a Cartesian distance in Angstrom."""
+
+    return float(
+        np.linalg.norm(np.asarray(point1, dtype=float) - np.asarray(point2, dtype=float))
+    )
+
+
 @dataclass
 class BackboneDihedralCVProtocol:
     """Measure and restrain a configured set of backbone dihedral CVs."""
 
     cv_specs: tuple[CVSpec, ...]
     force_constant: float
+    distance_cv_specs: tuple[DistanceCVSpec, ...] = ()
 
     def _dihedral_definition(
         self,
@@ -115,14 +129,20 @@ class BackboneDihedralCVProtocol:
         return float(pose.omega(spec.residue_number))
 
     def measure_pose(self, pose) -> CVMeasurement:
-        """Measure all configured backbone-dihedral CVs."""
+        """Measure all configured CVs."""
 
-        return CVMeasurement(
-            {spec.name: self._measure_cv(pose, spec) for spec in self.cv_specs}
-        )
+        values = {spec.name: self._measure_cv(pose, spec) for spec in self.cv_specs}
+        for spec in self.distance_cv_specs:
+            atom1 = pose.residue(spec.atom1.residue_number).xyz(spec.atom1.atom_name)
+            atom2 = pose.residue(spec.atom2.residue_number).xyz(spec.atom2.atom_name)
+            values[spec.name] = measure_distance_angstrom(
+                (float(atom1.x), float(atom1.y), float(atom1.z)),
+                (float(atom2.x), float(atom2.y), float(atom2.z)),
+            )
+        return CVMeasurement(values)
 
     def measure_structure(self, structure) -> CVMeasurement:
-        """Measure all configured backbone-dihedral CVs from a ParmEd structure."""
+        """Measure all configured CVs from a ParmEd structure."""
 
         values: dict[str, float] = {}
         for spec in self.cv_specs:
@@ -139,10 +159,25 @@ class BackboneDihedralCVProtocol:
                 )
             ]
             values[spec.name] = measure_dihedral_degrees(points)
+        for spec in self.distance_cv_specs:
+            atom1 = find_structure_atom(
+                structure,
+                spec.atom1.residue_number,
+                spec.atom1.atom_name,
+            )
+            atom2 = find_structure_atom(
+                structure,
+                spec.atom2.residue_number,
+                spec.atom2.atom_name,
+            )
+            values[spec.name] = measure_distance_angstrom(
+                (float(atom1.xx), float(atom1.xy), float(atom1.xz)),
+                (float(atom2.xx), float(atom2.xy), float(atom2.xz)),
+            )
         return CVMeasurement(values)
 
-    def build_from_reference_pose(self, pose) -> list[DihedralRestraintSpec]:
-        """Build dihedral restraint specifications based on the current pose geometry."""
+    def build_dihedral_restraints_from_reference_pose(self, pose) -> list[DihedralRestraintSpec]:
+        """Build dihedral restraint specifications based on current pose geometry."""
 
         measurement = self.measure_pose(pose)
         restraints: list[DihedralRestraintSpec] = []
@@ -160,6 +195,32 @@ class BackboneDihedralCVProtocol:
             )
         return restraints
 
+    def build_distance_restraints_from_reference_pose(self, pose) -> list[DistanceRestraintSpec]:
+        """Build distance restraint specifications based on current pose geometry."""
+
+        measurement = self.measure_pose(pose)
+        return [
+            DistanceRestraintSpec(
+                label=spec.name,
+                atom1=spec.atom1,
+                atom2=spec.atom2,
+                target_distance_angstrom=measurement.values[spec.name],
+                force_constant=self.force_constant,
+            )
+            for spec in self.distance_cv_specs
+        ]
+
+    def build_from_reference_pose(
+        self,
+        pose,
+    ) -> list[DihedralRestraintSpec | DistanceRestraintSpec]:
+        """Build all restraint specifications based on current pose geometry."""
+
+        return [
+            *self.build_dihedral_restraints_from_reference_pose(pose),
+            *self.build_distance_restraints_from_reference_pose(pose),
+        ]
+
 
 class PhiPsiRestraintProtocol(BackboneDihedralCVProtocol):
     """Compatibility wrapper for the legacy phi/psi-only restraint mode."""
@@ -168,5 +229,6 @@ class PhiPsiRestraintProtocol(BackboneDihedralCVProtocol):
         self.target_residue_number = target_residue_number
         super().__init__(
             cv_specs=default_backbone_cv_specs(target_residue_number),
+            distance_cv_specs=(),
             force_constant=force_constant,
         )

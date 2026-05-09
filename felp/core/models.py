@@ -284,6 +284,57 @@ class CVSpec:
         )
 
 
+@dataclass(frozen=True)
+class AtomReference:
+    """Pose-indexed atom reference used by generic CV definitions."""
+
+    residue_number: int
+    atom_name: str
+
+    def __post_init__(self) -> None:
+        if int(self.residue_number) < 1:
+            raise ConfigurationError("Atom-reference residue numbers must be at least 1.")
+        atom_name = self.atom_name.strip()
+        if not atom_name:
+            raise ConfigurationError("Atom-reference atom names may not be empty.")
+        object.__setattr__(self, "residue_number", int(self.residue_number))
+        object.__setattr__(self, "atom_name", atom_name)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "AtomReference":
+        """Rehydrate an atom reference from a serialized dictionary."""
+
+        return cls(
+            residue_number=payload["residue_number"],
+            atom_name=payload["atom_name"],
+        )
+
+
+@dataclass(frozen=True)
+class DistanceCVSpec:
+    """Named distance CV between two pose-indexed atoms."""
+
+    name: str
+    atom1: AtomReference
+    atom2: AtomReference
+
+    def __post_init__(self) -> None:
+        name = self.name.strip()
+        if not name:
+            raise ConfigurationError("Distance CV names may not be empty.")
+        object.__setattr__(self, "name", name)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "DistanceCVSpec":
+        """Rehydrate a distance CV specification from a serialized dictionary."""
+
+        return cls(
+            name=payload["name"],
+            atom1=AtomReference.from_dict(payload["atom1"]),
+            atom2=AtomReference.from_dict(payload["atom2"]),
+        )
+
+
 def default_backbone_cv_specs(target_residue_number: int) -> tuple[CVSpec, ...]:
     """Return the legacy phi/psi CV pair on the target residue."""
 
@@ -345,6 +396,12 @@ class RestraintConfig:
 
     ``cv_measurement_tolerance_degrees`` gates post-relax (Rosetta) and post-minimize
     (OpenMM) backbone CV checks against restraint targets.
+
+    Rosetta ``AtomPairConstraint`` + ``HarmonicFunc`` use a width parameter (σ in Å),
+    not a harmonic spring constant; ``rosetta_distance_constraint_sd_angstrom`` sets
+    that width during FastRelax/repack. OpenMM distance restraints use
+    ``effective_openmm_force_constant()`` as the spring ``k`` (see
+    ``--openmm-restraint-force-constant``).
     """
 
     mode: str = "phi_psi"
@@ -352,22 +409,32 @@ class RestraintConfig:
     rosetta_restraint_force_constant: Optional[float] = None
     openmm_restraint_force_constant: Optional[float] = None
     cv_measurement_tolerance_degrees: float = 1.0
+    distance_measurement_tolerance_angstrom: float = 0.05
+    rosetta_distance_constraint_sd_angstrom: float = 0.001
     cv_specs: tuple[CVSpec, ...] = ()
+    distance_cv_specs: tuple[DistanceCVSpec, ...] = ()
 
     def __post_init__(self) -> None:
         normalized_specs = tuple(self.cv_specs)
-        names = [spec.name for spec in normalized_specs]
+        normalized_distance_specs = tuple(self.distance_cv_specs)
+        names = [spec.name for spec in normalized_specs] + [
+            spec.name for spec in normalized_distance_specs
+        ]
         if len(names) != len(set(names)):
             duplicates = sorted({name for name in names if names.count(name) > 1})
             duplicate_text = ", ".join(duplicates)
             raise ConfigurationError(
-                f"Backbone CV names must be unique; duplicates: {duplicate_text}."
+                f"CV names must be unique; duplicates: {duplicate_text}."
             )
         if self.force_constant <= 0.0:
             raise ConfigurationError("Restraint force_constant must be positive.")
         if self.cv_measurement_tolerance_degrees <= 0.0:
             raise ConfigurationError(
                 "cv_measurement_tolerance_degrees must be positive."
+            )
+        if self.distance_measurement_tolerance_angstrom <= 0.0:
+            raise ConfigurationError(
+                "distance_measurement_tolerance_angstrom must be positive."
             )
         if (
             self.rosetta_restraint_force_constant is not None
@@ -383,10 +450,19 @@ class RestraintConfig:
             raise ConfigurationError(
                 "openmm_restraint_force_constant must be positive when set."
             )
+        if self.rosetta_distance_constraint_sd_angstrom <= 0.0:
+            raise ConfigurationError(
+                "rosetta_distance_constraint_sd_angstrom must be positive."
+            )
         object.__setattr__(self, "cv_specs", normalized_specs)
+        object.__setattr__(self, "distance_cv_specs", normalized_distance_specs)
 
     def effective_rosetta_force_constant(self) -> float:
-        """Force constant for Rosetta dihedral constraints and CV protocol."""
+        """Weighting for Rosetta CircularHarmonic dihedral constraints / CV protocol.
+
+        Not used for Rosetta atom-pair distance widths; see
+        ``rosetta_distance_constraint_sd_angstrom``.
+        """
 
         if self.rosetta_restraint_force_constant is not None:
             return float(self.rosetta_restraint_force_constant)
@@ -415,10 +491,54 @@ class RestraintConfig:
             cv_measurement_tolerance_degrees=payload.get(
                 "cv_measurement_tolerance_degrees", 1.0
             ),
+            distance_measurement_tolerance_angstrom=payload.get(
+                "distance_measurement_tolerance_angstrom", 0.05
+            ),
+            rosetta_distance_constraint_sd_angstrom=payload.get(
+                "rosetta_distance_constraint_sd_angstrom", 0.001
+            ),
             cv_specs=tuple(
                 CVSpec.from_dict(spec_payload)
                 for spec_payload in payload.get("cv_specs", ())
             ),
+            distance_cv_specs=tuple(
+                DistanceCVSpec.from_dict(spec_payload)
+                for spec_payload in payload.get("distance_cv_specs", ())
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class MobilityConfig:
+    """Configuration for which residues/atoms may relax after mutation."""
+
+    mode: str = "target_only"
+    radius_angstrom: float = 0.0
+    include_backbone: bool = False
+    include_sidechains: bool = True
+
+    def __post_init__(self) -> None:
+        if self.mode not in {"target_only", "radius"}:
+            raise ConfigurationError(
+                "mobility.mode must be 'target_only' or 'radius'."
+            )
+        if float(self.radius_angstrom) < 0.0:
+            raise ConfigurationError("mobility.radius_angstrom must be non-negative.")
+        if not self.include_backbone and not self.include_sidechains:
+            raise ConfigurationError(
+                "At least one of mobility.include_backbone/include_sidechains must be enabled."
+            )
+        object.__setattr__(self, "radius_angstrom", float(self.radius_angstrom))
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "MobilityConfig":
+        """Rehydrate mobility configuration from a serialized dictionary."""
+
+        return cls(
+            mode=payload.get("mode", "target_only"),
+            radius_angstrom=payload.get("radius_angstrom", 0.0),
+            include_backbone=payload.get("include_backbone", False),
+            include_sidechains=payload.get("include_sidechains", True),
         )
 
 
@@ -647,6 +767,7 @@ class RunConfig:
     parallel: ParallelConfig
     output: OutputConfig
     sampling: SamplingConfig = field(default_factory=SamplingConfig)
+    mobility: MobilityConfig = field(default_factory=MobilityConfig)
 
     def validate(self) -> None:
         """Validate the run configuration before any heavy work begins."""
@@ -680,9 +801,9 @@ class RunConfig:
             and self.input.frame_stop < self.input.frame_start
         ):
             raise ConfigurationError("frame_stop must be greater than frame_start.")
-        if not self.restraints.cv_specs:
+        if not self.restraints.cv_specs and not self.restraints.distance_cv_specs:
             raise ConfigurationError(
-                "At least one backbone CV specification is required."
+                "At least one CV specification is required."
             )
         if self.energy.backend not in {"openmm", "rosetta"}:
             raise ConfigurationError(
@@ -775,15 +896,23 @@ class RunConfig:
                 rosetta_restraint_force_constant=restraints.rosetta_restraint_force_constant,
                 openmm_restraint_force_constant=restraints.openmm_restraint_force_constant,
                 cv_measurement_tolerance_degrees=restraints.cv_measurement_tolerance_degrees,
+                distance_measurement_tolerance_angstrom=(
+                    restraints.distance_measurement_tolerance_angstrom
+                ),
+                rosetta_distance_constraint_sd_angstrom=(
+                    restraints.rosetta_distance_constraint_sd_angstrom
+                ),
                 cv_specs=default_backbone_cv_specs(
                     perturbation.target_residue_number
                 ),
+                distance_cv_specs=restraints.distance_cv_specs,
             )
         return cls(
             input=InputConfig.from_dict(payload["input"]),
             perturbation=perturbation,
             rosetta=RosettaConfig.from_dict(payload["rosetta"]),
             restraints=restraints,
+            mobility=MobilityConfig.from_dict(payload.get("mobility", {})),
             energy=EnergyConfig.from_dict(payload["energy"]),
             microstates=MicrostateConfig.from_dict(payload["microstates"]),
             parallel=ParallelConfig.from_dict(payload["parallel"]),
@@ -868,6 +997,17 @@ class DihedralRestraintSpec:
     residue_numbers: tuple[int, int, int, int]
     atom_names: tuple[str, str, str, str]
     target_angle_degrees: float
+    force_constant: float
+
+
+@dataclass(frozen=True)
+class DistanceRestraintSpec:
+    """Specification for a single distance restraint to apply during relaxation."""
+
+    label: str
+    atom1: AtomReference
+    atom2: AtomReference
+    target_distance_angstrom: float
     force_constant: float
 
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 from parmed import Structure
 from parmed.topologyobjects import Atom
 
-from felp.core import CVSpec
+from felp.core import AtomReference, CVSpec, DistanceCVSpec, DistanceRestraintSpec
 from felp.restraints import BackboneDihedralCVProtocol, PhiPsiRestraintProtocol
 
 
@@ -101,3 +101,65 @@ def test_backbone_dihedral_protocol_measures_structure_with_bridge_seqpos() -> N
     measurement = protocol.measure_structure(structure)
 
     assert measurement.values == {"omega": -90.0}
+
+
+def test_protocol_measures_distance_cv_from_structure() -> None:
+    structure = Structure()
+    structure.add_atom(Atom(name="CA", atomic_number=6, mass=12.0), "GLY", 1)
+    structure.add_atom(Atom(name="CA", atomic_number=6, mass=12.0), "ALA", 2)
+    structure.atoms[0].xx, structure.atoms[0].xy, structure.atoms[0].xz = (0.0, 0.0, 0.0)
+    structure.atoms[1].xx, structure.atoms[1].xy, structure.atoms[1].xz = (3.0, 4.0, 0.0)
+    protocol = BackboneDihedralCVProtocol(
+        cv_specs=(),
+        distance_cv_specs=(
+            DistanceCVSpec(
+                name="ca_ca",
+                atom1=AtomReference(1, "CA"),
+                atom2=AtomReference(2, "CA"),
+            ),
+        ),
+        force_constant=10.0,
+    )
+
+    measurement = protocol.measure_structure(structure)
+
+    assert measurement.values == {"ca_ca": 5.0}
+
+
+def test_protocol_builds_distance_restraint_specs_from_pose() -> None:
+    class _XYZ:
+        x = 0.0
+        y = 0.0
+        z = 0.0
+
+    class _Residue:
+        def __init__(self, point) -> None:
+            self.point = point
+
+        def xyz(self, atom_name: str):
+            return self.point
+
+    class _Pose:
+        def residue(self, residue_number: int):
+            point = _XYZ()
+            if residue_number == 2:
+                point.x = 0.0
+                point.y = 6.0
+            return _Residue(point)
+
+    protocol = BackboneDihedralCVProtocol(
+        cv_specs=(),
+        distance_cv_specs=(
+            DistanceCVSpec(
+                name="ca_ca",
+                atom1=AtomReference(1, "CA"),
+                atom2=AtomReference(2, "CA"),
+            ),
+        ),
+        force_constant=10.0,
+    )
+
+    restraints = protocol.build_from_reference_pose(_Pose())
+
+    assert isinstance(restraints[0], DistanceRestraintSpec)
+    assert restraints[0].target_distance_angstrom == 6.0

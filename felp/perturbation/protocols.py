@@ -9,6 +9,8 @@ from typing import Iterable
 from felp.core import (
     ConversionError,
     DihedralRestraintSpec,
+    DistanceRestraintSpec,
+    MobilityConfig,
     mutation_target_family,
     normalize_mutation_target_name,
 )
@@ -38,8 +40,10 @@ class PyRosettaPerturbationProtocol:
     repack_trials: int = 1
     cartesian: bool = True
     packing_shell_distance_angstrom: float = 6.0
+    mobility: MobilityConfig = MobilityConfig()
     output_dir: str | None = None
     write_pose_pdbs: bool = False
+    rosetta_distance_constraint_sd_angstrom: float = 0.001
 
     def _pose_path(self, frame_index: int, suffix: str) -> str:
         if not self.output_dir:
@@ -150,79 +154,139 @@ class PyRosettaPerturbationProtocol:
     def _build_packing_score_function(self, pyrosetta):
         return self._build_score_function(pyrosetta, prefer_cartesian=False)
 
-    def _build_packable_selector(self, pyrosetta):
+    def _split_restraint_specs(self, restraint_specs):
+        dihedral_specs = tuple(
+            spec for spec in restraint_specs if isinstance(spec, DihedralRestraintSpec)
+        )
+        distance_specs = tuple(
+            spec for spec in restraint_specs if isinstance(spec, DistanceRestraintSpec)
+        )
+        return dihedral_specs, distance_specs
+
+    def _build_mobile_selector(self, pyrosetta):
         selectors = pyrosetta.rosetta.core.select.residue_selector
         target_selector = selectors.ResidueIndexSelector(str(self.target_residue_number))
-        packable_selector = selectors.NeighborhoodResidueSelector()
-        packable_selector.set_focus_selector(target_selector)
-        packable_selector.set_distance(self.packing_shell_distance_angstrom)
-        packable_selector.set_include_focus_in_subset(True)
-        return packable_selector
+        if self.mobility.mode == "target_only":
+            return target_selector
+        mobile_selector = selectors.NeighborhoodResidueSelector()
+        mobile_selector.set_focus_selector(target_selector)
+        mobile_selector.set_distance(self.mobility.radius_angstrom)
+        mobile_selector.set_include_focus_in_subset(True)
+        return mobile_selector
 
-    def _build_task_factory(self, pyrosetta, packable_selector):
+    def _build_task_factory(self, pyrosetta, mobile_selector):
         operations = pyrosetta.rosetta.core.pack.task.operation
         selectors = pyrosetta.rosetta.core.select.residue_selector
         task_factory = pyrosetta.rosetta.core.pack.task.TaskFactory()
         task_factory.push_back(operations.InitializeFromCommandline())
         task_factory.push_back(operations.IncludeCurrent())
         task_factory.push_back(operations.RestrictToRepacking())
-        task_factory.push_back(
-            operations.OperateOnResidueSubset(
-                operations.PreventRepackingRLT(),
-                selectors.NotResidueSelector(packable_selector),
+        if not self.mobility.include_sidechains:
+            task_factory.push_back(operations.PreventRepacking())
+        else:
+            task_factory.push_back(
+                operations.OperateOnResidueSubset(
+                    operations.PreventRepackingRLT(),
+                    selectors.NotResidueSelector(mobile_selector),
+                )
             )
-        )
         return task_factory
 
-    def _build_movemap(self, pyrosetta, pose, packable_selector):
+    def _build_movemap(self, pyrosetta, pose, mobile_selector):
         movemap = pyrosetta.rosetta.core.kinematics.MoveMap()
         movemap.set_bb(False)
         movemap.set_chi(False)
         if hasattr(movemap, "set_jump"):
             movemap.set_jump(False)
 
-        packable_subset = packable_selector.apply(pose)
-        for residue_number in range(1, len(packable_subset) + 1):
-            if packable_subset[residue_number]:
-                movemap.set_chi(residue_number, True)
+        mobile_subset = mobile_selector.apply(pose)
+        for residue_number in range(1, len(mobile_subset) + 1):
+            if mobile_subset[residue_number]:
+                if self.mobility.include_backbone:
+                    movemap.set_bb(residue_number, True)
+                if self.mobility.include_sidechains:
+                    movemap.set_chi(residue_number, True)
         return movemap
+
+    def _add_distance_constraints(self, pyrosetta, pose, distance_specs) -> None:
+        if not distance_specs:
+            return
+        constraints = pyrosetta.rosetta.core.scoring.constraints
+        funcs = pyrosetta.rosetta.core.scoring.func
+        atom_id = pyrosetta.rosetta.core.id.AtomID
+        width = float(self.rosetta_distance_constraint_sd_angstrom)
+        for spec in distance_specs:
+            residue1 = pose.residue(spec.atom1.residue_number)
+            residue2 = pose.residue(spec.atom2.residue_number)
+            constraint = constraints.AtomPairConstraint(
+                atom_id(residue1.atom_index(spec.atom1.atom_name), spec.atom1.residue_number),
+                atom_id(residue2.atom_index(spec.atom2.atom_name), spec.atom2.residue_number),
+                funcs.HarmonicFunc(
+                    float(spec.target_distance_angstrom),
+                    width,
+                ),
+            )
+            pose.add_constraint(constraint)
+
+    def _score_function_with_constraints(self, pyrosetta, score_function):
+        if not hasattr(pyrosetta.rosetta, "core"):
+            return score_function
+        score_type = pyrosetta.rosetta.core.scoring.ScoreType
+        if hasattr(score_type, "atom_pair_constraint"):
+            score_function.set_weight(score_type.atom_pair_constraint, 1.0)
+        if hasattr(score_type, "dihedral_constraint"):
+            score_function.set_weight(score_type.dihedral_constraint, 1.0)
+        return score_function
+
+    def _apply_restraints_to_pose(self, pyrosetta, pose, restraint_specs) -> tuple:
+        dihedral_specs, distance_specs = self._split_restraint_specs(tuple(restraint_specs))
+        self._enforce_target_backbone_cvs(pose, dihedral_specs)
+        self._add_distance_constraints(pyrosetta, pose, distance_specs)
+        return dihedral_specs
 
     def _prepare_working_pose(
         self,
         pose,
-        restraint_specs: Iterable[DihedralRestraintSpec],
+        restraint_specs: Iterable[DihedralRestraintSpec | DistanceRestraintSpec],
         *,
         context: str,
     ):
+        self.conversion_service.ensure_pyrosetta_initialized()
+        pyrosetta, _, _ = _import_pyrosetta()
         working_pose = pose.clone()
-        self._enforce_target_backbone_cvs(working_pose, restraint_specs)
-        self._assert_locked_backbone_cvs(
+        dihedral_specs = self._apply_restraints_to_pose(
+            pyrosetta,
             working_pose,
             restraint_specs,
+        )
+        self._assert_locked_backbone_cvs(
+            working_pose,
+            dihedral_specs,
             context=f"{context} setup",
         )
-        return working_pose
+        return working_pose, pyrosetta, dihedral_specs
 
     def _relax_pose(
         self,
         pose,
-        restraint_specs: Iterable[DihedralRestraintSpec],
+        restraint_specs: Iterable[DihedralRestraintSpec | DistanceRestraintSpec],
         frame_index: int,
         suffix: str,
     ):
-        self.conversion_service.ensure_pyrosetta_initialized()
-        pyrosetta, _, _ = _import_pyrosetta()
         restraint_specs = tuple(restraint_specs)
-        working_pose = self._prepare_working_pose(
+        working_pose, pyrosetta, dihedral_specs = self._prepare_working_pose(
             pose,
             restraint_specs,
             context="Rosetta FastRelax",
         )
 
-        packable_selector = self._build_packable_selector(pyrosetta)
-        task_factory = self._build_task_factory(pyrosetta, packable_selector)
-        movemap = self._build_movemap(pyrosetta, working_pose, packable_selector)
-        score_function = self._build_relax_score_function(pyrosetta)
+        mobile_selector = self._build_mobile_selector(pyrosetta)
+        task_factory = self._build_task_factory(pyrosetta, mobile_selector)
+        movemap = self._build_movemap(pyrosetta, working_pose, mobile_selector)
+        score_function = self._score_function_with_constraints(
+            pyrosetta,
+            self._build_relax_score_function(pyrosetta),
+        )
 
         relax = pyrosetta.rosetta.protocols.relax.FastRelax(
             score_function,
@@ -239,7 +303,7 @@ class PyRosettaPerturbationProtocol:
         relax.apply(working_pose)
         self._assert_locked_backbone_cvs(
             working_pose,
-            restraint_specs,
+            dihedral_specs,
             context="Rosetta FastRelax",
         )
 
@@ -251,23 +315,24 @@ class PyRosettaPerturbationProtocol:
     def _repack_pose(
         self,
         pose,
-        restraint_specs: Iterable[DihedralRestraintSpec],
+        restraint_specs: Iterable[DihedralRestraintSpec | DistanceRestraintSpec],
         frame_index: int,
         suffix: str,
     ):
-        self.conversion_service.ensure_pyrosetta_initialized()
-        pyrosetta, _, _ = _import_pyrosetta()
         restraint_specs = tuple(restraint_specs)
-        working_pose = self._prepare_working_pose(
+        working_pose, pyrosetta, dihedral_specs = self._prepare_working_pose(
             pose,
             restraint_specs,
             context="Rosetta repack",
         )
 
-        packable_selector = self._build_packable_selector(pyrosetta)
-        task_factory = self._build_task_factory(pyrosetta, packable_selector)
+        mobile_selector = self._build_mobile_selector(pyrosetta)
+        task_factory = self._build_task_factory(pyrosetta, mobile_selector)
         packer_task = task_factory.create_task_and_apply_taskoperations(working_pose)
-        score_function = self._build_packing_score_function(pyrosetta)
+        score_function = self._score_function_with_constraints(
+            pyrosetta,
+            self._build_packing_score_function(pyrosetta),
+        )
         repack = pyrosetta.rosetta.protocols.minimization_packing.PackRotamersMover(
             score_function,
             packer_task,
@@ -277,7 +342,7 @@ class PyRosettaPerturbationProtocol:
         repack.apply(working_pose)
         self._assert_locked_backbone_cvs(
             working_pose,
-            restraint_specs,
+            dihedral_specs,
             context="Rosetta repack",
         )
 
@@ -289,7 +354,7 @@ class PyRosettaPerturbationProtocol:
     def _run_perturbation_protocol(
         self,
         pose,
-        restraint_specs: Iterable[DihedralRestraintSpec],
+        restraint_specs: Iterable[DihedralRestraintSpec | DistanceRestraintSpec],
         frame_index: int,
         suffix: str,
     ):
@@ -300,7 +365,7 @@ class PyRosettaPerturbationProtocol:
     def prepare_reference_pose(
         self,
         pose,
-        restraint_specs: Iterable[DihedralRestraintSpec],
+        restraint_specs: Iterable[DihedralRestraintSpec | DistanceRestraintSpec],
         frame_index: int,
     ):
         """Prepare the reference pose without allowing Rosetta CV drift."""
@@ -316,7 +381,7 @@ class PyRosettaPerturbationProtocol:
         pose,
         target_residue_number: int,
         target_residue_name: str,
-        restraint_specs: Iterable[DihedralRestraintSpec],
+        restraint_specs: Iterable[DihedralRestraintSpec | DistanceRestraintSpec],
         frame_index: int,
     ):
         """Mutate the target residue and prepare the perturbed pose."""
@@ -338,7 +403,7 @@ class PyRosettaPerturbationProtocol:
         pose,
         target_residue_number: int,
         target_residue_name: str,
-        restraint_specs: Iterable[DihedralRestraintSpec] = (),
+        restraint_specs: Iterable[DihedralRestraintSpec | DistanceRestraintSpec] = (),
     ):
         """Mutate the target residue while preserving all configured CV targets."""
         expected = normalize_mutation_target_name(target_residue_name)
@@ -353,10 +418,11 @@ class PyRosettaPerturbationProtocol:
             )
             mutate_mover = MutateResidue(target_residue_number, rosetta_target_name)
             mutate_mover.apply(mutated_pose)
-        self._enforce_target_backbone_cvs(mutated_pose, restraint_specs)
+        dihedral_specs, _ = self._split_restraint_specs(tuple(restraint_specs))
+        self._enforce_target_backbone_cvs(mutated_pose, dihedral_specs)
         self._assert_locked_backbone_cvs(
             mutated_pose,
-            restraint_specs,
+            dihedral_specs,
             context="Rosetta mutation setup",
         )
         return mutated_pose
@@ -366,7 +432,7 @@ class PyRosettaPerturbationProtocol:
         pose,
         target_residue_number: int,
         target_residue_name: str | None,
-        restraint_specs: Iterable[DihedralRestraintSpec] = (),
+        restraint_specs: Iterable[DihedralRestraintSpec | DistanceRestraintSpec] = (),
     ):
         """Return a pose whose target residue matches the requested chemistry."""
 

@@ -7,7 +7,13 @@ import math
 from dataclasses import dataclass
 from typing import Iterable
 
-from felp.core import ConfigurationError, DihedralRestraintSpec, EnergyResult
+from felp.core import (
+    ConfigurationError,
+    DihedralRestraintSpec,
+    DistanceRestraintSpec,
+    EnergyResult,
+    MobilityConfig,
+)
 from felp.conversion import StructureConversionService
 from felp.restraints.protocols import find_structure_atom
 
@@ -31,10 +37,39 @@ def resolve_openmm_gpu_platform_name() -> str:
 def _import_openmm():
     import openmm
     import openmm.unit as unit
-    from openmm import CustomTorsionForce, LangevinIntegrator
+    from openmm import CustomBondForce, CustomTorsionForce, LangevinIntegrator
     from openmm.app import ForceField, Modeller, NoCutoff, Simulation
 
-    return openmm, unit, CustomTorsionForce, ForceField, LangevinIntegrator, Modeller, NoCutoff, Simulation
+    return (
+        openmm,
+        unit,
+        CustomBondForce,
+        CustomTorsionForce,
+        ForceField,
+        LangevinIntegrator,
+        Modeller,
+        NoCutoff,
+        Simulation,
+    )
+
+
+def _openmm_import_parts():
+    parts = _import_openmm()
+    if len(parts) == 8:
+        openmm, unit, CustomTorsionForce, ForceField, LangevinIntegrator, Modeller, NoCutoff, Simulation = parts
+        CustomBondForce = None
+        return (
+            openmm,
+            unit,
+            CustomBondForce,
+            CustomTorsionForce,
+            ForceField,
+            LangevinIntegrator,
+            Modeller,
+            NoCutoff,
+            Simulation,
+        )
+    return parts
 
 
 def _import_pyrosetta():
@@ -53,7 +88,7 @@ class EnergyEvaluator(ABC):
         *,
         structure=None,
         pose=None,
-        restraint_specs: Iterable[DihedralRestraintSpec] = (),
+        restraint_specs: Iterable[DihedralRestraintSpec | DistanceRestraintSpec] = (),
     ) -> EnergyResult:
         """Evaluate a structure or pose."""
 
@@ -72,6 +107,8 @@ class OpenMMEnergyEvaluator(EnergyEvaluator):
     minimization_max_iterations: int
     platform_name: str | None = None
     cpu_threads: int = 1
+    mobility: MobilityConfig = MobilityConfig()
+    target_residue_number: int = 1
 
     @staticmethod
     def _residue_name_summary(structure) -> str:
@@ -102,8 +139,8 @@ class OpenMMEnergyEvaluator(EnergyEvaluator):
         )
 
     def _apply_restraints(self, system, structure, restraint_specs):
-        """Apply dihedral restraints to the OpenMM System."""
-        _, _, CustomTorsionForce, _, _, _, _, _ = _import_openmm()
+        """Apply CV restraints to the OpenMM System."""
+        _, _, CustomBondForce, CustomTorsionForce, _, _, _, _, _ = _openmm_import_parts()
         # Use a smooth periodic restraint to avoid NaN forces at exact target angles
         # on the OpenMM CPU platform. ``acos(cos(theta-theta0))`` is singular at the
         # target by construction for the reference structure, while ``1-cos`` has the
@@ -112,7 +149,10 @@ class OpenMMEnergyEvaluator(EnergyEvaluator):
         force.addPerTorsionParameter("theta0")
         force.addPerTorsionParameter("k")
 
+        torsion_count = 0
         for spec in restraint_specs:
+            if not isinstance(spec, DihedralRestraintSpec):
+                continue
             atom_indices = [
                 self._find_atom_index(structure, residue_number, atom_name)
                 for residue_number, atom_name in zip(spec.residue_numbers, spec.atom_names)
@@ -124,15 +164,89 @@ class OpenMMEnergyEvaluator(EnergyEvaluator):
                 atom_indices[3],
                 [math.radians(spec.target_angle_degrees), float(spec.force_constant)],
             )
+            torsion_count += 1
 
-        system.addForce(force)
+        if torsion_count:
+            system.addForce(force)
+
+        if CustomBondForce is None:
+            return
+        distance_force = CustomBondForce("0.5*k*(r-r0)^2")
+        distance_force.addPerBondParameter("r0")
+        distance_force.addPerBondParameter("k")
+        distance_count = 0
+        for spec in restraint_specs:
+            if not isinstance(spec, DistanceRestraintSpec):
+                continue
+            atom1 = self._find_atom_index(
+                structure,
+                spec.atom1.residue_number,
+                spec.atom1.atom_name,
+            )
+            atom2 = self._find_atom_index(
+                structure,
+                spec.atom2.residue_number,
+                spec.atom2.atom_name,
+            )
+            distance_force.addBond(
+                atom1,
+                atom2,
+                [
+                    float(spec.target_distance_angstrom) * 0.1,
+                    float(spec.force_constant),
+                ],
+            )
+            distance_count += 1
+        if distance_count:
+            system.addForce(distance_force)
+
+    def _mobile_atom_indices(self, structure) -> set[int]:
+        mobile_residues = {int(self.target_residue_number)}
+        if self.mobility.mode == "radius":
+            target_residue = find_structure_atom(structure, self.target_residue_number, "CA").residue
+            target_atoms = list(getattr(target_residue, "atoms", ()))
+            radius_sq = float(self.mobility.radius_angstrom) ** 2
+            for residue in structure.residues:
+                for atom in getattr(residue, "atoms", ()):
+                    if any(
+                        (float(atom.xx) - float(target_atom.xx)) ** 2
+                        + (float(atom.xy) - float(target_atom.xy)) ** 2
+                        + (float(atom.xz) - float(target_atom.xz)) ** 2
+                        <= radius_sq
+                        for target_atom in target_atoms
+                    ):
+                        mobile_residues.add(structure.residues.index(residue) + 1)
+                        break
+
+        mobile_atoms: set[int] = set()
+        backbone_names = {"N", "CA", "C", "O", "OXT"}
+        for atom_index, atom in enumerate(structure.atoms):
+            residue_number = structure.residues.index(atom.residue) + 1
+            if residue_number not in mobile_residues:
+                continue
+            atom_name = str(getattr(atom, "name", "")).strip()
+            is_backbone = atom_name in backbone_names
+            if (is_backbone and self.mobility.include_backbone) or (
+                not is_backbone and self.mobility.include_sidechains
+            ):
+                mobile_atoms.add(atom_index)
+        return mobile_atoms
+
+    def _freeze_immobile_atoms(self, system, structure) -> int:
+        mobile_atoms = self._mobile_atom_indices(structure)
+        frozen_count = 0
+        for atom_index in range(system.getNumParticles()):
+            if atom_index not in mobile_atoms:
+                system.setParticleMass(atom_index, 0.0)
+                frozen_count += 1
+        return frozen_count
 
     def validate_topology(self, structure) -> None:
         """Fail early when the reference topology cannot be templated by OpenMM."""
 
         if structure is None:
             raise ValueError("OpenMMEnergyEvaluator requires a ParmEd structure.")
-        _, unit, _, ForceField, _, Modeller, NoCutoff, _ = _import_openmm()
+        _, unit, _, _, ForceField, _, Modeller, NoCutoff, _ = _openmm_import_parts()
         modeller = Modeller(structure.topology, structure.positions)
         force_field = ForceField(self.protein_forcefield, self.solvent_forcefield)
         try:
@@ -163,7 +277,17 @@ class OpenMMEnergyEvaluator(EnergyEvaluator):
         if structure is None:
             raise ValueError("OpenMMEnergyEvaluator requires a ParmEd structure.")
 
-        openmm, unit, _, ForceField, LangevinIntegrator, Modeller, NoCutoff, Simulation = _import_openmm()
+        (
+            openmm,
+            unit,
+            _,
+            _,
+            ForceField,
+            LangevinIntegrator,
+            Modeller,
+            NoCutoff,
+            Simulation,
+        ) = _openmm_import_parts()
         modeller = Modeller(structure.topology, structure.positions)
         force_field = ForceField(self.protein_forcefield, self.solvent_forcefield)
         system = force_field.createSystem(
@@ -172,6 +296,7 @@ class OpenMMEnergyEvaluator(EnergyEvaluator):
             nonbondedCutoff=self.nonbonded_cutoff_nm * unit.nanometer,
         )
 
+        frozen_atom_count = self._freeze_immobile_atoms(system, structure)
         restraint_specs = list(restraint_specs)
         if restraint_specs:
             self._apply_restraints(system, structure, restraint_specs)
@@ -218,7 +343,10 @@ class OpenMMEnergyEvaluator(EnergyEvaluator):
             backend="openmm",
             energy_kj_mol=float(energy),
             minimized_coordinates_angstrom=minimized_coordinates,
-            metadata={"restraint_count": len(restraint_specs)},
+            metadata={
+                "restraint_count": len(restraint_specs),
+                "frozen_atom_count": frozen_atom_count,
+            },
         )
 
 
@@ -287,6 +415,9 @@ class RosettaEnergyEvaluator(EnergyEvaluator):
 def build_energy_evaluator(
     energy_config,
     conversion_service: StructureConversionService,
+    *,
+    mobility_config: MobilityConfig | None = None,
+    target_residue_number: int = 1,
 ) -> EnergyEvaluator:
     """Factory method to build the configured EnergyEvaluator."""
     if energy_config.backend == "openmm":
@@ -301,6 +432,8 @@ def build_energy_evaluator(
             minimization_max_iterations=energy_config.minimization_max_iterations,
             platform_name=energy_config.platform_name,
             cpu_threads=energy_config.cpu_threads,
+            mobility=mobility_config or MobilityConfig(),
+            target_residue_number=target_residue_number,
         )
     return RosettaEnergyEvaluator(
         conversion_service=conversion_service,

@@ -8,6 +8,7 @@ from felp.core import (
     CVMeasurement,
     ConversionError,
     DihedralRestraintSpec,
+    DistanceRestraintSpec,
     PerturbationConfig,
     PhiPsiMeasurement,
     mutation_target_family,
@@ -165,20 +166,21 @@ def _coerce_measurement(
 
 
 def target_cv_measurement_from_restraints(
-    restraint_specs: list[DihedralRestraintSpec] | tuple[DihedralRestraintSpec, ...],
+    restraint_specs,
 ) -> CVMeasurement:
     """Extract the target named CV values represented by a restraint list."""
 
-    return CVMeasurement(
-        {
-            spec.label: normalize_angle_degrees(spec.target_angle_degrees)
-            for spec in restraint_specs
-        }
-    )
+    values: dict[str, float] = {}
+    for spec in restraint_specs:
+        if isinstance(spec, DihedralRestraintSpec):
+            values[spec.label] = normalize_angle_degrees(spec.target_angle_degrees)
+        elif isinstance(spec, DistanceRestraintSpec):
+            values[spec.label] = float(spec.target_distance_angstrom)
+    return CVMeasurement(values)
 
 
 def target_phi_psi_from_restraints(
-    restraint_specs: list[DihedralRestraintSpec] | tuple[DihedralRestraintSpec, ...],
+    restraint_specs,
 ) -> PhiPsiMeasurement:
     """Extract the legacy target phi/psi pair represented by a restraint list."""
 
@@ -213,17 +215,52 @@ def measurement_deviation_degrees(
     return deviations
 
 
+def measurement_deviation(
+    measurement: CVMeasurement | PhiPsiMeasurement | Mapping[str, float],
+    restraint_specs,
+) -> dict[str, float]:
+    """Return unit-aware per-CV deviations from restraint targets."""
+
+    observed = _coerce_measurement(measurement)
+    deviations: dict[str, float] = {}
+    for spec in restraint_specs:
+        observed_value = observed.get(spec.label)
+        if observed_value is None:
+            raise ConversionError(
+                f"Missing measured CV {spec.label!r} while validating fixed CVs."
+            )
+        if isinstance(spec, DihedralRestraintSpec):
+            deviations[spec.label] = abs(
+                normalize_angle_degrees(observed_value - spec.target_angle_degrees)
+            )
+        elif isinstance(spec, DistanceRestraintSpec):
+            deviations[spec.label] = abs(
+                float(observed_value) - float(spec.target_distance_angstrom)
+            )
+    return deviations
+
+
 def ensure_measurement_matches_restraints(
     measurement: CVMeasurement | PhiPsiMeasurement | Mapping[str, float],
-    restraint_specs: list[DihedralRestraintSpec] | tuple[DihedralRestraintSpec, ...],
+    restraint_specs,
     *,
     tolerance_degrees: float = 1.0,
+    distance_tolerance_angstrom: float = 0.05,
     context: str = "pose",
 ) -> None:
     """Fail if any fixed backbone CV drifts outside the allowed tolerance."""
 
-    deviation = measurement_deviation_degrees(measurement, restraint_specs)
-    if any(value > tolerance_degrees for value in deviation.values()):
+    deviation = measurement_deviation(measurement, restraint_specs)
+    failed = []
+    for spec in restraint_specs:
+        tolerance = (
+            tolerance_degrees
+            if isinstance(spec, DihedralRestraintSpec)
+            else distance_tolerance_angstrom
+        )
+        if deviation.get(spec.label, 0.0) > tolerance:
+            failed.append(spec.label)
+    if failed:
         target = target_cv_measurement_from_restraints(restraint_specs)
         observed = _coerce_measurement(measurement)
         target_summary = ", ".join(

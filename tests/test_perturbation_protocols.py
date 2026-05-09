@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from felp.core import ConversionError, DihedralRestraintSpec
+from felp.core import AtomReference, ConversionError, DihedralRestraintSpec, DistanceRestraintSpec
 from felp.perturbation.protocols import PyRosettaPerturbationProtocol
 
 
@@ -176,7 +176,7 @@ def test_relax_pose_uses_locked_movemap_and_task_factory(monkeypatch) -> None:
     movemap = object()
     monkeypatch.setattr(
         protocol,
-        "_build_packable_selector",
+        "_build_mobile_selector",
         lambda pyrosetta: selector,
     )
     monkeypatch.setattr(
@@ -250,7 +250,7 @@ def test_repack_pose_uses_packrotamers_trials(monkeypatch) -> None:
     task_factory = SimpleNamespace(
         create_task_and_apply_taskoperations=lambda pose: "packer-task"
     )
-    monkeypatch.setattr(protocol, "_build_packable_selector", lambda pyrosetta: selector)
+    monkeypatch.setattr(protocol, "_build_mobile_selector", lambda pyrosetta: selector)
     monkeypatch.setattr(
         protocol,
         "_build_task_factory",
@@ -346,6 +346,60 @@ def test_enforce_residue_identity_uses_rosetta_protonated_acid_name(monkeypatch)
 
     assert mutate_calls == [(2, "ASP_P2")]
     assert result_pose.residue(2).name3() == "ASP_P2"
+
+
+def test_add_distance_constraints_uses_rosetta_sd_not_distance_spec_force_constant() -> None:
+    harmonic_args: list[tuple[float, float]] = []
+
+    class _CaptureHarmonic:
+        def __init__(self, mean: float, sd: float) -> None:
+            harmonic_args.append((float(mean), float(sd)))
+
+    class _FakeResidue:
+        def atom_index(self, atom_name: str) -> int:
+            return 1
+
+    class _DistPose:
+        def __init__(self) -> None:
+            self.added = 0
+
+        def residue(self, residue_number: int) -> _FakeResidue:
+            assert residue_number in (5, 9)
+            return _FakeResidue()
+
+        def add_constraint(self, _constraint) -> None:
+            self.added += 1
+
+    fake_pyrosetta = SimpleNamespace(
+        rosetta=SimpleNamespace(
+            core=SimpleNamespace(
+                scoring=SimpleNamespace(
+                    constraints=SimpleNamespace(
+                        AtomPairConstraint=lambda *args, **kwargs: object(),
+                    ),
+                    func=SimpleNamespace(HarmonicFunc=_CaptureHarmonic),
+                ),
+                id=SimpleNamespace(AtomID=lambda atom_index, res: (atom_index, res)),
+            )
+        )
+    )
+    spec = DistanceRestraintSpec(
+        label="dist",
+        atom1=AtomReference(residue_number=5, atom_name="CA"),
+        atom2=AtomReference(residue_number=9, atom_name="CA"),
+        target_distance_angstrom=12.3,
+        force_constant=50000.0,
+    )
+    protocol = PyRosettaPerturbationProtocol(
+        conversion_service=_DummyConversionService(),
+        target_residue_number=2,
+        rosetta_distance_constraint_sd_angstrom=0.002,
+    )
+    pose = _DistPose()
+    protocol._add_distance_constraints(fake_pyrosetta, pose, (spec,))
+
+    assert harmonic_args == [(12.3, 0.002)]
+    assert pose.added == 1
 
 
 def test_enforce_residue_identity_rejects_incompatible_family(monkeypatch) -> None:

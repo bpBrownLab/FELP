@@ -58,6 +58,7 @@ def test_build_run_config_from_cli(tmp_path: Path) -> None:
         for spec in config.restraints.cv_specs
     ] == [("phi", "phi", 2), ("psi", "psi", 2)]
     assert config.restraints.cv_measurement_tolerance_degrees == 1.0
+    assert config.restraints.rosetta_distance_constraint_sd_angstrom == 0.001
     assert config.restraints.rosetta_restraint_force_constant is None
     assert config.restraints.openmm_restraint_force_constant is None
     assert config.restraints.effective_rosetta_force_constant() == 10000.0
@@ -528,6 +529,48 @@ def test_build_run_config_with_custom_backbone_cvs_and_mutation_aliases(
         for spec in config.restraints.cv_specs
     ] == [("phi", "phi", 2), ("omega", "omega", 2)]
     assert config.microstates.reference_probability_mode == "loaded"
+
+
+def test_build_run_config_with_distance_cv_and_radius_mobility(tmp_path: Path) -> None:
+    topology = tmp_path / "input.pdb"
+    trajectory = tmp_path / "input.xtc"
+    topology.write_text("placeholder\n", encoding="utf-8")
+    trajectory.write_text("placeholder\n", encoding="utf-8")
+
+    parser = build_parser()
+    namespace = parser.parse_args(
+        [
+            "run",
+            "--topology-file",
+            str(topology),
+            "--trajectory",
+            str(trajectory),
+            "--target-residue-number",
+            "61",
+            "--target-residue-name",
+            "LEU",
+            "--prior-probability-mode",
+            "raw_counts",
+            "--distance-cv",
+            "q61_sw1:61:CA:35:CA",
+            "--mobility-mode",
+            "radius",
+            "--mobility-radius-angstrom",
+            "8.0",
+            "--mobility-include-backbone",
+            "--output-dir",
+            str(tmp_path / "out"),
+        ]
+    )
+
+    config = build_run_config(namespace)
+
+    assert config.restraints.distance_cv_specs[0].name == "q61_sw1"
+    assert config.restraints.distance_cv_specs[0].atom1.residue_number == 61
+    assert config.restraints.distance_cv_specs[0].atom2.atom_name == "CA"
+    assert config.mobility.mode == "radius"
+    assert config.mobility.radius_angstrom == 8.0
+    assert config.mobility.include_backbone is True
 
 
 def test_build_msm_fit_config_from_cli(tmp_path: Path) -> None:
