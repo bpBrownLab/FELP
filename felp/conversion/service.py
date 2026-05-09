@@ -53,6 +53,9 @@ PMD_TO_ROSETTA_1LETTER = {
 }
 
 POSE_ATOM_NAME_CONVERSION = {
+    "1H": "H1",
+    "2H": "H2",
+    "3H": "H3",
     "1HH3": "H1",
     "2HH3": "H2",
     "3HH3": "H3",

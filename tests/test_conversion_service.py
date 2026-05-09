@@ -505,3 +505,54 @@ def test_prepare_structure_for_openmm_normalizes_proline_and_strips_virtual_atom
         bond.atom1.name != "V1" and bond.atom2.name != "V1"
         for bond in structure.bonds
     )
+
+
+def test_prepare_structure_for_openmm_normalizes_terminal_hydrogen_names(
+    monkeypatch,
+) -> None:
+    gly_type = FakeResidueType(
+        unique_name="GLY:NtermProteinFull",
+        name3_value="GLY",
+        name1_value="G",
+        atom_order=("N", "CA", "C", "1H", "2H", "3H"),
+        atom_types={
+            "N": FakeAtomType(element="N", atom_type_name="Nbb", lj_radius=1.4, lj_wdepth=0.2),
+            "CA": FakeAtomType(element="C", atom_type_name="CAbb", lj_radius=1.8, lj_wdepth=0.1),
+            "C": FakeAtomType(element="C", atom_type_name="CObb", lj_radius=1.7, lj_wdepth=0.12),
+            "1H": FakeAtomType(element="H", atom_type_name="Hpol", lj_radius=1.0, lj_wdepth=0.02),
+            "2H": FakeAtomType(element="H", atom_type_name="Hpol", lj_radius=1.0, lj_wdepth=0.02),
+            "3H": FakeAtomType(element="H", atom_type_name="Hpol", lj_radius=1.0, lj_wdepth=0.02),
+        },
+    )
+    pose = FakePose(
+        [
+            FakeResidue(
+                gly_type,
+                coordinates={
+                    "N": (0.0, 0.0, 0.0),
+                    "CA": (1.0, 0.0, 0.0),
+                    "C": (2.0, 0.0, 0.0),
+                    "1H": (-0.5, 0.0, 0.0),
+                    "2H": (-0.5, 0.5, 0.0),
+                    "3H": (-0.5, -0.5, 0.0),
+                },
+            )
+        ],
+        chain_indices=[1],
+        pdb_info=FakePDBInfo(1),
+    )
+    fake_import = build_fake_import([gly_type])
+    fake_pyrosetta, _, _, _, _, xyz_vector = fake_import
+    monkeypatch.setattr(_rosetta_pose_module(), "_import_pyrosetta", lambda: fake_import)
+    monkeypatch.setattr(
+        conversion_service_module,
+        "_import_pyrosetta",
+        lambda: (fake_pyrosetta, FakePose, None, FakeAtomID, xyz_vector),
+    )
+    monkeypatch.setattr(conversion_service_module, "_PYROSETTA_INITIALIZED", False)
+    monkeypatch.setattr(conversion_service_module, "_PYROSETTA_INIT_OPTIONS", None)
+
+    service = StructureConversionService(pyrosetta_init_options="-mute all")
+    structure = service.prepare_structure_for_openmm(service.pose_to_structure(pose))
+
+    assert [atom.name for atom in structure.atoms] == ["N", "CA", "C", "H1", "H2", "H3"]
