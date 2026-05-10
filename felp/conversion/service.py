@@ -703,7 +703,10 @@ class StructureConversionService:
         try:
             return save_rosetta(structure)
         except Exception as exc:
-            raise ConversionError(f"Failed to convert Structure to Pose: {exc}") from exc
+            bridge_path = getattr(sys.modules.get("parmed.rosetta.pose"), "__file__", "<unknown>")
+            raise ConversionError(
+                f"Failed to convert Structure to Pose via {bridge_path}: {exc}"
+            ) from exc
 
     def validate_round_trip(self, structure) -> dict[str, int]:
         """Test conversion fidelity by converting a Structure to a Pose and back."""
