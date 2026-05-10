@@ -57,8 +57,10 @@ class _FakeModeller:
 class _FakeForceField:
     def __init__(self, *args) -> None:
         self.args = args
+        self.create_system_kwargs = None
 
     def createSystem(self, topology, **kwargs):
+        self.create_system_kwargs = kwargs
         return object()
 
 
@@ -110,6 +112,16 @@ def test_openmm_validate_topology_reports_residue_names_on_template_failure(
 
     with pytest.raises(ConfigurationError, match="GLH, HIS"):
         ev.validate_topology(structure)
+
+
+def test_openmm_create_system_ignores_external_bonds_for_stripped_termini() -> None:
+    ev = _minimal_openmm_evaluator()
+    force_field = _FakeForceField()
+    unit = type("Unit", (), {"nanometer": 1.0})()
+
+    ev._create_system(force_field, object(), unit, object())
+
+    assert force_field.create_system_kwargs["ignoreExternalBonds"] is True
 
 
 class _FakeCustomTorsionForce:

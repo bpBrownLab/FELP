@@ -138,6 +138,16 @@ class OpenMMEnergyEvaluator(EnergyEvaluator):
             f"(Rosetta metadata, pose order, or residue.number) for OpenMM restraints."
         )
 
+    def _create_system(self, force_field, topology, unit, NoCutoff):
+        """Create an OpenMM system while tolerating stripped polymer termini."""
+
+        return force_field.createSystem(
+            topology,
+            nonbondedMethod=NoCutoff,
+            nonbondedCutoff=self.nonbonded_cutoff_nm * unit.nanometer,
+            ignoreExternalBonds=True,
+        )
+
     def _apply_restraints(self, system, structure, restraint_specs):
         """Apply CV restraints to the OpenMM System."""
         _, _, CustomBondForce, CustomTorsionForce, _, _, _, _, _ = _openmm_import_parts()
@@ -250,11 +260,7 @@ class OpenMMEnergyEvaluator(EnergyEvaluator):
         modeller = Modeller(structure.topology, structure.positions)
         force_field = ForceField(self.protein_forcefield, self.solvent_forcefield)
         try:
-            force_field.createSystem(
-                modeller.topology,
-                nonbondedMethod=NoCutoff,
-                nonbondedCutoff=self.nonbonded_cutoff_nm * unit.nanometer,
-            )
+            self._create_system(force_field, modeller.topology, unit, NoCutoff)
         except Exception as exc:
             residue_names = self._residue_name_summary(structure)
             raise ConfigurationError(
@@ -290,11 +296,7 @@ class OpenMMEnergyEvaluator(EnergyEvaluator):
         ) = _openmm_import_parts()
         modeller = Modeller(structure.topology, structure.positions)
         force_field = ForceField(self.protein_forcefield, self.solvent_forcefield)
-        system = force_field.createSystem(
-            modeller.topology,
-            nonbondedMethod=NoCutoff,
-            nonbondedCutoff=self.nonbonded_cutoff_nm * unit.nanometer,
-        )
+        system = self._create_system(force_field, modeller.topology, unit, NoCutoff)
 
         frozen_atom_count = self._freeze_immobile_atoms(system, structure)
         restraint_specs = list(restraint_specs)
