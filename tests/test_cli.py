@@ -551,6 +551,10 @@ def test_build_run_config_with_distance_cv_and_radius_mobility(tmp_path: Path) -
             "LEU",
             "--prior-probability-mode",
             "raw_counts",
+            "--cv",
+            "phi",
+            "--cv",
+            "psi",
             "--distance-cv",
             "q61_sw1:61:CA:35:CA",
             "--mobility-mode",
@@ -571,6 +575,89 @@ def test_build_run_config_with_distance_cv_and_radius_mobility(tmp_path: Path) -
     assert config.mobility.mode == "radius"
     assert config.mobility.radius_angstrom == 8.0
     assert config.mobility.include_backbone is True
+
+
+def test_build_run_config_rejects_implicit_phi_psi_for_distance_cv_grid(
+    tmp_path: Path,
+) -> None:
+    topology = tmp_path / "input.pdb"
+    trajectory = tmp_path / "input.xtc"
+    topology.write_text("placeholder\n", encoding="utf-8")
+    trajectory.write_text("placeholder\n", encoding="utf-8")
+
+    parser = build_parser()
+    namespace = parser.parse_args(
+        [
+            "run",
+            "--topology-file",
+            str(topology),
+            "--trajectory",
+            str(trajectory),
+            "--target-residue-number",
+            "4",
+            "--target-residue-name",
+            "PRO",
+            "--prior-probability-mode",
+            "raw_counts",
+            "--distance-cv",
+            "ends:1:CA:10:CA",
+            "--output-dir",
+            str(tmp_path / "out"),
+        ]
+    )
+
+    with pytest.raises(ConfigurationError, match="custom CV state definitions"):
+        build_run_config(namespace)
+
+
+def test_build_run_config_allows_distance_only_custom_microstate_file(
+    tmp_path: Path,
+) -> None:
+    topology = tmp_path / "input.pdb"
+    trajectory = tmp_path / "input.xtc"
+    microstates = tmp_path / "microstates.json"
+    topology.write_text("placeholder\n", encoding="utf-8")
+    trajectory.write_text("placeholder\n", encoding="utf-8")
+    microstates.write_text(
+        (
+            '{"states":[{"state_id":"compact","label":"compact",'
+            '"cv_ranges":{"ends":[0.0,12.0],"turn":[0.0,6.0]}}]}'
+        ),
+        encoding="utf-8",
+    )
+
+    parser = build_parser()
+    namespace = parser.parse_args(
+        [
+            "run",
+            "--topology-file",
+            str(topology),
+            "--trajectory",
+            str(trajectory),
+            "--target-residue-number",
+            "4",
+            "--target-residue-name",
+            "PRO",
+            "--microstate-source",
+            "file",
+            "--microstate-file",
+            str(microstates),
+            "--distance-cv",
+            "ends:1:CA:10:CA",
+            "--distance-cv",
+            "turn:3:CA:6:CA",
+            "--output-dir",
+            str(tmp_path / "out"),
+        ]
+    )
+
+    config = build_run_config(namespace)
+
+    assert config.restraints.cv_specs == ()
+    assert [spec.name for spec in config.restraints.distance_cv_specs] == [
+        "ends",
+        "turn",
+    ]
 
 
 def test_build_msm_fit_config_from_cli(tmp_path: Path) -> None:
@@ -702,3 +789,26 @@ def test_build_plot_configs_from_cli(tmp_path: Path) -> None:
     assert felp_config.plot_energy_unit == "kcal_mol"
     assert felp_config.cv_x == "ends"
     assert felp_config.cv_y == "turn"
+
+
+def test_build_felp_plot_config_normalizes_cv_spec_strings(tmp_path: Path) -> None:
+    summary_csv = tmp_path / "microstate_summary.csv"
+    summary_csv.write_text("label,reference_probability,target_probability\n", encoding="utf-8")
+
+    parser = build_parser()
+    namespace = parser.parse_args(
+        [
+            "felp-plot",
+            "--microstate-summary",
+            str(summary_csv),
+            "--output-dir",
+            str(tmp_path / "felp_plots"),
+            "--plot-cv-x",
+            "ends:1:CA:10:CA",
+            "--plot-cv-y",
+            "turn:3:CA:6:CA",
+        ]
+    )
+    config = build_felp_plot_config(namespace)
+    assert config.cv_x == "ends"
+    assert config.cv_y == "turn"

@@ -324,6 +324,16 @@ def run_pipeline(config) -> dict:
             "microstate_definition_state_level": config.microstates.state_level,
             "msm_bundle_dir": config.microstates.msm_bundle_dir,
             "configured_cvs": [spec.name for spec in config.restraints.cv_specs],
+            "configured_distance_cvs": [
+                spec.name for spec in config.restraints.distance_cv_specs
+            ],
+            "analysis_cv_names": sorted(
+                {
+                    cv_name
+                    for definition in atlas.definitions
+                    for cv_name in definition.cv_ranges
+                }
+            ),
         }
     )
     writer.write_summary(summary)

@@ -37,10 +37,14 @@ def _default_cv_name(kind: str, residue_number: int, target_residue_number: int)
 def _parse_cv_specs(
     raw_tokens: Optional[list[str]],
     target_residue_number: int,
+    *,
+    include_legacy_default: bool = True,
 ) -> tuple[CVSpec, ...]:
     """Parse repeatable ``--cv`` tokens into typed backbone CV specs."""
 
     if not raw_tokens:
+        if not include_legacy_default:
+            return ()
         return default_backbone_cv_specs(target_residue_number)
 
     cv_specs: list[CVSpec] = []
@@ -871,7 +875,7 @@ def _add_felp_plot_arguments(parser: argparse.ArgumentParser) -> None:
         "--fel-bins",
         type=int,
         default=72,
-        help="Bin count per axis for Ramachandran (phi, psi) free energy heatmaps.",
+        help="Bin count per axis for 2D CV free-energy heatmaps.",
     )
     parser.add_argument(
         "--fel-max-points",
@@ -883,15 +887,19 @@ def _add_felp_plot_arguments(parser: argparse.ArgumentParser) -> None:
         "--plot-cv-x",
         dest="plot_cv_x",
         help=(
-            "Optional CV name for the x-axis in 2D FEL plots. "
-            "Defaults to inferred phi/psi when available, otherwise inferred CV metadata."
+            "CV name for the x-axis in 2D FEL plots. "
+            "Pass either the short name (e.g. 'ends') or the full distance-cv "
+            "spec string (e.g. 'ends:1:CA:10:CA'); only the name part is used. "
+            "Defaults to custom CVs when available, otherwise phi/psi."
         ),
     )
     parser.add_argument(
         "--plot-cv-y",
         dest="plot_cv_y",
         help=(
-            "Optional CV name for the y-axis in 2D FEL plots. "
+            "CV name for the y-axis in 2D FEL plots. "
+            "Pass either the short name (e.g. 'turn') or the full distance-cv "
+            "spec string (e.g. 'turn:3:CA:6:CA'); only the name part is used. "
             "Must be provided together with --plot-cv-x."
         ),
     )
@@ -1040,11 +1048,12 @@ def build_run_config(namespace: argparse.Namespace) -> RunConfig:
             raise ConfigurationError("Do not combine --gpu with --platform-name.")
         platform_name = resolve_openmm_gpu_platform_name()
 
+    distance_cv_specs = _parse_distance_cv_specs(namespace.distance_cv_tokens)
     cv_specs = _parse_cv_specs(
         namespace.cv_tokens,
         namespace.target_residue_number,
+        include_legacy_default=not distance_cv_specs,
     )
-    distance_cv_specs = _parse_distance_cv_specs(namespace.distance_cv_tokens)
 
     config = RunConfig(
         input=InputConfig(

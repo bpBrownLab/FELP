@@ -51,8 +51,10 @@ _T = TypeVar("_T")
 def _default_assignment_policy(config: RunConfig) -> AssignmentPolicy:
     """Choose the legacy or generalized assignment policy for this run."""
 
-    if config.restraints.cv_specs == default_backbone_cv_specs(
-        config.perturbation.target_residue_number
+    if (
+        not config.restraints.distance_cv_specs
+        and config.restraints.cv_specs
+        == default_backbone_cv_specs(config.perturbation.target_residue_number)
     ):
         return PhiPsiAssignmentPolicy()
     return CVAssignmentPolicy()

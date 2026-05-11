@@ -32,6 +32,21 @@ from .common import (
 
 _KJ_PER_KCAL = 4.184
 _ANGULAR_CV_NAMES = {"phi", "psi", "omega"}
+_DEFAULT_DIHEDRAL_CV_NAMES = {"phi", "psi"}
+
+
+def _normalize_cv_name(raw: str) -> str:
+    """Extract the short CV name from a bare name or a full distance-cv spec.
+
+    Accepts ``"ends"`` (returned as-is) or ``"ends:1:CA:10:CA"`` (returns
+    ``"ends"``).  The distance-cv CLI spec format is
+    ``name:res1:atom1:res2:atom2``, so the name is everything before the first
+    colon **only** when the string contains at least four colons (i.e. it looks
+    like a full spec).  Strings with fewer colons are returned as-is.
+    """
+    if raw.count(":") >= 4:
+        return raw.split(":", 1)[0]
+    return raw
 
 
 def _plot_energy_display_scale_and_label(plot_energy_unit: str) -> tuple[float, str]:
@@ -64,15 +79,19 @@ class FELPPlotConfig:
     """Display unit for energies on plots: ``kj_mol`` (default) or ``kcal_mol``."""
 
     cv_x: str | None = None
-    """Optional CV name to use as the x-axis for 2D FEL/CV plots."""
+    """Optional CV name (or full distance-cv spec) for the x-axis of 2D FEL/CV plots."""
 
     cv_y: str | None = None
-    """Optional CV name to use as the y-axis for 2D FEL/CV plots."""
+    """Optional CV name (or full distance-cv spec) for the y-axis of 2D FEL/CV plots."""
 
     overwrite: bool = False
 
     def validate(self) -> None:
-        """Validate the FELP plotting configuration."""
+        """Validate (and normalize) the FELP plotting configuration.
+
+        If ``cv_x`` or ``cv_y`` contain a full distance-cv spec string
+        (e.g. ``ends:1:CA:10:CA``), the short name is extracted automatically.
+        """
 
         if not os.path.isfile(self.microstate_summary_csv):
             raise ConfigurationError(
@@ -94,6 +113,10 @@ class FELPPlotConfig:
             raise ConfigurationError("fel_max_points must be at least 1.")
         if self.fel_max_energy_kj_mol is not None and self.fel_max_energy_kj_mol <= 0.0:
             raise ConfigurationError("fel_max_energy_kj_mol must be positive when set.")
+        if self.cv_x is not None:
+            object.__setattr__(self, "cv_x", _normalize_cv_name(self.cv_x))
+        if self.cv_y is not None:
+            object.__setattr__(self, "cv_y", _normalize_cv_name(self.cv_y))
         if (self.cv_x is None) != (self.cv_y is None):
             raise ConfigurationError("cv_x and cv_y must be provided together.")
         if self.cv_x is not None and self.cv_y is not None and self.cv_x == self.cv_y:
@@ -215,7 +238,15 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
         ),
     ]
 
-    if np.isfinite(plot_x).any() and np.isfinite(plot_y).any():
+    cv_axes_are_custom = (
+        cv_axes is not None
+        and not _DEFAULT_DIHEDRAL_CV_NAMES.issuperset({cv_axes.x_name, cv_axes.y_name})
+    )
+    if (
+        np.isfinite(plot_x).any()
+        and np.isfinite(plot_y).any()
+        and not cv_axes_are_custom
+    ):
         outputs.extend(
             _plot_projected_state_quantities(
                 plt=plt,
@@ -319,14 +350,6 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
         "cv_frame_projection_estimator": (
             "w_ij proportional to pi_reference(i) * exp(-beta * delta_u_ij) / n_i"
         ),
-        "phi_psi_frame_projection_available": (
-            frame_projection_available
-            if cv_axes is not None and (cv_axes.x_name, cv_axes.y_name) == ("phi", "psi")
-            else False
-        ),
-        "phi_psi_frame_projection_estimator": (
-            "w_ij proportional to pi_reference(i) * exp(-beta * delta_u_ij) / n_i"
-        ),
         "state_reweighting_estimator": (
             "pi_target(i) proportional to "
             "pi_reference(i) * <exp(-beta * delta_u)>_i"
@@ -335,6 +358,15 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
         "plot_energy_unit": config.plot_energy_unit,
         "generated_files": outputs,
     }
+    if cv_axes is not None and (cv_axes.x_name, cv_axes.y_name) == ("phi", "psi"):
+        summary.update(
+            {
+                "phi_psi_frame_projection_available": frame_projection_available,
+                "phi_psi_frame_projection_estimator": (
+                    "w_ij proportional to pi_reference(i) * exp(-beta * delta_u_ij) / n_i"
+                ),
+            }
+        )
     write_json(os.path.join(config.output_dir, "plot_summary.json"), summary)
     return summary
 
@@ -493,6 +525,9 @@ def _resolve_cv_axes(
     frame_names = _available_frame_cv_names(frame_results or ())
     combined = state_names + [name for name in frame_names if name not in state_names]
 
+    custom = [n for n in combined if n not in _DEFAULT_DIHEDRAL_CV_NAMES]
+    if len(custom) >= 2:
+        return _CVAxisSelection(custom[0], custom[1], "inferred_custom_cv")
     if "phi" in combined and "psi" in combined:
         return _CVAxisSelection("phi", "psi", "inferred_phi_psi")
     if "plot_x" in combined and "plot_y" in combined:

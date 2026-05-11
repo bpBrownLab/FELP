@@ -178,6 +178,7 @@ def assign_jobs_for_sampling(
     template_structure = conversion_service.load_topology(config.input.topology_file)
     cv_protocol = BackboneDihedralCVProtocol(
         cv_specs=config.restraints.cv_specs,
+        distance_cv_specs=config.restraints.distance_cv_specs,
         force_constant=config.restraints.effective_rosetta_force_constant(),
     )
 

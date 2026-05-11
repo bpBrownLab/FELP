@@ -870,7 +870,9 @@ class RunConfig:
                 raise ConfigurationError(
                     "Grid and msm_bundle microstate modes currently require the legacy "
                     "phi/psi CV pair on the target residue. Use source='file' for "
-                    "custom backbone-CV state definitions."
+                    "custom CV state definitions, including distance-CV reweighting. "
+                    "If you intentionally want phi/psi microstates with additional "
+                    "distance restraints, pass '--cv phi --cv psi' explicitly."
                 )
 
     def beta(self) -> float:
@@ -889,7 +891,7 @@ class RunConfig:
 
         perturbation = PerturbationConfig.from_dict(payload["perturbation"])
         restraints = RestraintConfig.from_dict(payload["restraints"])
-        if not restraints.cv_specs:
+        if not restraints.cv_specs and not restraints.distance_cv_specs:
             restraints = RestraintConfig(
                 mode=restraints.mode,
                 force_constant=restraints.force_constant,
