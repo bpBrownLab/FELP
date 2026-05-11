@@ -42,3 +42,29 @@ def test_file_microstate_assignment_wraps_angles(tmp_path: Path) -> None:
     assignment = atlas.assign(179.0, 0.0)
     assert assignment.state_id == "wrap"
     assert atlas.definitions[0].reference_probability == 0.75
+
+
+def test_file_microstate_assignment_uses_numeric_intervals_for_distance_cvs(
+    tmp_path: Path,
+) -> None:
+    definitions_path = tmp_path / "distance_microstates.json"
+    definitions_path.write_text(
+        json.dumps(
+            {
+                "states": [
+                    {
+                        "state_id": "short",
+                        "label": "short",
+                        "cv_ranges": {"ends": [0.0, 10.0], "turn": [0.0, 5.0]},
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    atlas = MicrostateAtlas.from_config(
+        MicrostateConfig(source="file", definition_file=str(definitions_path))
+    )
+
+    assert atlas.assign({"ends": 8.0, "turn": 4.0}).state_id == "short"

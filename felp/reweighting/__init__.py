@@ -8,6 +8,11 @@ from .assignment import (
 )
 from .aggregator import ReweightingAggregator, is_reweighting_eligible_frame
 from .atlas import MicrostateAtlas, generate_phi_psi_grid, load_microstate_definitions
+from .auto_microstates import (
+    AutoMicrostateFile,
+    build_auto_microstate_payload,
+    write_auto_microstate_file,
+)
 from .sampling import (
     SamplingManifest,
     build_sampling_manifest,
@@ -19,12 +24,14 @@ from .sampling import (
 
 __all__ = [
     "AssignmentPolicy",
+    "AutoMicrostateFile",
     "CVAssignmentPolicy",
     "MicrostateAtlas",
     "PhiPsiAssignmentPolicy",
     "PrecomputedStateAssignmentPolicy",
     "ReweightingAggregator",
     "SamplingManifest",
+    "build_auto_microstate_payload",
     "build_sampling_manifest",
     "ensure_existing_results_match_manifest",
     "generate_phi_psi_grid",
@@ -33,4 +40,5 @@ __all__ = [
     "load_microstate_definitions",
     "manifest_counts_for_atlas",
     "selected_jobs_from_manifest",
+    "write_auto_microstate_file",
 ]

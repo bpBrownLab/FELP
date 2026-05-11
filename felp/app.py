@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from dataclasses import replace
 import json
 import os
 from typing import Any, Sequence
@@ -31,6 +32,7 @@ from felp.reweighting import (
     load_or_create_sampling_manifest,
     manifest_counts_for_atlas,
     selected_jobs_from_manifest,
+    write_auto_microstate_file,
 )
 
 _OVERLAP_SCOPE_NOTE = (
@@ -71,6 +73,27 @@ def _build_execution_context(config):
         bundle.validate_against_input(config.input)
         return atlas, PrecomputedStateAssignmentPolicy(), bundle
     return atlas, None, None
+
+
+def _materialize_auto_microstates(config, jobs):
+    """Write auto-generated CV microstates and return a file-backed config."""
+
+    if config.microstates.source != "auto":
+        return config, None
+
+    path = os.path.join(config.output.output_dir, "auto_microstates.json")
+    auto_file = write_auto_microstate_file(
+        jobs=jobs,
+        config=config,
+        output_path=path,
+    )
+    microstates = replace(
+        config.microstates,
+        source="file",
+        definition_file=auto_file.path,
+        reference_probability_mode="raw_counts",
+    )
+    return replace(config, microstates=microstates), auto_file
 
 
 def _shared_microstate_metadata(microstate_results) -> dict[str, Any]:
@@ -228,14 +251,20 @@ def run_pipeline(config) -> dict:
     """Execute the main FELP perturbation and reweighting workflow."""
     writer = ResultsWriter(config.output)
     writer.prepare_output_dir()
-    writer.write_run_config(config)
 
-    atlas, assignment_policy, bundle = _build_execution_context(config)
+    bundle = None
+    if config.microstates.source == "msm_bundle":
+        bundle = load_bundle(config.microstates.msm_bundle_dir)
+        bundle.validate_against_input(config.input)
     jobs = TrajectoryLoader(
         config.input,
         bundle=bundle,
         state_level=config.microstates.state_level,
     ).load_jobs()
+
+    config, auto_microstate_file = _materialize_auto_microstates(config, jobs)
+    writer.write_run_config(config)
+    atlas, assignment_policy, bundle = _build_execution_context(config)
     manifest_path = os.path.join(
         config.output.output_dir,
         config.sampling.sampling_manifest_name,
@@ -333,6 +362,12 @@ def run_pipeline(config) -> dict:
                     for definition in atlas.definitions
                     for cv_name in definition.cv_ranges
                 }
+            ),
+            "auto_microstate_file": (
+                None if auto_microstate_file is None else auto_microstate_file.path
+            ),
+            "auto_microstate_metadata": (
+                None if auto_microstate_file is None else auto_microstate_file.metadata
             ),
         }
     )

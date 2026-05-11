@@ -8,6 +8,7 @@ from typing import Iterable
 
 from felp.core import (
     CVMeasurement,
+    ConfigurationError,
     DependencyError,
     MicrostateAssignment,
     MicrostateAssignmentError,
@@ -47,8 +48,13 @@ class MicrostateAtlas:
         elif config.source == "msm_bundle":
             bundle = load_bundle(config.msm_bundle_dir)
             definitions = bundle.definitions_for_level(config.state_level)
-        else:
+        elif config.source == "grid":
             definitions = tuple(generate_phi_psi_grid(config.phi_bins, config.psi_bins))
+        else:
+            raise ConfigurationError(
+                "Automatic microstate definitions must be materialized to a file "
+                "before building a MicrostateAtlas."
+            )
         return cls.from_definitions(
             definitions=definitions,
             allow_unassigned=config.allow_unassigned,

@@ -577,7 +577,7 @@ def test_build_run_config_with_distance_cv_and_radius_mobility(tmp_path: Path) -
     assert config.mobility.include_backbone is True
 
 
-def test_build_run_config_rejects_implicit_phi_psi_for_distance_cv_grid(
+def test_build_run_config_uses_auto_microstates_for_distance_cv_without_backbone_cvs(
     tmp_path: Path,
 ) -> None:
     topology = tmp_path / "input.pdb"
@@ -606,8 +606,12 @@ def test_build_run_config_rejects_implicit_phi_psi_for_distance_cv_grid(
         ]
     )
 
-    with pytest.raises(ConfigurationError, match="custom CV state definitions"):
-        build_run_config(namespace)
+    config = build_run_config(namespace)
+
+    assert config.microstates.source == "auto"
+    assert config.microstates.reference_probability_mode == "raw_counts"
+    assert config.restraints.cv_specs == ()
+    assert [spec.name for spec in config.restraints.distance_cv_specs] == ["ends"]
 
 
 def test_build_run_config_allows_distance_only_custom_microstate_file(

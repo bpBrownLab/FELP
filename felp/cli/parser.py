@@ -125,12 +125,14 @@ def _add_common_microstate_arguments(parser: argparse.ArgumentParser) -> None:
     group = parser.add_argument_group("Microstates")
     group.add_argument(
         "--microstate-source",
-        choices=("grid", "file", "msm_bundle"),
+        choices=("grid", "file", "msm_bundle", "auto"),
         default="grid",
         help=(
             "How to define microstates for the reference landscape. "
-            "Use grid for first passes; msm_bundle requires a pre-fit bundle aligned "
-            "to your --trajectory grouping."
+            "Use grid for classic phi/psi first passes, file for reusable custom "
+            "CV states, auto to infer a reusable two-CV JSON from the reference "
+            "trajectory, or msm_bundle for a pre-fit bundle aligned to your "
+            "--trajectory grouping."
         ),
     )
     group.add_argument(
@@ -1054,6 +1056,11 @@ def build_run_config(namespace: argparse.Namespace) -> RunConfig:
         namespace.target_residue_number,
         include_legacy_default=not distance_cv_specs,
     )
+    microstate_source = namespace.microstate_source
+    if microstate_source == "grid" and distance_cv_specs and not cv_specs:
+        microstate_source = "auto"
+    if microstate_source == "auto":
+        reference_probability_mode = "raw_counts"
 
     config = RunConfig(
         input=InputConfig(
@@ -1118,7 +1125,7 @@ def build_run_config(namespace: argparse.Namespace) -> RunConfig:
             rosetta_score_function=namespace.rosetta_score_function,
         ),
         microstates=MicrostateConfig(
-            source=namespace.microstate_source,
+            source=microstate_source,
             target_residue_number=namespace.target_residue_number,
             definition_file=namespace.microstate_file,
             phi_bins=namespace.phi_bins,

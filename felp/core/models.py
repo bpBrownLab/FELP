@@ -106,6 +106,14 @@ def angle_in_interval_degrees(angle: float, lower: float, upper: float) -> bool:
     return relative <= angular_width_degrees(lower, upper)
 
 
+def cv_value_in_interval(name: str, value: float, lower: float, upper: float) -> bool:
+    """Check whether a CV value falls inside the interval appropriate for that CV."""
+
+    if name in BACKBONE_DIHEDRAL_KINDS:
+        return angle_in_interval_degrees(value, lower, upper)
+    return float(lower) <= float(value) <= float(upper)
+
+
 def normalize_trajectory_groups(value: Any) -> tuple[tuple[str, ...], ...]:
     """Normalize trajectory input into explicit groups of contiguous files."""
 
@@ -809,7 +817,7 @@ class RunConfig:
             raise ConfigurationError(
                 f"Unsupported energy backend: {self.energy.backend}"
             )
-        if self.microstates.source not in {"grid", "file", "msm_bundle"}:
+        if self.microstates.source not in {"grid", "file", "msm_bundle", "auto"}:
             raise ConfigurationError(
                 f"Unsupported microstate source: {self.microstates.source}"
             )
@@ -823,6 +831,13 @@ class RunConfig:
         ):
             raise ConfigurationError(
                 "An MSM bundle directory is required when source='msm_bundle'."
+            )
+        if (
+            self.microstates.source == "auto"
+            and self.microstates.reference_probability_mode != "raw_counts"
+        ):
+            raise ConfigurationError(
+                "Automatic microstate generation requires raw-count priors."
             )
         if self.microstates.definition_file and not os.path.isfile(
             self.microstates.definition_file
@@ -1084,7 +1099,7 @@ class MicrostateDefinition:
 
         for name, bounds in self.cv_ranges.items():
             value = measurements.get(name)
-            if value is None or not angle_in_interval_degrees(value, *bounds):
+            if value is None or not cv_value_in_interval(name, value, *bounds):
                 return False
         return True
 
