@@ -10,6 +10,7 @@ from typing import Iterable
 import numpy as np
 
 from felp.core import (
+    angular_midpoint_degrees,
     FrameResult,
     K_BOLTZMANN_KJ_PER_MOL_K,
     MicrostateResult,
@@ -18,6 +19,7 @@ from felp.core import (
 from .atlas import MicrostateAtlas
 
 _LOW_ESS_THRESHOLDS = (10, 50)
+_ANGULAR_CV_NAMES = {"phi", "psi", "omega"}
 
 
 def is_reweighting_eligible_frame(result: FrameResult) -> bool:
@@ -144,6 +146,19 @@ def _top_weight_mass(normalized_weights: np.ndarray, fraction: float) -> float:
     count = max(1, math.ceil(normalized_weights.size * fraction))
     ordered = np.sort(normalized_weights)[::-1]
     return float(ordered[:count].sum())
+
+
+def _cv_range_centers(cv_ranges: dict[str, tuple[float, float]]) -> dict[str, float]:
+    """Return display centers for arbitrary CV ranges."""
+
+    centers: dict[str, float] = {}
+    for name, bounds in cv_ranges.items():
+        lower, upper = (float(value) for value in bounds)
+        if name in _ANGULAR_CV_NAMES:
+            centers[name] = angular_midpoint_degrees(lower, upper)
+        else:
+            centers[name] = (lower + upper) / 2.0
+    return centers
 
 
 @dataclass
@@ -370,6 +385,8 @@ class ReweightingAggregator:
                     state_level=definition.state_level,
                     metadata={
                         **shared_metadata,
+                        "cv_ranges": dict(definition.cv_ranges),
+                        "cv_centers": _cv_range_centers(definition.cv_ranges),
                         "assigned_frame_count": item["assigned_frame_count"],
                         "evaluated_frame_count": item["frame_count"],
                     },

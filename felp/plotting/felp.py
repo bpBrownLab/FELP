@@ -7,6 +7,8 @@ from dataclasses import dataclass
 import json
 import math
 import os
+import re
+from typing import Any
 
 import numpy as np
 
@@ -29,6 +31,7 @@ from .common import (
 )
 
 _KJ_PER_KCAL = 4.184
+_ANGULAR_CV_NAMES = {"phi", "psi", "omega"}
 
 
 def _plot_energy_display_scale_and_label(plot_energy_unit: str) -> tuple[float, str]:
@@ -60,6 +63,12 @@ class FELPPlotConfig:
     plot_energy_unit: str = "kj_mol"
     """Display unit for energies on plots: ``kj_mol`` (default) or ``kcal_mol``."""
 
+    cv_x: str | None = None
+    """Optional CV name to use as the x-axis for 2D FEL/CV plots."""
+
+    cv_y: str | None = None
+    """Optional CV name to use as the y-axis for 2D FEL/CV plots."""
+
     overwrite: bool = False
 
     def validate(self) -> None:
@@ -85,7 +94,18 @@ class FELPPlotConfig:
             raise ConfigurationError("fel_max_points must be at least 1.")
         if self.fel_max_energy_kj_mol is not None and self.fel_max_energy_kj_mol <= 0.0:
             raise ConfigurationError("fel_max_energy_kj_mol must be positive when set.")
+        if (self.cv_x is None) != (self.cv_y is None):
+            raise ConfigurationError("cv_x and cv_y must be provided together.")
+        if self.cv_x is not None and self.cv_y is not None and self.cv_x == self.cv_y:
+            raise ConfigurationError("cv_x and cv_y must be different CV names.")
         _plot_energy_display_scale_and_label(self.plot_energy_unit)
+
+
+@dataclass(frozen=True)
+class _CVAxisSelection:
+    x_name: str
+    y_name: str
+    source: str
 
 
 def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
@@ -160,6 +180,17 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
         target_probabilities,
     )
     summary_metadata = _load_microstate_summary_metadata(rows)
+    frame_results = (
+        load_frame_results_csv(config.raw_frame_results_csv)
+        if config.raw_frame_results_csv
+        else None
+    )
+    cv_axes = _resolve_cv_axes(
+        rows=rows,
+        frame_results=frame_results,
+        requested_x=config.cv_x,
+        requested_y=config.cv_y,
+    )
 
     outputs = [
         _plot_occupancy_shift(
@@ -200,32 +231,29 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
             )
         )
 
-    phi_centers = np.asarray(
-        [_as_nan(parse_optional_float(row.get("phi_center"))) for row in rows],
-        dtype=float,
-    )
-    psi_centers = np.asarray(
-        [_as_nan(parse_optional_float(row.get("psi_center"))) for row in rows],
-        dtype=float,
-    )
-    outputs.extend(
-        _plot_phi_psi_state_landscapes(
-            plt=plt,
-            phi_centers=phi_centers,
-            psi_centers=psi_centers,
-            reference_probabilities=reference_probabilities,
-            target_probabilities=target_probabilities,
-            temperature_kelvin=config.temperature_kelvin,
-            output_dir=config.output_dir,
-            energy_scale=energy_scale,
-            energy_unit_label=energy_unit_label,
-            fel_max_energy_display=fel_max_display,
+    state_x = state_y = None
+    if cv_axes is not None:
+        state_x = _state_cv_array(rows, cv_axes.x_name)
+        state_y = _state_cv_array(rows, cv_axes.y_name)
+        outputs.extend(
+            _plot_cv_state_landscapes(
+                plt=plt,
+                x_centers=state_x,
+                y_centers=state_y,
+                x_name=cv_axes.x_name,
+                y_name=cv_axes.y_name,
+                reference_probabilities=reference_probabilities,
+                target_probabilities=target_probabilities,
+                temperature_kelvin=config.temperature_kelvin,
+                output_dir=config.output_dir,
+                energy_scale=energy_scale,
+                energy_unit_label=energy_unit_label,
+                fel_max_energy_display=fel_max_display,
+            )
         )
-    )
 
-    phi_psi_projection_available = False
-    if config.raw_frame_results_csv:
-        frame_results = load_frame_results_csv(config.raw_frame_results_csv)
+    frame_projection_available = False
+    if frame_results is not None:
         outputs.append(
             _plot_delta_u_distribution(
                 plt=plt,
@@ -235,28 +263,33 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
                 energy_unit_label=energy_unit_label,
             )
         )
-        projected_outputs = _plot_phi_psi_projected_landscapes(
-            plt=plt,
-            frame_results=frame_results,
-            state_ids=state_ids,
-            reference_probabilities=reference_probabilities,
-            temperature_kelvin=config.temperature_kelvin,
-            bins=config.fel_bins,
-            max_points=config.fel_max_points,
-            output_dir=config.output_dir,
-            energy_scale=energy_scale,
-            energy_unit_label=energy_unit_label,
-            fel_max_energy_display=fel_max_display,
-        )
-        if projected_outputs:
-            phi_psi_projection_available = True
-            outputs.extend(projected_outputs)
-    if np.isfinite(phi_centers).any() and np.isfinite(psi_centers).any():
-        outputs.extend(
-            _plot_discrete_microstate_ramachandran(
+        if cv_axes is not None:
+            projected_outputs = _plot_cv_projected_landscapes(
                 plt=plt,
-                phi_degrees=phi_centers,
-                psi_degrees=psi_centers,
+                frame_results=frame_results,
+                state_ids=state_ids,
+                reference_probabilities=reference_probabilities,
+                temperature_kelvin=config.temperature_kelvin,
+                bins=config.fel_bins,
+                max_points=config.fel_max_points,
+                output_dir=config.output_dir,
+                energy_scale=energy_scale,
+                energy_unit_label=energy_unit_label,
+                fel_max_energy_display=fel_max_display,
+                x_name=cv_axes.x_name,
+                y_name=cv_axes.y_name,
+            )
+            if projected_outputs:
+                frame_projection_available = True
+                outputs.extend(projected_outputs)
+    if state_x is not None and state_y is not None and np.isfinite(state_x).any() and np.isfinite(state_y).any():
+        outputs.extend(
+            _plot_discrete_microstate_cv_projection(
+                plt=plt,
+                x_values=state_x,
+                y_values=state_y,
+                x_name=cv_axes.x_name if cv_axes is not None else "x",
+                y_name=cv_axes.y_name if cv_axes is not None else "y",
                 free_energy_kj_mol=target_free_energy_kj_mol,
                 target_probability=target_probabilities,
                 labels=labels,
@@ -278,7 +311,19 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
         "overlap_coefficient": float(overlap_coefficient),
         "reference_probability_source": summary_metadata.get("reference_probability_source"),
         "prior_probability_mode": summary_metadata.get("prior_probability_mode"),
-        "phi_psi_frame_projection_available": phi_psi_projection_available,
+        "cv_axes": (
+            [cv_axes.x_name, cv_axes.y_name] if cv_axes is not None else []
+        ),
+        "cv_axis_source": cv_axes.source if cv_axes is not None else None,
+        "cv_frame_projection_available": frame_projection_available,
+        "cv_frame_projection_estimator": (
+            "w_ij proportional to pi_reference(i) * exp(-beta * delta_u_ij) / n_i"
+        ),
+        "phi_psi_frame_projection_available": (
+            frame_projection_available
+            if cv_axes is not None and (cv_axes.x_name, cv_axes.y_name) == ("phi", "psi")
+            else False
+        ),
         "phi_psi_frame_projection_estimator": (
             "w_ij proportional to pi_reference(i) * exp(-beta * delta_u_ij) / n_i"
         ),
@@ -300,17 +345,170 @@ def _as_nan(value: float | None) -> float:
     return float("nan") if value is None else float(value)
 
 
+def _parse_metadata(raw: str | None) -> dict[str, Any]:
+    if raw in (None, ""):
+        return {}
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return dict(payload) if isinstance(payload, dict) else {}
+
+
+def _row_metadata(row: dict[str, str]) -> dict[str, Any]:
+    return _parse_metadata(row.get("metadata"))
+
+
+def _mapping_from_metadata(metadata: dict[str, Any], key: str) -> dict[str, Any]:
+    value = metadata.get(key)
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _optional_mapping_float(mapping: dict[str, Any], key: str) -> float | None:
+    value = mapping.get(key)
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _cv_filename_suffix(x_name: str, y_name: str) -> str:
+    suffix = f"{x_name}_{y_name}".lower()
+    suffix = re.sub(r"[^a-z0-9]+", "_", suffix).strip("_")
+    return suffix or "cv_projection"
+
+
+def _cv_axis_label(name: str, *, center: bool = False) -> str:
+    if name == "phi":
+        return r"$\phi$ center (deg)" if center else r"$\phi$ (deg)"
+    if name == "psi":
+        return r"$\psi$ center (deg)" if center else r"$\psi$ (deg)"
+    if name == "omega":
+        return r"$\omega$ center (deg)" if center else r"$\omega$ (deg)"
+    return f"{name} center" if center else name
+
+
+def _axis_range(x_name: str, y_name: str) -> tuple[tuple[float, float], tuple[float, float]] | None:
+    if x_name in _ANGULAR_CV_NAMES and y_name in _ANGULAR_CV_NAMES:
+        return ((-180.0, 180.0), (-180.0, 180.0))
+    return None
+
+
+def _state_cv_center(row: dict[str, str], name: str) -> float:
+    metadata = _row_metadata(row)
+    for metadata_key in ("cv_centers", "state_cv_centers"):
+        value = _optional_mapping_float(
+            _mapping_from_metadata(metadata, metadata_key),
+            name,
+        )
+        if value is not None:
+            return value
+    if name == "phi":
+        return _as_nan(parse_optional_float(row.get("phi_center")))
+    if name == "psi":
+        return _as_nan(parse_optional_float(row.get("psi_center")))
+    return _as_nan(parse_optional_float(row.get(f"{name}_center")))
+
+
+def _state_cv_array(rows: list[dict[str, str]], name: str) -> np.ndarray:
+    return np.asarray([_state_cv_center(row, name) for row in rows], dtype=float)
+
+
+def _available_state_cv_names(rows: list[dict[str, str]]) -> list[str]:
+    names: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        metadata = _row_metadata(row)
+        for metadata_key in ("cv_centers", "state_cv_centers"):
+            for name in _mapping_from_metadata(metadata, metadata_key):
+                if name not in seen:
+                    seen.add(name)
+                    names.append(name)
+        for name, column in (("phi", "phi_center"), ("psi", "psi_center")):
+            if name not in seen and parse_optional_float(row.get(column)) is not None:
+                seen.add(name)
+                names.append(name)
+        for column, value in row.items():
+            if not column.endswith("_center"):
+                continue
+            name = column[: -len("_center")]
+            if name and name not in seen and parse_optional_float(value) is not None:
+                seen.add(name)
+                names.append(name)
+    return names
+
+
+def _frame_cv_value(result, name: str) -> float | None:
+    metadata = dict(getattr(result, "metadata", {}) or {})
+    for metadata_key in (
+        "assignment_measurements",
+        "target_cv_values",
+        "target_cv_values_degrees",
+    ):
+        value = _optional_mapping_float(
+            _mapping_from_metadata(metadata, metadata_key),
+            name,
+        )
+        if value is not None:
+            return value
+    if name == "phi":
+        return result.phi_degrees
+    if name == "psi":
+        return result.psi_degrees
+    return None
+
+
+def _available_frame_cv_names(frame_results) -> list[str]:
+    names: list[str] = []
+    seen: set[str] = set()
+    for result in frame_results:
+        metadata = dict(getattr(result, "metadata", {}) or {})
+        for metadata_key in ("assignment_measurements", "target_cv_values"):
+            for name in _mapping_from_metadata(metadata, metadata_key):
+                if name not in seen:
+                    seen.add(name)
+                    names.append(name)
+        if result.phi_degrees is not None and "phi" not in seen:
+            seen.add("phi")
+            names.append("phi")
+        if result.psi_degrees is not None and "psi" not in seen:
+            seen.add("psi")
+            names.append("psi")
+    return names
+
+
+def _resolve_cv_axes(
+    *,
+    rows: list[dict[str, str]],
+    frame_results,
+    requested_x: str | None,
+    requested_y: str | None,
+) -> _CVAxisSelection | None:
+    if requested_x is not None and requested_y is not None:
+        return _CVAxisSelection(requested_x, requested_y, "configured")
+
+    state_names = _available_state_cv_names(rows)
+    frame_names = _available_frame_cv_names(frame_results or ())
+    combined = state_names + [name for name in frame_names if name not in state_names]
+
+    if "phi" in combined and "psi" in combined:
+        return _CVAxisSelection("phi", "psi", "inferred_phi_psi")
+    if "plot_x" in combined and "plot_y" in combined:
+        return _CVAxisSelection("plot_x", "plot_y", "inferred_plot_projection")
+    if len(combined) >= 2:
+        return _CVAxisSelection(combined[0], combined[1], "inferred_cv_metadata")
+    return None
+
+
 def _load_microstate_summary_metadata(rows: list[dict[str, str]]) -> dict[str, object]:
     """Best-effort parse of shared per-state metadata from the summary CSV."""
 
     for row in rows:
-        raw = row.get("metadata")
-        if raw in (None, ""):
-            continue
-        try:
-            return dict(json.loads(raw))
-        except json.JSONDecodeError:
-            continue
+        metadata = _row_metadata(row)
+        if metadata:
+            return dict(metadata)
     return {}
 
 
@@ -546,38 +744,38 @@ def _regular_centers_to_edges(
 
 
 def _build_regular_state_grid(
-    phi_centers: np.ndarray,
-    psi_centers: np.ndarray,
+    x_centers: np.ndarray,
+    y_centers: np.ndarray,
     values: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
     """Build a rectangular state grid when the summary rows form a complete mesh."""
 
     if not (
-        phi_centers.size == psi_centers.size == values.size
-        and np.isfinite(phi_centers).all()
-        and np.isfinite(psi_centers).all()
+        x_centers.size == y_centers.size == values.size
+        and np.isfinite(x_centers).all()
+        and np.isfinite(y_centers).all()
     ):
         return None
-    phi_grid = _regular_centers_to_edges(phi_centers)
-    psi_grid = _regular_centers_to_edges(psi_centers)
-    if phi_grid is None or psi_grid is None:
+    x_grid = _regular_centers_to_edges(x_centers)
+    y_grid = _regular_centers_to_edges(y_centers)
+    if x_grid is None or y_grid is None:
         return None
-    phi_unique, phi_edges = phi_grid
-    psi_unique, psi_edges = psi_grid
-    if phi_unique.size * psi_unique.size != values.size:
+    x_unique, x_edges = x_grid
+    y_unique, y_edges = y_grid
+    if x_unique.size * y_unique.size != values.size:
         return None
 
-    grid = np.full((phi_unique.size, psi_unique.size), np.nan, dtype=float)
-    phi_index = {float(value): index for index, value in enumerate(phi_unique)}
-    psi_index = {float(value): index for index, value in enumerate(psi_unique)}
-    for phi, psi, value in zip(phi_centers, psi_centers, values):
-        location = (phi_index[float(phi)], psi_index[float(psi)])
+    grid = np.full((x_unique.size, y_unique.size), np.nan, dtype=float)
+    x_index = {float(value): index for index, value in enumerate(x_unique)}
+    y_index = {float(value): index for index, value in enumerate(y_unique)}
+    for x_value, y_value, value in zip(x_centers, y_centers, values):
+        location = (x_index[float(x_value)], y_index[float(y_value)])
         if not math.isnan(grid[location]):
             return None
         grid[location] = float(value)
     if np.isnan(grid).any():
         return None
-    return grid, phi_edges, psi_edges
+    return grid, x_edges, y_edges
 
 
 def _subsample_indices(total: int, max_points: int) -> np.ndarray:
@@ -586,11 +784,13 @@ def _subsample_indices(total: int, max_points: int) -> np.ndarray:
     return np.linspace(0, total - 1, max_points, dtype=int)
 
 
-def _plot_phi_psi_state_landscapes(
+def _plot_cv_state_landscapes(
     plt,
     *,
-    phi_centers: np.ndarray,
-    psi_centers: np.ndarray,
+    x_centers: np.ndarray,
+    y_centers: np.ndarray,
+    x_name: str,
+    y_name: str,
     reference_probabilities: np.ndarray,
     target_probabilities: np.ndarray,
     temperature_kelvin: float,
@@ -599,16 +799,16 @@ def _plot_phi_psi_state_landscapes(
     energy_unit_label: str,
     fel_max_energy_display: float | None,
 ) -> list[str]:
-    """Build Ramachandran-like free energy surfaces from discrete state probabilities."""
+    """Build 2D CV free energy surfaces from discrete state probabilities."""
 
     reference_grid_data = _build_regular_state_grid(
-        phi_centers,
-        psi_centers,
+        x_centers,
+        y_centers,
         reference_probabilities,
     )
     target_grid_data = _build_regular_state_grid(
-        phi_centers,
-        psi_centers,
+        x_centers,
+        y_centers,
         target_probabilities,
     )
     if reference_grid_data is None or target_grid_data is None:
@@ -623,31 +823,43 @@ def _plot_phi_psi_state_landscapes(
     )
 
     outputs: list[str] = []
+    suffix = _cv_filename_suffix(x_name, y_name)
+    legacy_phi_psi = (x_name, y_name) == ("phi", "psi")
+    reference_filename = (
+        "reference_phi_psi_state_free_energy_landscape.png"
+        if legacy_phi_psi
+        else f"reference_{suffix}_state_free_energy_landscape.png"
+    )
+    reweighted_filename = (
+        "reweighted_phi_psi_state_free_energy_landscape.png"
+        if legacy_phi_psi
+        else f"reweighted_{suffix}_state_free_energy_landscape.png"
+    )
     outputs.append(
         save_pcolormesh_landscape(
             plt,
-            os.path.join(output_dir, "reference_phi_psi_state_free_energy_landscape.png"),
+            os.path.join(output_dir, reference_filename),
             reference_fe,
             x_edges,
             y_edges,
-            title="Reference microstate free energy (phi, psi)",
+            title=f"Reference microstate free energy ({x_name}, {y_name})",
             colorbar_label=f"Relative free energy ({energy_unit_label})",
-            xlabel=r"$\phi$ (deg)",
-            ylabel=r"$\psi$ (deg)",
+            xlabel=_cv_axis_label(x_name),
+            ylabel=_cv_axis_label(y_name),
             fel_max_energy_kj_mol=fel_max_energy_display,
         )
     )
     outputs.append(
         save_pcolormesh_landscape(
             plt,
-            os.path.join(output_dir, "reweighted_phi_psi_state_free_energy_landscape.png"),
+            os.path.join(output_dir, reweighted_filename),
             reweighted_fe,
             x_edges,
             y_edges,
-            title="Reweighted microstate free energy (phi, psi)",
+            title=f"Reweighted microstate free energy ({x_name}, {y_name})",
             colorbar_label=f"Relative free energy ({energy_unit_label})",
-            xlabel=r"$\phi$ (deg)",
-            ylabel=r"$\psi$ (deg)",
+            xlabel=_cv_axis_label(x_name),
+            ylabel=_cv_axis_label(y_name),
             fel_max_energy_kj_mol=fel_max_energy_display,
         )
     )
@@ -676,14 +888,16 @@ def _sample_state_projection_points(
     return sampled
 
 
-def _collect_phi_psi_projection_samples(
+def _collect_cv_projection_samples(
     *,
     frame_results,
     reference_probability_by_state: dict[str, float],
     temperature_kelvin: float,
     max_points: int,
+    x_name: str,
+    y_name: str,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
-    """Collect exact phi/psi frame samples with state-consistent reference weights."""
+    """Collect exact 2D CV frame samples with state-consistent reference weights."""
 
     grouped: dict[str, list[tuple[float, float, float]]] = defaultdict(list)
     eligible_delta_values: list[float] = []
@@ -692,17 +906,16 @@ def _collect_phi_psi_projection_samples(
             continue
         if result.microstate_id not in reference_probability_by_state:
             continue
-        if (
-            result.phi_degrees is None
-            or result.psi_degrees is None
-            or not math.isfinite(result.phi_degrees)
-            or not math.isfinite(result.psi_degrees)
-        ):
+        x_value = _frame_cv_value(result, x_name)
+        y_value = _frame_cv_value(result, y_name)
+        if x_value is None or y_value is None:
+            continue
+        if not (math.isfinite(x_value) and math.isfinite(y_value)):
             continue
         grouped[result.microstate_id].append(
             (
-                float(result.phi_degrees),
-                float(result.psi_degrees),
+                float(x_value),
+                float(y_value),
                 float(result.delta_u_kj_mol),
             )
         )
@@ -723,8 +936,8 @@ def _collect_phi_psi_projection_samples(
     beta = 1.0 / (K_BOLTZMANN_KJ_PER_MOL_K * temperature_kelvin)
     delta_shift = min(eligible_delta_values)
 
-    phi_values: list[float] = []
-    psi_values: list[float] = []
+    x_values: list[float] = []
+    y_values: list[float] = []
     reference_weights: list[float] = []
     reweighted_weights: list[float] = []
     for state_id, samples in sampled.items():
@@ -732,9 +945,9 @@ def _collect_phi_psi_projection_samples(
         if sample_count == 0:
             continue
         reference_probability = reference_probability_by_state.get(state_id, 0.0)
-        for phi, psi, delta_u in samples:
-            phi_values.append(phi)
-            psi_values.append(psi)
+        for x_value, y_value, delta_u in samples:
+            x_values.append(x_value)
+            y_values.append(y_value)
             reference_weights.append(reference_probability / sample_count)
             reweighted_weights.append(
                 reference_probability
@@ -742,18 +955,18 @@ def _collect_phi_psi_projection_samples(
                 / sample_count
             )
 
-    if not phi_values:
+    if not x_values:
         return None
 
     return (
-        np.asarray(phi_values, dtype=float),
-        np.asarray(psi_values, dtype=float),
+        np.asarray(x_values, dtype=float),
+        np.asarray(y_values, dtype=float),
         np.asarray(reference_weights, dtype=float),
         np.asarray(reweighted_weights, dtype=float),
     )
 
 
-def _plot_phi_psi_projected_landscapes(
+def _plot_cv_projected_landscapes(
     plt,
     *,
     frame_results,
@@ -766,36 +979,40 @@ def _plot_phi_psi_projected_landscapes(
     energy_scale: float,
     energy_unit_label: str,
     fel_max_energy_display: float | None,
+    x_name: str,
+    y_name: str,
 ) -> list[str]:
-    """Project exact phi/psi frame samples using prior-consistent frame weights."""
+    """Project exact 2D CV frame samples using prior-consistent frame weights."""
 
     reference_probability_by_state = {
         state_id: float(probability)
         for state_id, probability in zip(state_ids, reference_probabilities)
     }
-    sampled = _collect_phi_psi_projection_samples(
+    sampled = _collect_cv_projection_samples(
         frame_results=frame_results,
         reference_probability_by_state=reference_probability_by_state,
         temperature_kelvin=temperature_kelvin,
         max_points=max_points,
+        x_name=x_name,
+        y_name=y_name,
     )
     if sampled is None:
         return []
 
-    phi, psi, reference_weights, reweighted_weights = sampled
-    ram_range = ((-180.0, 180.0), (-180.0, 180.0))
+    x_values, y_values, reference_weights, reweighted_weights = sampled
+    hist_range = _axis_range(x_name, y_name)
     reference_hist, x_edges, y_edges = np.histogram2d(
-        phi,
-        psi,
+        x_values,
+        y_values,
         bins=bins,
-        range=ram_range,
+        range=hist_range,
         weights=reference_weights,
     )
     reweighted_hist, _, _ = np.histogram2d(
-        phi,
-        psi,
+        x_values,
+        y_values,
         bins=bins,
-        range=ram_range,
+        range=hist_range,
         weights=reweighted_weights,
     )
     if reference_hist.sum() > 0.0:
@@ -810,42 +1027,56 @@ def _plot_phi_psi_projected_landscapes(
     )
 
     outputs: list[str] = []
+    suffix = _cv_filename_suffix(x_name, y_name)
+    legacy_phi_psi = (x_name, y_name) == ("phi", "psi")
+    reference_filename = (
+        "reference_phi_psi_free_energy_landscape.png"
+        if legacy_phi_psi
+        else f"reference_{suffix}_free_energy_landscape.png"
+    )
+    reweighted_filename = (
+        "reweighted_phi_psi_free_energy_landscape.png"
+        if legacy_phi_psi
+        else f"reweighted_{suffix}_free_energy_landscape.png"
+    )
     outputs.append(
         save_pcolormesh_landscape(
             plt,
-            os.path.join(output_dir, "reference_phi_psi_free_energy_landscape.png"),
+            os.path.join(output_dir, reference_filename),
             reference_fe,
             x_edges,
             y_edges,
-            title="Reference projected free energy (phi, psi)",
+            title=f"Reference projected free energy ({x_name}, {y_name})",
             colorbar_label=f"Relative free energy ({energy_unit_label})",
-            xlabel=r"$\phi$ (deg)",
-            ylabel=r"$\psi$ (deg)",
+            xlabel=_cv_axis_label(x_name),
+            ylabel=_cv_axis_label(y_name),
             fel_max_energy_kj_mol=fel_max_energy_display,
         )
     )
     outputs.append(
         save_pcolormesh_landscape(
             plt,
-            os.path.join(output_dir, "reweighted_phi_psi_free_energy_landscape.png"),
+            os.path.join(output_dir, reweighted_filename),
             reweighted_fe,
             x_edges,
             y_edges,
-            title="Reweighted projected free energy (phi, psi)",
+            title=f"Reweighted projected free energy ({x_name}, {y_name})",
             colorbar_label=f"Relative free energy ({energy_unit_label})",
-            xlabel=r"$\phi$ (deg)",
-            ylabel=r"$\psi$ (deg)",
+            xlabel=_cv_axis_label(x_name),
+            ylabel=_cv_axis_label(y_name),
             fel_max_energy_kj_mol=fel_max_energy_display,
         )
     )
     return outputs
 
 
-def _plot_discrete_microstate_ramachandran(
+def _plot_discrete_microstate_cv_projection(
     plt,
     *,
-    phi_degrees: np.ndarray,
-    psi_degrees: np.ndarray,
+    x_values: np.ndarray,
+    y_values: np.ndarray,
+    x_name: str,
+    y_name: str,
     free_energy_kj_mol: np.ndarray,
     target_probability: np.ndarray,
     labels: list[str],
@@ -855,9 +1086,9 @@ def _plot_discrete_microstate_ramachandran(
     energy_unit_label: str,
     fel_max_energy_display: float | None,
 ) -> list[str]:
-    """Scatter microstate centers on (phi, psi) colored by reweighted free energy."""
+    """Scatter microstate centers on selected CV axes colored by free energy."""
 
-    mask = np.isfinite(phi_degrees) & np.isfinite(psi_degrees)
+    mask = np.isfinite(x_values) & np.isfinite(y_values)
     if int(mask.sum()) < 1:
         return []
 
@@ -868,22 +1099,22 @@ def _plot_discrete_microstate_ramachandran(
             temperature_kelvin=temperature_kelvin,
         )
         colorbar_label = f"Relative free energy from P_target ({energy_unit_label})"
-        title = "Microstate centers (phi, psi)"
+        title = f"Microstate centers ({x_name}, {y_name})"
     else:
         values = fe
         colorbar_label = f"Relative free energy ({energy_unit_label})"
-        title = "Microstate centers (phi, psi)"
+        title = f"Microstate centers ({x_name}, {y_name})"
 
     fig, ax = plt.subplots(1, 1)
     scatter_kwargs: dict = {
         "ax": ax,
-        "x": phi_degrees[mask],
-        "y": psi_degrees[mask],
+        "x": x_values[mask],
+        "y": y_values[mask],
         "values": values[mask],
         "colorbar_label": colorbar_label,
         "title": title,
-        "xlabel": r"$\phi$ center (deg)",
-        "ylabel": r"$\psi$ center (deg)",
+        "xlabel": _cv_axis_label(x_name, center=True),
+        "ylabel": _cv_axis_label(y_name, center=True),
     }
     if fel_max_energy_display is not None:
         scatter_kwargs["fel_max_energy_kj_mol"] = fel_max_energy_display
@@ -892,14 +1123,20 @@ def _plot_discrete_microstate_ramachandran(
         for index in np.flatnonzero(mask):
             ax.annotate(
                 labels[index],
-                (phi_degrees[index], psi_degrees[index]),
+                (x_values[index], y_values[index]),
                 textcoords="offset points",
                 xytext=(4, 4),
                 fontsize=7,
                 alpha=0.85,
             )
     fig.tight_layout()
-    path = os.path.join(output_dir, "discrete_microstate_free_energy_ramachandran.png")
+    suffix = _cv_filename_suffix(x_name, y_name)
+    filename = (
+        "discrete_microstate_free_energy_ramachandran.png"
+        if (x_name, y_name) == ("phi", "psi")
+        else f"discrete_microstate_free_energy_{suffix}.png"
+    )
+    path = os.path.join(output_dir, filename)
     fig.savefig(path)
     plt.close(fig)
     return [path]

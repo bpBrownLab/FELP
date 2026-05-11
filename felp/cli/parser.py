@@ -877,7 +877,23 @@ def _add_felp_plot_arguments(parser: argparse.ArgumentParser) -> None:
         "--fel-max-points",
         type=int,
         default=200_000,
-        help="Maximum frames used when building phi/psi heatmaps (uniform subsampling).",
+        help="Maximum frames used when building 2D CV heatmaps (uniform subsampling).",
+    )
+    parser.add_argument(
+        "--plot-cv-x",
+        dest="plot_cv_x",
+        help=(
+            "Optional CV name for the x-axis in 2D FEL plots. "
+            "Defaults to inferred phi/psi when available, otherwise inferred CV metadata."
+        ),
+    )
+    parser.add_argument(
+        "--plot-cv-y",
+        dest="plot_cv_y",
+        help=(
+            "Optional CV name for the y-axis in 2D FEL plots. "
+            "Must be provided together with --plot-cv-x."
+        ),
     )
     parser.add_argument(
         "--fel-max-energy-kj-mol",
@@ -1226,6 +1242,8 @@ def build_felp_plot_config(namespace: argparse.Namespace) -> FELPPlotConfig:
         fel_max_points=namespace.fel_max_points,
         fel_max_energy_kj_mol=namespace.fel_max_energy_kj_mol,
         plot_energy_unit=namespace.plot_energy_unit,
+        cv_x=namespace.plot_cv_x,
+        cv_y=namespace.plot_cv_y,
         overwrite=namespace.overwrite,
     )
     config.validate()

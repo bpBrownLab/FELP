@@ -684,6 +684,10 @@ def test_build_plot_configs_from_cli(tmp_path: Path) -> None:
             "12",
             "--plot-energy-unit",
             "kcal_mol",
+            "--plot-cv-x",
+            "ends",
+            "--plot-cv-y",
+            "turn",
         ]
     )
 
@@ -696,3 +700,5 @@ def test_build_plot_configs_from_cli(tmp_path: Path) -> None:
     assert felp_config.fel_bins == 36
     assert felp_config.fel_max_energy_kj_mol == 12.0
     assert felp_config.plot_energy_unit == "kcal_mol"
+    assert felp_config.cv_x == "ends"
+    assert felp_config.cv_y == "turn"

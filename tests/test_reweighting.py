@@ -56,6 +56,11 @@ def test_reweighting_uses_empirical_reference_probabilities() -> None:
     assert result_by_id["a"].target_probability > result_by_id["b"].target_probability
     assert abs(sum(result.target_probability for result in results) - 1.0) < 1.0e-8
     assert result_by_id["a"].metadata["reference_probability_source"] == "raw_counts"
+    assert result_by_id["a"].metadata["cv_ranges"] == {
+        "phi": (-180.0, 0.0),
+        "psi": (-180.0, 180.0),
+    }
+    assert result_by_id["a"].metadata["cv_centers"] == {"phi": -90.0, "psi": 0.0}
 
 
 def test_reweighting_raw_counts_can_use_full_assigned_reference_counts() -> None:
@@ -278,6 +283,8 @@ def test_reweighting_reports_overlap_diagnostics_metadata() -> None:
     shared_metadata_keys = set(metadata) - {
         "assigned_frame_count",
         "evaluated_frame_count",
+        "cv_centers",
+        "cv_ranges",
     }
     assert {
         key: results[1].metadata[key] for key in shared_metadata_keys

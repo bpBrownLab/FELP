@@ -79,12 +79,12 @@ def test_generate_felp_plots_reports_overlap_coefficient_without_matplotlib(
     )
     monkeypatch.setattr(
         felp_plotting,
-        "_plot_phi_psi_state_landscapes",
+        "_plot_cv_state_landscapes",
         lambda **_: [],
     )
     monkeypatch.setattr(
         felp_plotting,
-        "_plot_discrete_microstate_ramachandran",
+        "_plot_discrete_microstate_cv_projection",
         lambda **_: [],
     )
 

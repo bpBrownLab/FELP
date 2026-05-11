@@ -476,3 +476,105 @@ def test_generate_felp_plots_builds_state_grid_landscapes(tmp_path: Path) -> Non
     assert summary["reference_probability_source"] == "raw_counts"
     assert (tmp_path / "felp_plots" / "reference_phi_psi_state_free_energy_landscape.png").is_file()
     assert (tmp_path / "felp_plots" / "reweighted_phi_psi_state_free_energy_landscape.png").is_file()
+
+
+def test_generate_felp_plots_supports_custom_cv_axes(tmp_path: Path) -> None:
+    summary_csv = tmp_path / "microstate_summary.csv"
+    frame_csv = tmp_path / "frame_results.csv"
+
+    with open(summary_csv, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "state_id",
+                "label",
+                "frame_count",
+                "reference_probability",
+                "target_probability",
+                "free_energy_kj_mol",
+                "metadata",
+            ],
+        )
+        writer.writeheader()
+        for state_id, ends, turn, pref, ptarget, free_energy in (
+            ("short_tight", 10.0, 4.0, 0.25, 0.10, 1.0),
+            ("short_open", 10.0, 8.0, 0.25, 0.20, 0.5),
+            ("long_tight", 20.0, 4.0, 0.25, 0.30, 0.2),
+            ("long_open", 20.0, 8.0, 0.25, 0.40, 0.0),
+        ):
+            writer.writerow(
+                {
+                    "state_id": state_id,
+                    "label": state_id,
+                    "frame_count": 1,
+                    "reference_probability": pref,
+                    "target_probability": ptarget,
+                    "free_energy_kj_mol": free_energy,
+                    "metadata": (
+                        '{"reference_probability_source":"raw_counts",'
+                        f'"cv_centers":{{"ends":{ends},"turn":{turn}}},'
+                        f'"cv_ranges":{{"ends":[{ends - 1.0},{ends + 1.0}],'
+                        f'"turn":[{turn - 0.5},{turn + 0.5}]}}'
+                        "}"
+                    ),
+                }
+            )
+
+    writer = ResultsWriter(OutputConfig(output_dir=str(tmp_path / "frame_out")))
+    writer.prepare_output_dir()
+    writer.write_frame_results(
+        [
+            FrameResult(
+                frame_index=index,
+                stride_number=index,
+                microstate_id=state_id,
+                microstate_label=state_id,
+                phi_degrees=None,
+                psi_degrees=None,
+                reference_energy_kj_mol=0.0,
+                perturbed_energy_kj_mol=delta_u,
+                delta_u_kj_mol=delta_u,
+                reference_relaxed_phi_degrees=None,
+                reference_relaxed_psi_degrees=None,
+                perturbed_relaxed_phi_degrees=None,
+                perturbed_relaxed_psi_degrees=None,
+                metadata={
+                    "assignment_measurements": {
+                        "ends": ends,
+                        "turn": turn,
+                    }
+                },
+            )
+            for index, (state_id, ends, turn, delta_u) in enumerate(
+                (
+                    ("short_tight", 10.1, 4.1, -0.2),
+                    ("short_open", 9.9, 7.9, 0.1),
+                    ("long_tight", 20.2, 4.2, 0.3),
+                    ("long_open", 19.8, 7.8, -0.4),
+                )
+            )
+        ]
+    )
+    frame_csv.write_text(
+        Path(writer.raw_frame_results_path).read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+
+    summary = generate_felp_plots(
+        FELPPlotConfig(
+            microstate_summary_csv=str(summary_csv),
+            raw_frame_results_csv=str(frame_csv),
+            output_dir=str(tmp_path / "felp_plots"),
+            cv_x="ends",
+            cv_y="turn",
+            fel_bins=20,
+        )
+    )
+
+    assert summary["cv_axes"] == ["ends", "turn"]
+    assert summary["cv_frame_projection_available"] is True
+    assert (tmp_path / "felp_plots" / "reference_ends_turn_state_free_energy_landscape.png").is_file()
+    assert (tmp_path / "felp_plots" / "reweighted_ends_turn_state_free_energy_landscape.png").is_file()
+    assert (tmp_path / "felp_plots" / "reference_ends_turn_free_energy_landscape.png").is_file()
+    assert (tmp_path / "felp_plots" / "reweighted_ends_turn_free_energy_landscape.png").is_file()
+    assert (tmp_path / "felp_plots" / "discrete_microstate_free_energy_ends_turn.png").is_file()
