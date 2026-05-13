@@ -11,6 +11,7 @@ from felp.cli import (
     build_msm_fit_config,
     build_msm_plot_config,
     build_parser,
+    build_reweighting_qc_config,
     build_run_config,
 )
 
@@ -70,6 +71,125 @@ def test_build_run_config_from_cli(tmp_path: Path) -> None:
     assert config.sampling.microstate_min_samples == 1
     assert config.sampling.microstate_max_samples is None
     assert config.sampling.microstate_sampling_seed == 0
+    assert config.reweighting_qc.policy == "flag"
+    assert config.reweighting_qc.method == "auto"
+    assert config.reweighting_qc.weight_treatment == "raw"
+    assert config.reweighting_qc.min_frame_count == 20
+    assert config.reweighting_qc.max_frame_weight_fraction == 0.5
+
+
+def test_build_run_config_debug_frame_outputs(tmp_path: Path) -> None:
+    topology = tmp_path / "input.pdb"
+    trajectory = tmp_path / "input.xtc"
+    topology.write_text("placeholder\n", encoding="utf-8")
+    trajectory.write_text("placeholder\n", encoding="utf-8")
+
+    parser = build_parser()
+    namespace = parser.parse_args(
+        [
+            "run",
+            "--topology-file",
+            str(topology),
+            "--trajectory-file",
+            str(trajectory),
+            "--target-residue-number",
+            "2",
+            "--target-residue-name",
+            "ALA",
+            "--output-dir",
+            str(tmp_path / "out"),
+            "--prior-probability-mode",
+            "raw_counts",
+            "--debug-frame-outputs",
+            "--debug-frame-index",
+            "120618",
+            "--debug-frame-index",
+            "120619",
+        ]
+    )
+
+    config = build_run_config(namespace)
+    assert config.output.debug_frame_outputs is True
+    assert config.output.debug_frame_indices == (120618, 120619)
+
+
+def test_build_run_config_reweighting_qc_options(tmp_path: Path) -> None:
+    topology = tmp_path / "input.pdb"
+    trajectory = tmp_path / "input.xtc"
+    topology.write_text("placeholder\n", encoding="utf-8")
+    trajectory.write_text("placeholder\n", encoding="utf-8")
+
+    parser = build_parser()
+    namespace = parser.parse_args(
+        [
+            "run",
+            "--topology-file",
+            str(topology),
+            "--trajectory-file",
+            str(trajectory),
+            "--target-residue-number",
+            "2",
+            "--target-residue-name",
+            "ALA",
+            "--output-dir",
+            str(tmp_path / "out"),
+            "--prior-probability-mode",
+            "raw_counts",
+            "--reweighting-qc-policy",
+            "exclude-frames",
+            "--reweighting-qc-method",
+            "threshold",
+            "--reweighting-weight-treatment",
+            "psis-smoothed",
+            "--reweighting-qc-min-frame-count",
+            "30",
+            "--reweighting-qc-max-frame-weight-fraction",
+            "0.25",
+            "--reweighting-qc-min-state-ess",
+            "8",
+            "--reweighting-qc-max-leave-one-out-shift-kj-mol",
+            "6",
+            "--reweighting-qc-max-excluded-frames-per-state",
+            "3",
+        ]
+    )
+
+    config = build_run_config(namespace)
+    assert config.reweighting_qc.policy == "exclude-frames"
+    assert config.reweighting_qc.method == "threshold"
+    assert config.reweighting_qc.weight_treatment == "psis-smoothed"
+    assert config.reweighting_qc.min_frame_count == 30
+    assert config.reweighting_qc.max_frame_weight_fraction == 0.25
+    assert config.reweighting_qc.min_state_ess == 8.0
+    assert config.reweighting_qc.max_leave_one_out_shift_kj_mol == 6.0
+    assert config.reweighting_qc.max_excluded_frames_per_state == 3
+
+
+def test_summarize_reweighting_qc_options_parse() -> None:
+    parser = build_parser()
+    namespace = parser.parse_args(
+        [
+            "summarize",
+            "--raw-frame-results",
+            "frame_results.csv",
+            "--output-dir",
+            "out",
+            "--microstate-source",
+            "file",
+            "--microstate-file",
+            "states.json",
+            "--reweighting-qc-policy",
+            "exclude-frames",
+            "--reweighting-weight-treatment",
+            "psis-smoothed",
+        ]
+    )
+
+    config = build_reweighting_qc_config(namespace)
+    assert config.policy == "exclude-frames"
+    assert config.method == "auto"
+    assert config.weight_treatment == "psis-smoothed"
+    assert config.min_frame_count == 20
 
 
 def test_build_run_config_restraint_overrides_and_cv_tolerance(tmp_path: Path) -> None:
@@ -111,6 +231,87 @@ def test_build_run_config_restraint_overrides_and_cv_tolerance(tmp_path: Path) -
     assert config.restraints.cv_measurement_tolerance_degrees == 2.5
     assert config.restraints.effective_rosetta_force_constant() == 8000.0
     assert config.restraints.effective_openmm_force_constant() == 12000.0
+
+
+def test_build_run_config_rosetta_target_backbone_restraints(tmp_path: Path) -> None:
+    topology = tmp_path / "input.pdb"
+    trajectory = tmp_path / "input.xtc"
+    topology.write_text("placeholder\n", encoding="utf-8")
+    trajectory.write_text("placeholder\n", encoding="utf-8")
+
+    parser = build_parser()
+    namespace = parser.parse_args(
+        [
+            "run",
+            "--topology-file",
+            str(topology),
+            "--trajectory-file",
+            str(trajectory),
+            "--target-residue-number",
+            "4",
+            "--target-residue-name",
+            "ALA",
+            "--output-dir",
+            str(tmp_path / "out"),
+            "--distance-cv",
+            "ends:1:CA:10:CA",
+            "--rosetta-restraint-target-backbone",
+            "--rosetta-backbone-restraint-residue",
+            "3",
+            "--rosetta-backbone-restraint-residue",
+            "4",
+            "--rosetta-backbone-restraint-residue",
+            "5",
+            "--rosetta-target-backbone-restraint-force-constant",
+            "25000",
+            "--rosetta-target-backbone-restraint-tolerance-degrees",
+            "0.5",
+        ]
+    )
+
+    config = build_run_config(namespace)
+    assert config.restraints.cv_specs == ()
+    assert config.restraints.distance_cv_specs[0].name == "ends"
+    assert config.restraints.rosetta_target_backbone_restraints == ("phi", "psi")
+    assert config.restraints.rosetta_backbone_restraint_residue_numbers == (3, 4, 5)
+    assert config.restraints.effective_rosetta_target_backbone_force_constant() == 25000.0
+    assert config.restraints.rosetta_target_backbone_restraint_tolerance_degrees == 0.5
+
+
+def test_build_run_config_sequence_window_mobility(tmp_path: Path) -> None:
+    topology = tmp_path / "input.pdb"
+    trajectory = tmp_path / "input.xtc"
+    topology.write_text("placeholder\n", encoding="utf-8")
+    trajectory.write_text("placeholder\n", encoding="utf-8")
+
+    parser = build_parser()
+    namespace = parser.parse_args(
+        [
+            "run",
+            "--topology-file",
+            str(topology),
+            "--trajectory-file",
+            str(trajectory),
+            "--target-residue-number",
+            "4",
+            "--target-residue-name",
+            "ALA",
+            "--output-dir",
+            str(tmp_path / "out"),
+            "--distance-cv",
+            "ends:1:CA:10:CA",
+            "--mobility-mode",
+            "sequence_window",
+            "--mobility-sequence-window",
+            "1",
+            "--mobility-include-backbone",
+        ]
+    )
+
+    config = build_run_config(namespace)
+    assert config.mobility.mode == "sequence_window"
+    assert config.mobility.sequence_window == 1
+    assert config.mobility.include_backbone is True
 
 
 def test_build_run_config_openmm_cpu_flag(tmp_path: Path) -> None:
@@ -773,8 +974,18 @@ def test_build_plot_configs_from_cli(tmp_path: Path) -> None:
             "36",
             "--fel-max-energy-kj-mol",
             "12",
+            "--fel-estimator",
+            "gaussian-kernel",
+            "--fel-bandwidth",
+            "0.5,1.25",
+            "--fel-bandwidth-rule",
+            "silverman",
+            "--fel-cmap",
+            "plasma",
             "--plot-energy-unit",
             "kcal_mol",
+            "--reweighting-weight-treatment",
+            "psis",
             "--plot-cv-x",
             "ends",
             "--plot-cv-y",
@@ -790,7 +1001,12 @@ def test_build_plot_configs_from_cli(tmp_path: Path) -> None:
     assert felp_config.output_dir.endswith("felp_plots")
     assert felp_config.fel_bins == 36
     assert felp_config.fel_max_energy_kj_mol == 12.0
+    assert felp_config.fel_estimator == "gaussian-kernel"
+    assert felp_config.fel_bandwidth == "0.5,1.25"
+    assert felp_config.fel_bandwidth_rule == "silverman"
+    assert felp_config.fel_colormap == "plasma"
     assert felp_config.plot_energy_unit == "kcal_mol"
+    assert felp_config.weight_treatment == "psis-smoothed"
     assert felp_config.cv_x == "ends"
     assert felp_config.cv_y == "turn"
 

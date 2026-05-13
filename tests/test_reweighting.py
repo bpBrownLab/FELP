@@ -6,7 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from felp.core import FrameResult, MicrostateDefinition, ReweightingError
+from felp.core import (
+    FrameResult,
+    MicrostateDefinition,
+    ReweightingError,
+    ReweightingQCConfig,
+)
 from felp.reweighting import (
     MicrostateAtlas,
     ReweightingAggregator,
@@ -56,6 +61,7 @@ def test_reweighting_uses_empirical_reference_probabilities() -> None:
     assert result_by_id["a"].target_probability > result_by_id["b"].target_probability
     assert abs(sum(result.target_probability for result in results) - 1.0) < 1.0e-8
     assert result_by_id["a"].metadata["reference_probability_source"] == "raw_counts"
+    assert result_by_id["a"].metadata["state_qc_status"] == "ok"
     assert result_by_id["a"].metadata["cv_ranges"] == {
         "phi": (-180.0, 0.0),
         "psi": (-180.0, 180.0),
@@ -283,12 +289,160 @@ def test_reweighting_reports_overlap_diagnostics_metadata() -> None:
     shared_metadata_keys = set(metadata) - {
         "assigned_frame_count",
         "evaluated_frame_count",
+        "filtered_evaluated_frame_count",
+        "excluded_frame_indices",
         "cv_centers",
         "cv_ranges",
+        "state_qc_status",
+        "state_qc_reasons",
+        "state_effective_sample_size",
+        "state_effective_sample_fraction",
+        "state_max_normalized_weight",
+        "dominant_frame_index",
+        "dominant_frame_delta_u_kj_mol",
+        "dominant_frame_weight_fraction",
+        "leave_one_out_delta_g_shift_kj_mol",
+        "pareto_k",
+        "pareto_k_threshold",
+        "pareto_tail_count",
+        "original_state_qc",
+        "psis_weight_smoothing",
     }
     assert {
         key: results[1].metadata[key] for key in shared_metadata_keys
     } == {key: metadata[key] for key in shared_metadata_keys}
+
+
+def test_reweighting_flags_by_state_dominant_frame() -> None:
+    atlas = MicrostateAtlas(
+        definitions=(
+            MicrostateDefinition("a", "a", (-180.0, 0.0), (-180.0, 180.0)),
+            MicrostateDefinition("b", "b", (0.0, 180.0), (-180.0, 180.0)),
+        ),
+        reference_probability_mode="raw_counts",
+    )
+    aggregator = ReweightingAggregator(
+        temperature_kelvin=300.0,
+        qc_config=ReweightingQCConfig(policy="flag"),
+    )
+    results = aggregator.aggregate(
+        [
+            *(_frame_result(index, "a", 0.0) for index in range(29)),
+            _frame_result(999, "a", -100.0),
+            *(_frame_result(index, "b", 0.0) for index in range(1000, 1030)),
+        ],
+        atlas,
+    )
+
+    result_by_id = {result.state_id: result for result in results}
+    flagged = result_by_id["a"]
+    assert flagged.metadata["state_qc_status"] == "flagged"
+    assert flagged.metadata["dominant_frame_index"] == 999
+    assert flagged.metadata["dominant_frame_weight_fraction"] > 0.99
+    assert flagged.metadata["leave_one_out_delta_g_shift_kj_mol"] > 10.0
+    assert flagged.metadata["pareto_k"] > flagged.metadata["pareto_k_threshold"]
+    assert flagged.metadata["reweighting_qc"]["method"] == "auto"
+    assert flagged.metadata["reweighting_qc"]["flagged_state_count"] == 1
+    assert flagged.metadata["reweighting_qc"]["excluded_frame_count"] == 0
+    assert flagged.target_probability > 0.99
+
+
+def test_reweighting_excludes_dominant_frame_with_explicit_policy() -> None:
+    atlas = MicrostateAtlas(
+        definitions=(
+            MicrostateDefinition("a", "a", (-180.0, 0.0), (-180.0, 180.0)),
+            MicrostateDefinition("b", "b", (0.0, 180.0), (-180.0, 180.0)),
+        ),
+        reference_probability_mode="raw_counts",
+    )
+    frames = [
+        *(_frame_result(index, "a", 0.0) for index in range(29)),
+        _frame_result(999, "a", -100.0),
+        *(_frame_result(index, "b", 0.0) for index in range(1000, 1030)),
+    ]
+    flagged = ReweightingAggregator(
+        temperature_kelvin=300.0,
+        qc_config=ReweightingQCConfig(policy="flag"),
+    ).aggregate(frames, atlas)
+    filtered = ReweightingAggregator(
+        temperature_kelvin=300.0,
+        qc_config=ReweightingQCConfig(policy="exclude-frames"),
+    ).aggregate(frames, atlas)
+
+    flagged_by_id = {result.state_id: result for result in flagged}
+    filtered_by_id = {result.state_id: result for result in filtered}
+    state_a = filtered_by_id["a"]
+    assert state_a.metadata["state_qc_status"] == "filtered"
+    assert state_a.metadata["excluded_frame_indices"] == [999]
+    assert state_a.frame_count == 29
+    assert state_a.metadata["evaluated_frame_count"] == 30
+    assert state_a.metadata["filtered_evaluated_frame_count"] == 29
+    assert state_a.metadata["reweighting_qc"]["filtered_state_count"] == 1
+    assert state_a.metadata["reweighting_qc"]["excluded_frame_count"] == 1
+    assert state_a.reference_probability == pytest.approx(0.5)
+    assert state_a.target_probability == pytest.approx(0.5)
+    assert flagged_by_id["a"].target_probability > state_a.target_probability
+
+
+def test_reweighting_threshold_method_remains_available() -> None:
+    atlas = MicrostateAtlas(
+        definitions=(
+            MicrostateDefinition("a", "a", (-180.0, 0.0), (-180.0, 180.0)),
+            MicrostateDefinition("b", "b", (0.0, 180.0), (-180.0, 180.0)),
+        ),
+        reference_probability_mode="raw_counts",
+    )
+    results = ReweightingAggregator(
+        temperature_kelvin=300.0,
+        qc_config=ReweightingQCConfig(
+            policy="flag",
+            method="threshold",
+            min_frame_count=100,
+        ),
+    ).aggregate(
+        [
+            *(_frame_result(index, "a", 0.0) for index in range(29)),
+            _frame_result(999, "a", -100.0),
+            *(_frame_result(index, "b", 0.0) for index in range(1000, 1030)),
+        ],
+        atlas,
+    )
+
+    result_by_id = {result.state_id: result for result in results}
+    assert result_by_id["a"].metadata["state_qc_status"] == "ok"
+    assert result_by_id["a"].metadata["pareto_k"] is not None
+    assert result_by_id["a"].metadata["reweighting_qc"]["method"] == "threshold"
+
+
+def test_reweighting_psis_smoothed_weight_treatment_reduces_tail_weight() -> None:
+    atlas = MicrostateAtlas(
+        definitions=(
+            MicrostateDefinition("a", "a", (-180.0, 0.0), (-180.0, 180.0)),
+            MicrostateDefinition("b", "b", (0.0, 180.0), (-180.0, 180.0)),
+        ),
+        reference_probability_mode="raw_counts",
+    )
+    frames = [
+        *(_frame_result(index, "a", 0.0) for index in range(29)),
+        _frame_result(999, "a", -10.0),
+        *(_frame_result(index, "b", 0.0) for index in range(1000, 1030)),
+    ]
+
+    raw = ReweightingAggregator(temperature_kelvin=300.0).aggregate(frames, atlas)
+    smoothed = ReweightingAggregator(
+        temperature_kelvin=300.0,
+        qc_config=ReweightingQCConfig(weight_treatment="psis-smoothed"),
+    ).aggregate(frames, atlas)
+
+    raw_by_id = {result.state_id: result for result in raw}
+    smoothed_by_id = {result.state_id: result for result in smoothed}
+    state_a = smoothed_by_id["a"]
+    assert state_a.reweight_factor < raw_by_id["a"].reweight_factor
+    assert state_a.target_probability < raw_by_id["a"].target_probability
+    assert state_a.metadata["weight_treatment"] == "psis-smoothed"
+    assert state_a.metadata["reweighting_qc"]["weight_treatment"] == "psis-smoothed"
+    assert state_a.metadata["psis_weight_smoothing"]["psis_smoothed"] is True
+    assert state_a.metadata["psis_weight_smoothing"]["psis_smoothed_frame_count"] > 0
 
 
 def test_load_microstate_definitions_supports_generalized_cv_ranges(

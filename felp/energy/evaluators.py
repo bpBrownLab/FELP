@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-import math
 from dataclasses import dataclass
+import math
 from typing import Iterable
 
 from felp.core import (
@@ -89,6 +89,7 @@ class EnergyEvaluator(ABC):
         structure=None,
         pose=None,
         restraint_specs: Iterable[DihedralRestraintSpec | DistanceRestraintSpec] = (),
+        collect_energy_components: bool = False,
     ) -> EnergyResult:
         """Evaluate a structure or pose."""
 
@@ -212,6 +213,16 @@ class OpenMMEnergyEvaluator(EnergyEvaluator):
 
     def _mobile_atom_indices(self, structure) -> set[int]:
         mobile_residues = {int(self.target_residue_number)}
+        if self.mobility.mode == "sequence_window":
+            first_residue = max(
+                1,
+                int(self.target_residue_number) - int(self.mobility.sequence_window),
+            )
+            last_residue = min(
+                len(structure.residues),
+                int(self.target_residue_number) + int(self.mobility.sequence_window),
+            )
+            mobile_residues = set(range(first_residue, last_residue + 1))
         if self.mobility.mode == "radius":
             target_residue = find_structure_atom(structure, self.target_residue_number, "CA").residue
             target_atoms = list(getattr(target_residue, "atoms", ()))
@@ -251,6 +262,28 @@ class OpenMMEnergyEvaluator(EnergyEvaluator):
                 frozen_count += 1
         return frozen_count
 
+    def _mobile_atom_summary(self, structure) -> dict:
+        mobile_atoms = self._mobile_atom_indices(structure)
+        mobile_residues = sorted(
+            {
+                structure.residues.index(structure.atoms[atom_index].residue) + 1
+                for atom_index in mobile_atoms
+            }
+        )
+        return {
+            "mobility_mode": self.mobility.mode,
+            "target_residue_number": self.target_residue_number,
+            "mobility_radius_angstrom": self.mobility.radius_angstrom,
+            "mobility_sequence_window": self.mobility.sequence_window,
+            "include_backbone": self.mobility.include_backbone,
+            "include_sidechains": self.mobility.include_sidechains,
+            "mobile_atom_count": len(mobile_atoms),
+            "mobile_residue_numbers": mobile_residues,
+            "frozen_atom_scope": (
+                "All OpenMM particles outside the mobile atom set are assigned zero mass."
+            ),
+        }
+
     def validate_topology(self, structure) -> None:
         """Fail early when the reference topology cannot be templated by OpenMM."""
 
@@ -272,12 +305,58 @@ class OpenMMEnergyEvaluator(EnergyEvaluator):
                 f"as applicable). Original error: {exc}"
             ) from exc
 
+    @staticmethod
+    def _force_component_labels(system) -> list[dict[str, int | str]]:
+        """Assign OpenMM force groups and return labels for component energies."""
+
+        force_count = system.getNumForces()
+        if force_count > 32:
+            return []
+        labels: list[dict[str, int | str]] = []
+        for index in range(force_count):
+            force = system.getForce(index)
+            force.setForceGroup(index)
+            name = ""
+            if hasattr(force, "getName"):
+                name = str(force.getName() or "")
+            labels.append(
+                {
+                    "force_index": index,
+                    "force_group": index,
+                    "force_class": type(force).__name__,
+                    "name": name,
+                    "label": f"{index}:{name or type(force).__name__}",
+                }
+            )
+        return labels
+
+    @staticmethod
+    def _collect_energy_components(simulation, force_labels, unit) -> dict:
+        """Return per-force-group potential energies in kJ/mol."""
+
+        components: dict[str, float] = {}
+        details = []
+        for label in force_labels:
+            group = int(label["force_group"])
+            state = simulation.context.getState(getEnergy=True, groups=1 << group)
+            energy = float(
+                state.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
+            )
+            components[str(label["label"])] = energy
+            details.append({**label, "energy_kj_mol": energy})
+        return {
+            "components_kj_mol": components,
+            "components": details,
+            "component_sum_kj_mol": float(sum(components.values())),
+        }
+
     def evaluate(
         self,
         *,
         structure=None,
         pose=None,
         restraint_specs: Iterable[DihedralRestraintSpec] = (),
+        collect_energy_components: bool = False,
     ) -> EnergyResult:
         """Minimize and evaluate the energy of a ParmEd Structure using OpenMM."""
         if structure is None:
@@ -302,6 +381,9 @@ class OpenMMEnergyEvaluator(EnergyEvaluator):
         restraint_specs = list(restraint_specs)
         if restraint_specs:
             self._apply_restraints(system, structure, restraint_specs)
+        force_labels = (
+            self._force_component_labels(system) if collect_energy_components else []
+        )
 
         integrator = LangevinIntegrator(
             self.temperature_kelvin * unit.kelvin,
@@ -341,14 +423,30 @@ class OpenMMEnergyEvaluator(EnergyEvaluator):
         energy = state.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
         positions = state.getPositions(asNumpy=True).value_in_unit(unit.angstrom)
         minimized_coordinates = tuple(tuple(float(value) for value in row) for row in positions)
+        metadata = {
+            "restraint_count": len(restraint_specs),
+            "frozen_atom_count": frozen_atom_count,
+            "mobile_dofs": self._mobile_atom_summary(structure),
+        }
+        if collect_energy_components:
+            if force_labels:
+                metadata["energy_components"] = self._collect_energy_components(
+                    simulation,
+                    force_labels,
+                    unit,
+                )
+            else:
+                metadata["energy_components"] = {
+                    "unavailable_reason": (
+                        "OpenMM systems with more than 32 forces cannot be assigned "
+                        "unique force groups for component reporting."
+                    )
+                }
         return EnergyResult(
             backend="openmm",
             energy_kj_mol=float(energy),
             minimized_coordinates_angstrom=minimized_coordinates,
-            metadata={
-                "restraint_count": len(restraint_specs),
-                "frozen_atom_count": frozen_atom_count,
-            },
+            metadata=metadata,
         )
 
 
@@ -388,6 +486,7 @@ class RosettaEnergyEvaluator(EnergyEvaluator):
         structure=None,
         pose=None,
         restraint_specs: Iterable[DihedralRestraintSpec] = (),
+        collect_energy_components: bool = False,
     ) -> EnergyResult:
         """Evaluate the energy of a PyRosetta Pose."""
         self.conversion_service.ensure_pyrosetta_initialized()

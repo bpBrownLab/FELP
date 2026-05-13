@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from pathlib import Path
 from typing import Iterable
 
@@ -44,6 +45,7 @@ class PyRosettaPerturbationProtocol:
     output_dir: str | None = None
     write_pose_pdbs: bool = False
     rosetta_distance_constraint_sd_angstrom: float = 0.001
+    backbone_constraint_tolerance_degrees: float = _LOCKED_CV_TOLERANCE_DEGREES
 
     def _pose_path(self, frame_index: int, suffix: str) -> str:
         if not self.output_dir:
@@ -110,7 +112,7 @@ class PyRosettaPerturbationProtocol:
         ensure_measurement_matches_restraints(
             self._measure_backbone_cvs(pose, restraint_specs),
             restraint_specs,
-            tolerance_degrees=_LOCKED_CV_TOLERANCE_DEGREES,
+            tolerance_degrees=float(self.backbone_constraint_tolerance_degrees),
             context=context,
         )
 
@@ -165,9 +167,20 @@ class PyRosettaPerturbationProtocol:
 
     def _build_mobile_selector(self, pyrosetta):
         selectors = pyrosetta.rosetta.core.select.residue_selector
-        target_selector = selectors.ResidueIndexSelector(str(self.target_residue_number))
         if self.mobility.mode == "target_only":
-            return target_selector
+            return selectors.ResidueIndexSelector(str(self.target_residue_number))
+        if self.mobility.mode == "sequence_window":
+            first_residue = max(
+                1,
+                self.target_residue_number - int(self.mobility.sequence_window),
+            )
+            last_residue = self.target_residue_number + int(
+                self.mobility.sequence_window
+            )
+            return selectors.ResidueIndexSelector(
+                ",".join(str(residue) for residue in range(first_residue, last_residue + 1))
+            )
+        target_selector = selectors.ResidueIndexSelector(str(self.target_residue_number))
         mobile_selector = selectors.NeighborhoodResidueSelector()
         mobile_selector.set_focus_selector(target_selector)
         mobile_selector.set_distance(self.mobility.radius_angstrom)
@@ -228,6 +241,32 @@ class PyRosettaPerturbationProtocol:
             )
             pose.add_constraint(constraint)
 
+    def _add_dihedral_constraints(self, pyrosetta, pose, dihedral_specs) -> None:
+        if not dihedral_specs:
+            return
+        constraints = pyrosetta.rosetta.core.scoring.constraints
+        funcs = pyrosetta.rosetta.core.scoring.func
+        atom_id = pyrosetta.rosetta.core.id.AtomID
+        for spec in dihedral_specs:
+            atom_ids = [
+                atom_id(
+                    pose.residue(residue_number).atom_index(atom_name),
+                    residue_number,
+                )
+                for residue_number, atom_name in zip(spec.residue_numbers, spec.atom_names)
+            ]
+            constraint = constraints.DihedralConstraint(
+                atom_ids[0],
+                atom_ids[1],
+                atom_ids[2],
+                atom_ids[3],
+                funcs.CircularHarmonicFunc(
+                    math.radians(spec.target_angle_degrees),
+                    max(1.0e-3, 1.0 / math.sqrt(max(spec.force_constant, 1.0e-6))),
+                ),
+            )
+            pose.add_constraint(constraint)
+
     def _score_function_with_constraints(self, pyrosetta, score_function):
         if not hasattr(pyrosetta.rosetta, "core"):
             return score_function
@@ -241,6 +280,7 @@ class PyRosettaPerturbationProtocol:
     def _apply_restraints_to_pose(self, pyrosetta, pose, restraint_specs) -> tuple:
         dihedral_specs, distance_specs = self._split_restraint_specs(tuple(restraint_specs))
         self._enforce_target_backbone_cvs(pose, dihedral_specs)
+        self._add_dihedral_constraints(pyrosetta, pose, dihedral_specs)
         self._add_distance_constraints(pyrosetta, pose, distance_specs)
         return dihedral_specs
 
@@ -254,6 +294,8 @@ class PyRosettaPerturbationProtocol:
         self.conversion_service.ensure_pyrosetta_initialized()
         pyrosetta, _, _ = _import_pyrosetta()
         working_pose = pose.clone()
+        if hasattr(working_pose, "remove_constraints"):
+            working_pose.remove_constraints()
         dihedral_specs = self._apply_restraints_to_pose(
             pyrosetta,
             working_pose,

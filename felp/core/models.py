@@ -419,12 +419,42 @@ class RestraintConfig:
     cv_measurement_tolerance_degrees: float = 1.0
     distance_measurement_tolerance_angstrom: float = 0.05
     rosetta_distance_constraint_sd_angstrom: float = 0.001
+    rosetta_target_backbone_restraints: tuple[str, ...] = ()
+    rosetta_backbone_restraint_residue_numbers: tuple[int, ...] = ()
+    rosetta_target_backbone_restraint_force_constant: Optional[float] = None
+    rosetta_target_backbone_restraint_tolerance_degrees: Optional[float] = None
     cv_specs: tuple[CVSpec, ...] = ()
     distance_cv_specs: tuple[DistanceCVSpec, ...] = ()
 
     def __post_init__(self) -> None:
         normalized_specs = tuple(self.cv_specs)
         normalized_distance_specs = tuple(self.distance_cv_specs)
+        normalized_target_backbone_restraints = tuple(
+            dict.fromkeys(
+                str(kind).strip().lower()
+                for kind in self.rosetta_target_backbone_restraints
+                if str(kind).strip()
+            )
+        )
+        unsupported_target_backbone_restraints = sorted(
+            set(normalized_target_backbone_restraints) - BACKBONE_DIHEDRAL_KINDS
+        )
+        normalized_backbone_restraint_residues = tuple(
+            dict.fromkeys(
+                int(residue_number)
+                for residue_number in self.rosetta_backbone_restraint_residue_numbers
+            )
+        )
+        if unsupported_target_backbone_restraints:
+            unsupported = ", ".join(unsupported_target_backbone_restraints)
+            raise ConfigurationError(
+                "rosetta_target_backbone_restraints may only contain phi, psi, "
+                f"or omega; unsupported values: {unsupported}."
+            )
+        if any(residue_number < 1 for residue_number in normalized_backbone_restraint_residues):
+            raise ConfigurationError(
+                "rosetta_backbone_restraint_residue_numbers must be positive pose indices."
+            )
         names = [spec.name for spec in normalized_specs] + [
             spec.name for spec in normalized_distance_specs
         ]
@@ -462,8 +492,32 @@ class RestraintConfig:
             raise ConfigurationError(
                 "rosetta_distance_constraint_sd_angstrom must be positive."
             )
+        if (
+            self.rosetta_target_backbone_restraint_force_constant is not None
+            and self.rosetta_target_backbone_restraint_force_constant <= 0.0
+        ):
+            raise ConfigurationError(
+                "rosetta_target_backbone_restraint_force_constant must be positive when set."
+            )
+        if (
+            self.rosetta_target_backbone_restraint_tolerance_degrees is not None
+            and self.rosetta_target_backbone_restraint_tolerance_degrees <= 0.0
+        ):
+            raise ConfigurationError(
+                "rosetta_target_backbone_restraint_tolerance_degrees must be positive when set."
+            )
         object.__setattr__(self, "cv_specs", normalized_specs)
         object.__setattr__(self, "distance_cv_specs", normalized_distance_specs)
+        object.__setattr__(
+            self,
+            "rosetta_target_backbone_restraints",
+            normalized_target_backbone_restraints,
+        )
+        object.__setattr__(
+            self,
+            "rosetta_backbone_restraint_residue_numbers",
+            normalized_backbone_restraint_residues,
+        )
 
     def effective_rosetta_force_constant(self) -> float:
         """Weighting for Rosetta CircularHarmonic dihedral constraints / CV protocol.
@@ -482,6 +536,13 @@ class RestraintConfig:
         if self.openmm_restraint_force_constant is not None:
             return float(self.openmm_restraint_force_constant)
         return float(self.force_constant)
+
+    def effective_rosetta_target_backbone_force_constant(self) -> float:
+        """Force constant for Rosetta-only target-backbone restraints."""
+
+        if self.rosetta_target_backbone_restraint_force_constant is not None:
+            return float(self.rosetta_target_backbone_restraint_force_constant)
+        return self.effective_rosetta_force_constant()
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "RestraintConfig":
@@ -505,6 +566,18 @@ class RestraintConfig:
             rosetta_distance_constraint_sd_angstrom=payload.get(
                 "rosetta_distance_constraint_sd_angstrom", 0.001
             ),
+            rosetta_target_backbone_restraints=tuple(
+                payload.get("rosetta_target_backbone_restraints", ())
+            ),
+            rosetta_backbone_restraint_residue_numbers=tuple(
+                payload.get("rosetta_backbone_restraint_residue_numbers", ())
+            ),
+            rosetta_target_backbone_restraint_force_constant=payload.get(
+                "rosetta_target_backbone_restraint_force_constant"
+            ),
+            rosetta_target_backbone_restraint_tolerance_degrees=payload.get(
+                "rosetta_target_backbone_restraint_tolerance_degrees"
+            ),
             cv_specs=tuple(
                 CVSpec.from_dict(spec_payload)
                 for spec_payload in payload.get("cv_specs", ())
@@ -522,21 +595,25 @@ class MobilityConfig:
 
     mode: str = "target_only"
     radius_angstrom: float = 0.0
+    sequence_window: int = 0
     include_backbone: bool = False
     include_sidechains: bool = True
 
     def __post_init__(self) -> None:
-        if self.mode not in {"target_only", "radius"}:
+        if self.mode not in {"target_only", "radius", "sequence_window"}:
             raise ConfigurationError(
-                "mobility.mode must be 'target_only' or 'radius'."
+                "mobility.mode must be 'target_only', 'radius', or 'sequence_window'."
             )
         if float(self.radius_angstrom) < 0.0:
             raise ConfigurationError("mobility.radius_angstrom must be non-negative.")
+        if int(self.sequence_window) < 0:
+            raise ConfigurationError("mobility.sequence_window must be non-negative.")
         if not self.include_backbone and not self.include_sidechains:
             raise ConfigurationError(
                 "At least one of mobility.include_backbone/include_sidechains must be enabled."
             )
         object.__setattr__(self, "radius_angstrom", float(self.radius_angstrom))
+        object.__setattr__(self, "sequence_window", int(self.sequence_window))
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "MobilityConfig":
@@ -545,6 +622,7 @@ class MobilityConfig:
         return cls(
             mode=payload.get("mode", "target_only"),
             radius_angstrom=payload.get("radius_angstrom", 0.0),
+            sequence_window=payload.get("sequence_window", 0),
             include_backbone=payload.get("include_backbone", False),
             include_sidechains=payload.get("include_sidechains", True),
         )
@@ -703,6 +781,101 @@ class SamplingConfig:
 
 
 @dataclass(frozen=True)
+class ReweightingQCConfig:
+    """Configuration for by-state reweighting degeneracy checks."""
+
+    policy: str = "flag"
+    method: str = "auto"
+    weight_treatment: str = "raw"
+    min_frame_count: int = 20
+    max_frame_weight_fraction: float = 0.5
+    min_state_ess: float = 5.0
+    max_leave_one_out_shift_kj_mol: float = 10.0
+    max_excluded_frames_per_state: int = 5
+
+    @staticmethod
+    def normalize_weight_treatment(raw: str) -> str:
+        """Normalize reweighting weight-treatment aliases."""
+
+        weight_treatment = str(raw).strip()
+        if weight_treatment == "psis":
+            return "psis-smoothed"
+        return weight_treatment
+
+    def __post_init__(self) -> None:
+        policy = str(self.policy).strip()
+        if policy not in {"none", "flag", "exclude-frames"}:
+            raise ConfigurationError(
+                "reweighting QC policy must be one of: none, flag, exclude-frames."
+            )
+        method = str(self.method).strip()
+        if method not in {"auto", "threshold"}:
+            raise ConfigurationError(
+                "reweighting QC method must be one of: auto, threshold."
+            )
+        weight_treatment = self.normalize_weight_treatment(self.weight_treatment)
+        if weight_treatment not in {"raw", "psis-smoothed"}:
+            raise ConfigurationError(
+                "reweighting weight treatment must be one of: raw, psis-smoothed "
+                "(alias: psis)."
+            )
+        min_frame_count = int(self.min_frame_count)
+        if min_frame_count < 0:
+            raise ConfigurationError("reweighting QC min_frame_count must be non-negative.")
+        max_frame_weight_fraction = float(self.max_frame_weight_fraction)
+        if not 0.0 < max_frame_weight_fraction <= 1.0:
+            raise ConfigurationError(
+                "reweighting QC max_frame_weight_fraction must be in the interval (0, 1]."
+            )
+        min_state_ess = float(self.min_state_ess)
+        if min_state_ess < 0.0:
+            raise ConfigurationError("reweighting QC min_state_ess must be non-negative.")
+        max_leave_one_out_shift = float(self.max_leave_one_out_shift_kj_mol)
+        if max_leave_one_out_shift < 0.0:
+            raise ConfigurationError(
+                "reweighting QC max_leave_one_out_shift_kj_mol must be non-negative."
+            )
+        max_excluded = int(self.max_excluded_frames_per_state)
+        if max_excluded < 0:
+            raise ConfigurationError(
+                "reweighting QC max_excluded_frames_per_state must be non-negative."
+            )
+        object.__setattr__(self, "policy", policy)
+        object.__setattr__(self, "method", method)
+        object.__setattr__(self, "weight_treatment", weight_treatment)
+        object.__setattr__(self, "min_frame_count", min_frame_count)
+        object.__setattr__(
+            self, "max_frame_weight_fraction", max_frame_weight_fraction
+        )
+        object.__setattr__(self, "min_state_ess", min_state_ess)
+        object.__setattr__(
+            self, "max_leave_one_out_shift_kj_mol", max_leave_one_out_shift
+        )
+        object.__setattr__(self, "max_excluded_frames_per_state", max_excluded)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "ReweightingQCConfig":
+        """Rehydrate reweighting QC configuration from a serialized dictionary."""
+
+        return cls(
+            policy=payload.get("policy", "flag"),
+            method=payload.get("method", "auto"),
+            weight_treatment=payload.get("weight_treatment", "raw"),
+            min_frame_count=payload.get("min_frame_count", 20),
+            max_frame_weight_fraction=payload.get(
+                "max_frame_weight_fraction", 0.5
+            ),
+            min_state_ess=payload.get("min_state_ess", 5.0),
+            max_leave_one_out_shift_kj_mol=payload.get(
+                "max_leave_one_out_shift_kj_mol", 10.0
+            ),
+            max_excluded_frames_per_state=payload.get(
+                "max_excluded_frames_per_state", 5
+            ),
+        )
+
+
+@dataclass(frozen=True)
 class ParallelConfig:
     """Configuration for multiprocessing execution."""
 
@@ -736,8 +909,18 @@ class OutputConfig:
     config_dump_name: str = "run_config.json"
     summary_dump_name: str = "run_summary.json"
     write_pose_pdbs: bool = False
+    debug_frame_outputs: bool = False
+    debug_frame_indices: tuple[int, ...] = ()
     overwrite: bool = False
     resume: bool = False
+
+    def __post_init__(self) -> None:
+        normalized_indices = tuple(
+            sorted({int(index) for index in self.debug_frame_indices})
+        )
+        if any(index < 0 for index in normalized_indices):
+            raise ConfigurationError("debug_frame_indices must be non-negative.")
+        object.__setattr__(self, "debug_frame_indices", normalized_indices)
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "OutputConfig":
@@ -757,6 +940,8 @@ class OutputConfig:
             config_dump_name=payload.get("config_dump_name", "run_config.json"),
             summary_dump_name=payload.get("summary_dump_name", "run_summary.json"),
             write_pose_pdbs=payload.get("write_pose_pdbs", False),
+            debug_frame_outputs=payload.get("debug_frame_outputs", False),
+            debug_frame_indices=tuple(payload.get("debug_frame_indices", ())),
             overwrite=payload.get("overwrite", False),
             resume=payload.get("resume", False),
         )
@@ -775,6 +960,7 @@ class RunConfig:
     parallel: ParallelConfig
     output: OutputConfig
     sampling: SamplingConfig = field(default_factory=SamplingConfig)
+    reweighting_qc: ReweightingQCConfig = field(default_factory=ReweightingQCConfig)
     mobility: MobilityConfig = field(default_factory=MobilityConfig)
 
     def validate(self) -> None:
@@ -919,6 +1105,18 @@ class RunConfig:
                 rosetta_distance_constraint_sd_angstrom=(
                     restraints.rosetta_distance_constraint_sd_angstrom
                 ),
+                rosetta_target_backbone_restraints=(
+                    restraints.rosetta_target_backbone_restraints
+                ),
+                rosetta_backbone_restraint_residue_numbers=(
+                    restraints.rosetta_backbone_restraint_residue_numbers
+                ),
+                rosetta_target_backbone_restraint_force_constant=(
+                    restraints.rosetta_target_backbone_restraint_force_constant
+                ),
+                rosetta_target_backbone_restraint_tolerance_degrees=(
+                    restraints.rosetta_target_backbone_restraint_tolerance_degrees
+                ),
                 cv_specs=default_backbone_cv_specs(
                     perturbation.target_residue_number
                 ),
@@ -935,6 +1133,9 @@ class RunConfig:
             parallel=ParallelConfig.from_dict(payload["parallel"]),
             output=OutputConfig.from_dict(payload["output"]),
             sampling=SamplingConfig.from_dict(payload.get("sampling", {})),
+            reweighting_qc=ReweightingQCConfig.from_dict(
+                payload.get("reweighting_qc", {})
+            ),
         )
 
 

@@ -11,7 +11,7 @@ from typing import Iterable
 
 import numpy as np
 
-from felp.core import K_BOLTZMANN_KJ_PER_MOL_K
+from felp.core import ConfigurationError, K_BOLTZMANN_KJ_PER_MOL_K
 
 
 def import_matplotlib():
@@ -163,19 +163,50 @@ def probability_surface_to_free_energy(
 
 _FEL_CAP_OVER_COLOR = "#e8e8e8"
 
+DEFAULT_FEL_COLORMAP = "nipy_spectral_r"
 
-def _copy_viridis_colormap():
-    """Return a mutable viridis colormap without deprecated get_cmap when possible."""
+
+def validate_registered_colormap(name: str) -> str:
+    """Return a stripped matplotlib colormap name or raise ``ConfigurationError``."""
+
+    normalized = str(name).strip()
+    if not normalized:
+        raise ConfigurationError("fel_colormap must be a non-empty string.")
+    import matplotlib as mpl
+    import matplotlib.cm as mpl_cm
+
+    registry = getattr(mpl, "colormaps", None)
+    if registry is not None:
+        if normalized not in registry:
+            raise ConfigurationError(
+                f"Unknown matplotlib colormap {normalized!r} (not in matplotlib colormaps)."
+            )
+        return normalized
+    try:
+        mpl_cm.get_cmap(normalized)
+    except (ValueError, TypeError) as exc:
+        raise ConfigurationError(
+            f"Unknown matplotlib colormap {normalized!r}."
+        ) from exc
+    return normalized
+
+
+def _copy_colormap_for_fel_cap(name: str):
+    """Return a mutable copy of ``name`` with bad/over/under set for energy caps."""
 
     import matplotlib as mpl
     import matplotlib.cm as mpl_cm
 
     registry = getattr(mpl, "colormaps", None)
     if registry is not None:
-        base = registry["viridis"]
+        base = registry[name]
     else:
-        base = mpl_cm.get_cmap("viridis")
-    return base.copy()
+        base = mpl_cm.get_cmap(name)
+    cmap = base.copy()
+    cmap.set_bad(_FEL_CAP_OVER_COLOR)
+    cmap.set_over(_FEL_CAP_OVER_COLOR)
+    cmap.set_under(_FEL_CAP_OVER_COLOR)
+    return cmap
 
 
 def scatter_state_projection(
@@ -190,17 +221,19 @@ def scatter_state_projection(
     *,
     fel_max_energy_kj_mol: float | None = None,
     symmetric_energy_cap: bool = False,
+    colormap: str | None = None,
 ) -> None:
     """Draw a colored scatter plot for state-wise projected values."""
 
     import matplotlib.colors as mcolors
 
+    cmap_name = colormap if colormap is not None else DEFAULT_FEL_COLORMAP
     values_plot = np.ma.masked_invalid(np.asarray(values, dtype=float))
     scatter_kwargs: dict = {
         "x": x,
         "y": y,
         "c": values_plot,
-        "cmap": "viridis",
+        "cmap": cmap_name,
         "s": 60,
         "edgecolors": "black",
         "linewidths": 0.3,
@@ -208,11 +241,7 @@ def scatter_state_projection(
     colorbar_extend: str | None = None
     if fel_max_energy_kj_mol is not None:
         cap = float(fel_max_energy_kj_mol)
-        cmap = _copy_viridis_colormap()
-        cmap.set_bad(_FEL_CAP_OVER_COLOR)
-        cmap.set_over(_FEL_CAP_OVER_COLOR)
-        cmap.set_under(_FEL_CAP_OVER_COLOR)
-        scatter_kwargs["cmap"] = cmap
+        scatter_kwargs["cmap"] = _copy_colormap_for_fel_cap(cmap_name)
         if symmetric_energy_cap:
             scatter_kwargs["norm"] = mcolors.Normalize(
                 vmin=-cap, vmax=cap, clip=False
@@ -242,19 +271,19 @@ def save_pcolormesh_landscape(
     xlabel: str,
     ylabel: str,
     fel_max_energy_kj_mol: float | None = None,
+    colormap: str | None = None,
 ) -> str:
     """Render a 2D surface on a histogram grid (e.g. probability or free energy)."""
 
     import matplotlib.colors as mcolors
 
+    cmap_name = colormap if colormap is not None else DEFAULT_FEL_COLORMAP
     fig, ax = plt.subplots(1, 1)
     z_plot = np.ma.masked_invalid(np.asarray(z, dtype=float).T)
     colorbar_extend: str | None = None
     if fel_max_energy_kj_mol is not None:
         cap = float(fel_max_energy_kj_mol)
-        cmap = _copy_viridis_colormap()
-        cmap.set_bad(_FEL_CAP_OVER_COLOR)
-        cmap.set_over(_FEL_CAP_OVER_COLOR)
+        cmap = _copy_colormap_for_fel_cap(cmap_name)
         image = ax.pcolormesh(
             x_edges,
             y_edges,
@@ -270,7 +299,7 @@ def save_pcolormesh_landscape(
             y_edges,
             z_plot,
             shading="auto",
-            cmap="viridis",
+            cmap=cmap_name,
         )
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)

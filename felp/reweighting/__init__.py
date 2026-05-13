@@ -6,7 +6,11 @@ from .assignment import (
     PhiPsiAssignmentPolicy,
     PrecomputedStateAssignmentPolicy,
 )
-from .aggregator import ReweightingAggregator, is_reweighting_eligible_frame
+from .aggregator import (
+    ReweightingAggregator,
+    is_reweighting_eligible_frame,
+    psis_smooth_weights,
+)
 from .atlas import MicrostateAtlas, generate_phi_psi_grid, load_microstate_definitions
 from .auto_microstates import (
     AutoMicrostateFile,
@@ -39,6 +43,7 @@ __all__ = [
     "load_or_create_sampling_manifest",
     "load_microstate_definitions",
     "manifest_counts_for_atlas",
+    "psis_smooth_weights",
     "selected_jobs_from_manifest",
     "write_auto_microstate_file",
 ]

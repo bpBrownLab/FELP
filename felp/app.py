@@ -15,6 +15,7 @@ from felp.cli import (
     build_msm_plot_config,
     build_msm_sample_export_config,
     build_parser,
+    build_reweighting_qc_config,
     build_run_config,
 )
 from felp.core import OutputConfig
@@ -22,6 +23,7 @@ from felp.io import ResultsWriter, TrajectoryLoader, load_frame_results_csv
 from felp.msm import PyEMMAPipeline, export_state_samples, load_bundle
 from felp.parallel import FrameExecutor
 from felp.plotting import generate_felp_plots, generate_msm_plots
+from felp.protocol_summary import build_protocol_summary
 from felp.reweighting import (
     MicrostateAtlas,
     PrecomputedStateAssignmentPolicy,
@@ -139,6 +141,13 @@ def _build_overlap_diagnostics(metadata: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _build_reweighting_qc_summary(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Return the shared by-state reweighting QC summary."""
+
+    qc_summary = metadata.get("reweighting_qc")
+    return dict(qc_summary) if isinstance(qc_summary, dict) else {}
+
+
 def _format_overlap_metric(value: float) -> str:
     """Return a compact numeric string for advisory messages."""
 
@@ -221,6 +230,7 @@ def _build_reweighting_summary(
 
     metadata = _shared_microstate_metadata(microstate_results)
     overlap_diagnostics = _build_overlap_diagnostics(metadata)
+    reweighting_qc = _build_reweighting_qc_summary(metadata)
     overlap_assessment, overlap_assessment_reasons = _assess_overlap_diagnostics(
         overlap_diagnostics
     )
@@ -243,6 +253,7 @@ def _build_reweighting_summary(
         "overlap_assessment": overlap_assessment,
         "overlap_assessment_reasons": overlap_assessment_reasons,
         "overlap_diagnostics": overlap_diagnostics,
+        "reweighting_qc": reweighting_qc,
         "output_dir": output_dir,
     }
 
@@ -297,7 +308,10 @@ def run_pipeline(config) -> dict:
         key=lambda item: item.frame_index,
     )
 
-    aggregator = ReweightingAggregator(config.energy.temperature_kelvin)
+    aggregator = ReweightingAggregator(
+        config.energy.temperature_kelvin,
+        qc_config=config.reweighting_qc,
+    )
     sampling_metadata = sampling_manifest.metadata()
     reference_counts = (
         manifest_counts_for_atlas(sampling_manifest, atlas)
@@ -369,6 +383,7 @@ def run_pipeline(config) -> dict:
             "auto_microstate_metadata": (
                 None if auto_microstate_file is None else auto_microstate_file.metadata
             ),
+            "protocol": build_protocol_summary(config),
         }
     )
     writer.write_summary(summary)
@@ -416,7 +431,10 @@ def summarize_results(namespace) -> dict:
         sampling_manifest.metadata() if sampling_manifest is not None else None
     )
 
-    microstate_results = ReweightingAggregator(namespace.temperature_kelvin).aggregate(
+    microstate_results = ReweightingAggregator(
+        namespace.temperature_kelvin,
+        qc_config=build_reweighting_qc_config(namespace),
+    ).aggregate(
         frame_results,
         atlas,
         reference_counts=reference_counts,

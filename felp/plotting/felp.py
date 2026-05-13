@@ -12,11 +12,12 @@ from typing import Any
 
 import numpy as np
 
-from felp.core import ConfigurationError, K_BOLTZMANN_KJ_PER_MOL_K
+from felp.core import ConfigurationError, K_BOLTZMANN_KJ_PER_MOL_K, ReweightingQCConfig
 from felp.io import load_frame_results_csv
-from felp.reweighting import is_reweighting_eligible_frame
+from felp.reweighting import is_reweighting_eligible_frame, psis_smooth_weights
 
 from .common import (
+    DEFAULT_FEL_COLORMAP,
     apply_publication_style,
     finite_top_indices,
     free_energy_from_probabilities,
@@ -27,12 +28,15 @@ from .common import (
     read_csv_rows,
     save_pcolormesh_landscape,
     scatter_state_projection,
+    validate_registered_colormap,
     write_json,
 )
 
 _KJ_PER_KCAL = 4.184
 _ANGULAR_CV_NAMES = {"phi", "psi", "omega"}
 _DEFAULT_DIHEDRAL_CV_NAMES = {"phi", "psi"}
+_FEL_ESTIMATORS = {"histogram", "gaussian-kernel"}
+_FEL_BANDWIDTH_RULES = {"scott", "silverman"}
 
 
 def _normalize_cv_name(raw: str) -> str:
@@ -61,6 +65,32 @@ def _plot_energy_display_scale_and_label(plot_energy_unit: str) -> tuple[float, 
     )
 
 
+def _parse_fel_bandwidth(raw: str) -> tuple[float, float] | None:
+    """Parse an automatic or fixed 2D FEL kernel bandwidth specification."""
+
+    value = str(raw).strip()
+    if value == "auto":
+        return None
+    parts = [part.strip() for part in value.split(",")]
+    if len(parts) not in {1, 2} or any(not part for part in parts):
+        raise ConfigurationError(
+            "fel_bandwidth must be 'auto', one positive float, or two comma-separated "
+            "positive floats."
+        )
+    try:
+        parsed = tuple(float(part) for part in parts)
+    except ValueError as exc:
+        raise ConfigurationError(
+            "fel_bandwidth must be 'auto', one positive float, or two comma-separated "
+            "positive floats."
+        ) from exc
+    if any(value <= 0.0 or not math.isfinite(value) for value in parsed):
+        raise ConfigurationError("fel_bandwidth values must be positive finite floats.")
+    if len(parsed) == 1:
+        return (parsed[0], parsed[0])
+    return (parsed[0], parsed[1])
+
+
 @dataclass(frozen=True)
 class FELPPlotConfig:
     """Configuration for plotting post-processing FELP outputs."""
@@ -77,6 +107,21 @@ class FELPPlotConfig:
 
     plot_energy_unit: str = "kj_mol"
     """Display unit for energies on plots: ``kj_mol`` (default) or ``kcal_mol``."""
+
+    fel_estimator: str = "histogram"
+    """Projected frame-density estimator: ``histogram`` or ``gaussian-kernel``."""
+
+    fel_bandwidth: str = "auto"
+    """Gaussian-kernel bandwidth: ``auto``, one float, or ``x,y`` floats."""
+
+    fel_bandwidth_rule: str = "scott"
+    """Automatic bandwidth rule for Gaussian-kernel projected FELs."""
+
+    fel_colormap: str = DEFAULT_FEL_COLORMAP
+    """Matplotlib colormap for CV free-energy heatmaps and probability projections."""
+
+    weight_treatment: str | None = None
+    """Optional override for frame-projected reweighting weights."""
 
     cv_x: str | None = None
     """Optional CV name (or full distance-cv spec) for the x-axis of 2D FEL/CV plots."""
@@ -113,6 +158,36 @@ class FELPPlotConfig:
             raise ConfigurationError("fel_max_points must be at least 1.")
         if self.fel_max_energy_kj_mol is not None and self.fel_max_energy_kj_mol <= 0.0:
             raise ConfigurationError("fel_max_energy_kj_mol must be positive when set.")
+        fel_estimator = str(self.fel_estimator).strip()
+        if fel_estimator not in _FEL_ESTIMATORS:
+            raise ConfigurationError(
+                "fel_estimator must be one of: histogram, gaussian-kernel."
+            )
+        object.__setattr__(self, "fel_estimator", fel_estimator)
+        fel_bandwidth = str(self.fel_bandwidth).strip()
+        _parse_fel_bandwidth(fel_bandwidth)
+        object.__setattr__(self, "fel_bandwidth", fel_bandwidth)
+        fel_bandwidth_rule = str(self.fel_bandwidth_rule).strip()
+        if fel_bandwidth_rule not in _FEL_BANDWIDTH_RULES:
+            raise ConfigurationError(
+                "fel_bandwidth_rule must be one of: scott, silverman."
+            )
+        object.__setattr__(self, "fel_bandwidth_rule", fel_bandwidth_rule)
+        object.__setattr__(
+            self,
+            "fel_colormap",
+            validate_registered_colormap(self.fel_colormap),
+        )
+        if self.weight_treatment is not None:
+            weight_treatment = ReweightingQCConfig.normalize_weight_treatment(
+                self.weight_treatment
+            )
+            if weight_treatment not in {"raw", "psis-smoothed"}:
+                raise ConfigurationError(
+                    "weight_treatment must be one of: raw, psis-smoothed "
+                    "(alias: psis)."
+                )
+            object.__setattr__(self, "weight_treatment", weight_treatment)
         if self.cv_x is not None:
             object.__setattr__(self, "cv_x", _normalize_cv_name(self.cv_x))
         if self.cv_y is not None:
@@ -203,6 +278,11 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
         target_probabilities,
     )
     summary_metadata = _load_microstate_summary_metadata(rows)
+    summary_weight_treatment = _summary_weight_treatment(summary_metadata)
+    frame_projection_weight_treatment = (
+        config.weight_treatment or summary_weight_treatment
+    )
+    excluded_frame_indices_by_state = _excluded_frame_indices_by_state(rows)
     frame_results = (
         load_frame_results_csv(config.raw_frame_results_csv)
         if config.raw_frame_results_csv
@@ -259,6 +339,7 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
                 output_dir=config.output_dir,
                 fel_max_energy_display=fel_max_display,
                 energy_unit_label=energy_unit_label,
+                fel_colormap=config.fel_colormap,
             )
         )
 
@@ -280,33 +361,51 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
                 energy_scale=energy_scale,
                 energy_unit_label=energy_unit_label,
                 fel_max_energy_display=fel_max_display,
+                fel_colormap=config.fel_colormap,
             )
         )
 
     frame_projection_available = False
+    frame_projection_metadata: dict[str, object] = {
+        "cv_frame_projection_estimator": config.fel_estimator,
+        "cv_frame_projection_kernel": None,
+        "cv_frame_projection_bandwidth": None,
+        "cv_frame_projection_bandwidth_rule": None,
+        "cv_frame_projection_state_mass_preserved": False,
+    }
     if frame_results is not None:
+        plot_frame_results = _filter_qc_excluded_frame_results(
+            frame_results,
+            excluded_frame_indices_by_state,
+        )
         outputs.append(
             _plot_delta_u_distribution(
                 plt=plt,
-                frame_results=frame_results,
+                frame_results=plot_frame_results,
                 output_dir=config.output_dir,
                 energy_scale=energy_scale,
                 energy_unit_label=energy_unit_label,
             )
         )
         if cv_axes is not None:
-            projected_outputs = _plot_cv_projected_landscapes(
+            projected_outputs, frame_projection_metadata = _plot_cv_projected_landscapes(
                 plt=plt,
-                frame_results=frame_results,
+                frame_results=plot_frame_results,
                 state_ids=state_ids,
                 reference_probabilities=reference_probabilities,
+                target_probabilities=target_probabilities,
                 temperature_kelvin=config.temperature_kelvin,
+                weight_treatment=frame_projection_weight_treatment,
+                fel_estimator=config.fel_estimator,
+                fel_bandwidth=config.fel_bandwidth,
+                fel_bandwidth_rule=config.fel_bandwidth_rule,
                 bins=config.fel_bins,
                 max_points=config.fel_max_points,
                 output_dir=config.output_dir,
                 energy_scale=energy_scale,
                 energy_unit_label=energy_unit_label,
                 fel_max_energy_display=fel_max_display,
+                fel_colormap=config.fel_colormap,
                 x_name=cv_axes.x_name,
                 y_name=cv_axes.y_name,
             )
@@ -329,6 +428,7 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
                 energy_scale=energy_scale,
                 energy_unit_label=energy_unit_label,
                 fel_max_energy_display=fel_max_display,
+                fel_colormap=config.fel_colormap,
             )
         )
 
@@ -342,28 +442,66 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
         "overlap_coefficient": float(overlap_coefficient),
         "reference_probability_source": summary_metadata.get("reference_probability_source"),
         "prior_probability_mode": summary_metadata.get("prior_probability_mode"),
+        "reweighting_qc": summary_metadata.get("reweighting_qc"),
         "cv_axes": (
             [cv_axes.x_name, cv_axes.y_name] if cv_axes is not None else []
         ),
         "cv_axis_source": cv_axes.source if cv_axes is not None else None,
         "cv_frame_projection_available": frame_projection_available,
-        "cv_frame_projection_estimator": (
-            "w_ij proportional to pi_reference(i) * exp(-beta * delta_u_ij) / n_i"
+        "cv_frame_projection_estimator": frame_projection_metadata.get(
+            "cv_frame_projection_estimator",
+            config.fel_estimator,
+        ),
+        "cv_frame_projection_estimator_detail": (
+            "w_ij proportional to pi_reference(i) * "
+            f"{frame_projection_weight_treatment} exp(-beta * delta_u_ij) / n_i"
+        ),
+        "cv_frame_projection_weight_treatment": frame_projection_weight_treatment,
+        "cv_frame_projection_weight_treatment_source": (
+            "cli_override" if config.weight_treatment is not None else "microstate_summary"
+        ),
+        "cv_frame_projection_kernel": frame_projection_metadata.get(
+            "cv_frame_projection_kernel"
+        ),
+        "cv_frame_projection_bandwidth": frame_projection_metadata.get(
+            "cv_frame_projection_bandwidth"
+        ),
+        "cv_frame_projection_bandwidth_rule": frame_projection_metadata.get(
+            "cv_frame_projection_bandwidth_rule"
+        ),
+        "cv_frame_projection_state_mass_preserved": frame_projection_metadata.get(
+            "cv_frame_projection_state_mass_preserved",
+            False,
+        ),
+        "cv_frame_projection_excluded_frame_count": sum(
+            len(indices) for indices in excluded_frame_indices_by_state.values()
         ),
         "state_reweighting_estimator": (
             "pi_target(i) proportional to "
-            "pi_reference(i) * <exp(-beta * delta_u)>_i"
+            f"pi_reference(i) * <{summary_weight_treatment} exp(-beta * delta_u)>_i"
         ),
+        "state_reweighting_weight_treatment": summary_weight_treatment,
         "fel_max_energy_kj_mol": config.fel_max_energy_kj_mol,
+        "fel_colormap": config.fel_colormap,
         "plot_energy_unit": config.plot_energy_unit,
         "generated_files": outputs,
     }
+    summary.update(
+        {
+            key: value
+            for key, value in frame_projection_metadata.items()
+            if key not in summary
+        }
+    )
     if cv_axes is not None and (cv_axes.x_name, cv_axes.y_name) == ("phi", "psi"):
         summary.update(
             {
                 "phi_psi_frame_projection_available": frame_projection_available,
-                "phi_psi_frame_projection_estimator": (
-                    "w_ij proportional to pi_reference(i) * exp(-beta * delta_u_ij) / n_i"
+                "phi_psi_frame_projection_estimator": summary[
+                    "cv_frame_projection_estimator"
+                ],
+                "phi_psi_frame_projection_estimator_detail": (
+                    summary["cv_frame_projection_estimator_detail"]
                 ),
             }
         )
@@ -547,6 +685,61 @@ def _load_microstate_summary_metadata(rows: list[dict[str, str]]) -> dict[str, o
     return {}
 
 
+def _summary_weight_treatment(metadata: dict[str, object]) -> str:
+    """Return the recorded reweighting weight treatment."""
+
+    raw_treatment = metadata.get("reweighting_weight_treatment")
+    if isinstance(raw_treatment, str) and raw_treatment in {"raw", "psis-smoothed"}:
+        return raw_treatment
+    qc_metadata = metadata.get("reweighting_qc")
+    if isinstance(qc_metadata, dict):
+        qc_treatment = qc_metadata.get("weight_treatment")
+        if isinstance(qc_treatment, str) and qc_treatment in {"raw", "psis-smoothed"}:
+            return qc_treatment
+    return "raw"
+
+
+def _excluded_frame_indices_by_state(
+    rows: list[dict[str, str]],
+) -> dict[str, set[int]]:
+    """Return QC-excluded frame indices keyed by state id."""
+
+    excluded: dict[str, set[int]] = {}
+    for row in rows:
+        state_id = row.get("state_id", row.get("label", ""))
+        if not state_id:
+            continue
+        metadata = _row_metadata(row)
+        raw_indices = metadata.get("excluded_frame_indices")
+        if not isinstance(raw_indices, list):
+            continue
+        indices: set[int] = set()
+        for value in raw_indices:
+            try:
+                indices.add(int(value))
+            except (TypeError, ValueError):
+                continue
+        if indices:
+            excluded[state_id] = indices
+    return excluded
+
+
+def _filter_qc_excluded_frame_results(
+    frame_results,
+    excluded_frame_indices_by_state: dict[str, set[int]],
+):
+    """Drop frame results excluded by the reweighting QC summary."""
+
+    if not excluded_frame_indices_by_state:
+        return frame_results
+    return [
+        result
+        for result in frame_results
+        if result.frame_index
+        not in excluded_frame_indices_by_state.get(result.microstate_id, set())
+    ]
+
+
 def _safe_probabilities(values: np.ndarray) -> np.ndarray:
     """Clip probabilities away from zero for divergence calculations."""
 
@@ -670,6 +863,7 @@ def _plot_projected_state_quantities(
     *,
     fel_max_energy_display: float | None,
     energy_unit_label: str,
+    fel_colormap: str,
 ) -> list[str]:
     """Plot state quantities projected onto reduced-space coordinates."""
 
@@ -706,6 +900,7 @@ def _plot_projected_state_quantities(
             "values": values[mask],
             "colorbar_label": colorbar_label,
             "title": title,
+            "colormap": fel_colormap,
         }
         if cap_delta and fel_max_energy_display is not None:
             scatter_kwargs["fel_max_energy_kj_mol"] = fel_max_energy_display
@@ -833,6 +1028,7 @@ def _plot_cv_state_landscapes(
     energy_scale: float,
     energy_unit_label: str,
     fel_max_energy_display: float | None,
+    fel_colormap: str,
 ) -> list[str]:
     """Build 2D CV free energy surfaces from discrete state probabilities."""
 
@@ -882,6 +1078,7 @@ def _plot_cv_state_landscapes(
             xlabel=_cv_axis_label(x_name),
             ylabel=_cv_axis_label(y_name),
             fel_max_energy_kj_mol=fel_max_energy_display,
+            colormap=fel_colormap,
         )
     )
     outputs.append(
@@ -896,6 +1093,7 @@ def _plot_cv_state_landscapes(
             xlabel=_cv_axis_label(x_name),
             ylabel=_cv_axis_label(y_name),
             fel_max_energy_kj_mol=fel_max_energy_display,
+            colormap=fel_colormap,
         )
     )
     return outputs
@@ -923,23 +1121,21 @@ def _sample_state_projection_points(
     return sampled
 
 
-def _collect_cv_projection_samples(
+def _collect_cv_projection_state_samples(
     *,
     frame_results,
-    reference_probability_by_state: dict[str, float],
-    temperature_kelvin: float,
-    max_points: int,
+    state_ids: set[str],
     x_name: str,
     y_name: str,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
-    """Collect exact 2D CV frame samples with state-consistent reference weights."""
+) -> tuple[dict[str, list[tuple[float, float, float]]], list[float]] | None:
+    """Collect finite frame CV samples keyed by microstate id."""
 
     grouped: dict[str, list[tuple[float, float, float]]] = defaultdict(list)
     eligible_delta_values: list[float] = []
     for result in frame_results:
         if not is_reweighting_eligible_frame(result):
             continue
-        if result.microstate_id not in reference_probability_by_state:
+        if result.microstate_id not in state_ids:
             continue
         x_value = _frame_cv_value(result, x_name)
         y_value = _frame_cv_value(result, y_name)
@@ -958,6 +1154,30 @@ def _collect_cv_projection_samples(
 
     if not eligible_delta_values:
         return None
+    return grouped, eligible_delta_values
+
+
+def _collect_cv_projection_samples(
+    *,
+    frame_results,
+    reference_probability_by_state: dict[str, float],
+    temperature_kelvin: float,
+    weight_treatment: str,
+    max_points: int,
+    x_name: str,
+    y_name: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
+    """Collect exact 2D CV frame samples with state-consistent reference weights."""
+
+    collected = _collect_cv_projection_state_samples(
+        frame_results=frame_results,
+        state_ids=set(reference_probability_by_state),
+        x_name=x_name,
+        y_name=y_name,
+    )
+    if collected is None:
+        return None
+    grouped, eligible_delta_values = collected
 
     missing_positive_prior = [
         state_id
@@ -980,14 +1200,24 @@ def _collect_cv_projection_samples(
         if sample_count == 0:
             continue
         reference_probability = reference_probability_by_state.get(state_id, 0.0)
-        for x_value, y_value, delta_u in samples:
+        delta_values = np.asarray([sample[2] for sample in samples], dtype=float)
+        local_delta_shift = float(delta_values.min())
+        treated_weights = np.exp(-beta * (delta_values - local_delta_shift))
+        if weight_treatment == "psis-smoothed":
+            treated_weights, _ = psis_smooth_weights(treated_weights)
+        treated_weights = (
+            math.exp(-beta * (local_delta_shift - delta_shift)) * treated_weights
+        )
+        for (x_value, y_value, _), treated_weight in zip(
+            samples,
+            treated_weights,
+            strict=True,
+        ):
             x_values.append(x_value)
             y_values.append(y_value)
             reference_weights.append(reference_probability / sample_count)
             reweighted_weights.append(
-                reference_probability
-                * math.exp(-beta * (delta_u - delta_shift))
-                / sample_count
+                reference_probability * float(treated_weight) / sample_count
             )
 
     if not x_values:
@@ -1001,59 +1231,381 @@ def _collect_cv_projection_samples(
     )
 
 
+def _weighted_effective_sample_size(weights: np.ndarray) -> float:
+    """Return ESS for non-negative analysis weights."""
+
+    finite_weights = np.asarray(weights[np.isfinite(weights)], dtype=float)
+    positive_weights = finite_weights[finite_weights > 0.0]
+    if positive_weights.size == 0:
+        return 0.0
+    weight_sum = float(positive_weights.sum())
+    square_sum = float(np.square(positive_weights).sum())
+    return float((weight_sum**2) / square_sum) if square_sum > 0.0 else 0.0
+
+
+def _weighted_standard_deviation(values: np.ndarray, weights: np.ndarray) -> float:
+    """Return a finite weighted standard deviation with unweighted fallback."""
+
+    finite = np.isfinite(values) & np.isfinite(weights) & (weights > 0.0)
+    if not finite.any():
+        fallback = values[np.isfinite(values)]
+        return float(fallback.std(ddof=0)) if fallback.size else 0.0
+    finite_values = values[finite]
+    finite_weights = weights[finite]
+    weight_sum = float(finite_weights.sum())
+    if weight_sum <= 0.0:
+        return float(finite_values.std(ddof=0)) if finite_values.size else 0.0
+    normalized_weights = finite_weights / weight_sum
+    mean = float(np.sum(normalized_weights * finite_values))
+    variance = float(np.sum(normalized_weights * np.square(finite_values - mean)))
+    return math.sqrt(max(variance, 0.0))
+
+
+def _resolve_kernel_bandwidth(
+    *,
+    x_values: np.ndarray,
+    y_values: np.ndarray,
+    reference_weights: np.ndarray,
+    target_weights: np.ndarray,
+    x_edges: np.ndarray,
+    y_edges: np.ndarray,
+    bandwidth_spec: str,
+    bandwidth_rule: str,
+) -> tuple[tuple[float, float], dict[str, object]]:
+    """Resolve a fixed or automatic Gaussian-kernel bandwidth."""
+
+    fixed_bandwidth = _parse_fel_bandwidth(bandwidth_spec)
+    x_bin_width = float(np.median(np.diff(x_edges)))
+    y_bin_width = float(np.median(np.diff(y_edges)))
+    reference_ess = _weighted_effective_sample_size(reference_weights)
+    target_ess = _weighted_effective_sample_size(target_weights)
+    if fixed_bandwidth is not None:
+        return fixed_bandwidth, {
+            "cv_frame_projection_bandwidth": list(fixed_bandwidth),
+            "cv_frame_projection_bandwidth_rule": "fixed",
+            "cv_frame_projection_bandwidth_source": "cli",
+            "cv_frame_projection_reference_ess": reference_ess,
+            "cv_frame_projection_target_ess": target_ess,
+        }
+
+    positive_ess = [value for value in (reference_ess, target_ess) if value > 0.0]
+    effective_sample_size = min(positive_ess) if positive_ess else 1.0
+    dimension = 2.0
+    if bandwidth_rule == "silverman":
+        factor = (effective_sample_size * (dimension + 2.0) / 4.0) ** (
+            -1.0 / (dimension + 4.0)
+        )
+    else:
+        factor = effective_sample_size ** (-1.0 / (dimension + 4.0))
+
+    combined_weights = np.asarray(reference_weights, dtype=float) + np.asarray(
+        target_weights,
+        dtype=float,
+    )
+    x_std = _weighted_standard_deviation(x_values, combined_weights)
+    y_std = _weighted_standard_deviation(y_values, combined_weights)
+    x_bandwidth = max(x_bin_width, x_std * factor)
+    y_bandwidth = max(y_bin_width, y_std * factor)
+    return (float(x_bandwidth), float(y_bandwidth)), {
+        "cv_frame_projection_bandwidth": [float(x_bandwidth), float(y_bandwidth)],
+        "cv_frame_projection_bandwidth_rule": bandwidth_rule,
+        "cv_frame_projection_bandwidth_source": "auto",
+        "cv_frame_projection_reference_ess": reference_ess,
+        "cv_frame_projection_target_ess": target_ess,
+        "cv_frame_projection_effective_sample_size_for_bandwidth": (
+            effective_sample_size
+        ),
+        "cv_frame_projection_minimum_bandwidth": [x_bin_width, y_bin_width],
+    }
+
+
+def _state_kernel_probability_grid(
+    *,
+    x_values: np.ndarray,
+    y_values: np.ndarray,
+    weights: np.ndarray,
+    x_centers: np.ndarray,
+    y_centers: np.ndarray,
+    bandwidth: tuple[float, float],
+    chunk_size: int = 2048,
+) -> np.ndarray:
+    """Return a finite-grid normalized separable Gaussian kernel probability grid."""
+
+    normalized_weights = np.asarray(weights, dtype=float)
+    weight_sum = float(normalized_weights.sum())
+    if weight_sum <= 0.0:
+        return np.zeros((x_centers.size, y_centers.size), dtype=float)
+    normalized_weights = normalized_weights / weight_sum
+
+    x_bandwidth, y_bandwidth = bandwidth
+    density = np.zeros((x_centers.size, y_centers.size), dtype=float)
+    for start in range(0, x_values.size, chunk_size):
+        stop = min(start + chunk_size, x_values.size)
+        x_chunk = x_values[start:stop]
+        y_chunk = y_values[start:stop]
+        weight_chunk = normalized_weights[start:stop]
+        x_kernel = np.exp(
+            -0.5 * np.square((x_chunk[:, None] - x_centers[None, :]) / x_bandwidth)
+        )
+        y_kernel = np.exp(
+            -0.5 * np.square((y_chunk[:, None] - y_centers[None, :]) / y_bandwidth)
+        )
+        density += (x_kernel * weight_chunk[:, None]).T @ y_kernel
+
+    density_sum = float(density.sum())
+    return density / density_sum if density_sum > 0.0 else density
+
+
+def _gaussian_kernel_projected_surfaces(
+    *,
+    frame_results,
+    reference_probability_by_state: dict[str, float],
+    target_probability_by_state: dict[str, float],
+    temperature_kelvin: float,
+    weight_treatment: str,
+    bins: int,
+    max_points: int,
+    x_name: str,
+    y_name: str,
+    bandwidth_spec: str,
+    bandwidth_rule: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, object]] | None:
+    """Estimate state-mass-preserving projected reference/target probability grids."""
+
+    state_ids = set(reference_probability_by_state) | set(target_probability_by_state)
+    collected = _collect_cv_projection_state_samples(
+        frame_results=frame_results,
+        state_ids=state_ids,
+        x_name=x_name,
+        y_name=y_name,
+    )
+    if collected is None:
+        return None
+    grouped, _ = collected
+    missing_positive_prior = [
+        state_id
+        for state_id in state_ids
+        if (
+            reference_probability_by_state.get(state_id, 0.0) > 0.0
+            or target_probability_by_state.get(state_id, 0.0) > 0.0
+        )
+        and not grouped.get(state_id)
+    ]
+    if missing_positive_prior:
+        return None
+
+    sampled = _sample_state_projection_points(grouped, max_points)
+    flattened = [sample for samples in sampled.values() for sample in samples]
+    if not flattened:
+        return None
+    all_x_values = np.asarray([sample[0] for sample in flattened], dtype=float)
+    all_y_values = np.asarray([sample[1] for sample in flattened], dtype=float)
+    _, x_edges, y_edges = np.histogram2d(
+        all_x_values,
+        all_y_values,
+        bins=bins,
+        range=_axis_range(x_name, y_name),
+    )
+    x_centers = (x_edges[:-1] + x_edges[1:]) / 2.0
+    y_centers = (y_edges[:-1] + y_edges[1:]) / 2.0
+
+    beta = 1.0 / (K_BOLTZMANN_KJ_PER_MOL_K * temperature_kelvin)
+    reference_grid = np.zeros((x_centers.size, y_centers.size), dtype=float)
+    target_grid = np.zeros_like(reference_grid)
+    bandwidth_x_values: list[float] = []
+    bandwidth_y_values: list[float] = []
+    bandwidth_reference_weights: list[float] = []
+    bandwidth_target_weights: list[float] = []
+
+    state_payloads = []
+    for state_id, samples in sampled.items():
+        if not samples:
+            continue
+        state_x = np.asarray([sample[0] for sample in samples], dtype=float)
+        state_y = np.asarray([sample[1] for sample in samples], dtype=float)
+        delta_values = np.asarray([sample[2] for sample in samples], dtype=float)
+        reference_probability = reference_probability_by_state.get(state_id, 0.0)
+        target_probability = target_probability_by_state.get(state_id, 0.0)
+
+        reference_weights = np.full(state_x.size, 1.0 / state_x.size, dtype=float)
+        local_delta_shift = float(delta_values.min())
+        target_weights = np.exp(-beta * (delta_values - local_delta_shift))
+        if weight_treatment == "psis-smoothed":
+            target_weights, _ = psis_smooth_weights(target_weights)
+        target_weight_sum = float(target_weights.sum())
+        target_conditional = (
+            target_weights / target_weight_sum
+            if target_weight_sum > 0.0
+            else np.zeros_like(target_weights)
+        )
+
+        state_payloads.append(
+            (
+                state_x,
+                state_y,
+                reference_weights,
+                target_weights,
+                reference_probability,
+                target_probability,
+            )
+        )
+        bandwidth_x_values.extend(float(value) for value in state_x)
+        bandwidth_y_values.extend(float(value) for value in state_y)
+        bandwidth_reference_weights.extend(
+            float(reference_probability * value) for value in reference_weights
+        )
+        bandwidth_target_weights.extend(
+            float(target_probability * value) for value in target_conditional
+        )
+
+    bandwidth, bandwidth_metadata = _resolve_kernel_bandwidth(
+        x_values=np.asarray(bandwidth_x_values, dtype=float),
+        y_values=np.asarray(bandwidth_y_values, dtype=float),
+        reference_weights=np.asarray(bandwidth_reference_weights, dtype=float),
+        target_weights=np.asarray(bandwidth_target_weights, dtype=float),
+        x_edges=x_edges,
+        y_edges=y_edges,
+        bandwidth_spec=bandwidth_spec,
+        bandwidth_rule=bandwidth_rule,
+    )
+
+    for (
+        state_x,
+        state_y,
+        reference_weights,
+        target_weights,
+        reference_probability,
+        target_probability,
+    ) in state_payloads:
+        reference_grid += reference_probability * _state_kernel_probability_grid(
+            x_values=state_x,
+            y_values=state_y,
+            weights=reference_weights,
+            x_centers=x_centers,
+            y_centers=y_centers,
+            bandwidth=bandwidth,
+        )
+        target_grid += target_probability * _state_kernel_probability_grid(
+            x_values=state_x,
+            y_values=state_y,
+            weights=target_weights,
+            x_centers=x_centers,
+            y_centers=y_centers,
+            bandwidth=bandwidth,
+        )
+
+    reference_total = float(reference_grid.sum())
+    target_total = float(target_grid.sum())
+    if reference_total > 0.0:
+        reference_grid = reference_grid / reference_total
+    if target_total > 0.0:
+        target_grid = target_grid / target_total
+
+    metadata = {
+        **bandwidth_metadata,
+        "cv_frame_projection_estimator": "state_preserving_gaussian_kernel",
+        "cv_frame_projection_kernel": "gaussian",
+        "cv_frame_projection_state_mass_preserved": True,
+        "cv_frame_projection_boundary_treatment": "finite_grid_state_renormalized",
+        "cv_frame_projection_sampled_state_count": len(state_payloads),
+        "cv_frame_projection_note": (
+            "Projected PMF is a Gaussian-kernel density estimate over CV space; "
+            "state probabilities from microstate_summary.csv are preserved before "
+            "final finite-grid normalization."
+        ),
+    }
+    return reference_grid, target_grid, x_edges, y_edges, metadata
+
+
 def _plot_cv_projected_landscapes(
     plt,
     *,
     frame_results,
     state_ids: list[str],
     reference_probabilities: np.ndarray,
+    target_probabilities: np.ndarray,
     temperature_kelvin: float,
+    weight_treatment: str,
+    fel_estimator: str,
+    fel_bandwidth: str,
+    fel_bandwidth_rule: str,
     bins: int,
     max_points: int,
     output_dir: str,
     energy_scale: float,
     energy_unit_label: str,
     fel_max_energy_display: float | None,
+    fel_colormap: str,
     x_name: str,
     y_name: str,
-) -> list[str]:
+) -> tuple[list[str], dict[str, object]]:
     """Project exact 2D CV frame samples using prior-consistent frame weights."""
 
     reference_probability_by_state = {
         state_id: float(probability)
         for state_id, probability in zip(state_ids, reference_probabilities)
     }
-    sampled = _collect_cv_projection_samples(
-        frame_results=frame_results,
-        reference_probability_by_state=reference_probability_by_state,
-        temperature_kelvin=temperature_kelvin,
-        max_points=max_points,
-        x_name=x_name,
-        y_name=y_name,
-    )
-    if sampled is None:
-        return []
+    target_probability_by_state = {
+        state_id: float(probability)
+        for state_id, probability in zip(state_ids, target_probabilities)
+    }
+    projection_metadata: dict[str, object] = {
+        "cv_frame_projection_estimator": "histogram",
+        "cv_frame_projection_kernel": None,
+        "cv_frame_projection_bandwidth": None,
+        "cv_frame_projection_bandwidth_rule": None,
+        "cv_frame_projection_state_mass_preserved": False,
+    }
+    if fel_estimator == "gaussian-kernel":
+        projected = _gaussian_kernel_projected_surfaces(
+            frame_results=frame_results,
+            reference_probability_by_state=reference_probability_by_state,
+            target_probability_by_state=target_probability_by_state,
+            temperature_kelvin=temperature_kelvin,
+            weight_treatment=weight_treatment,
+            bins=bins,
+            max_points=max_points,
+            x_name=x_name,
+            y_name=y_name,
+            bandwidth_spec=fel_bandwidth,
+            bandwidth_rule=fel_bandwidth_rule,
+        )
+        if projected is None:
+            return [], projection_metadata
+        reference_hist, reweighted_hist, x_edges, y_edges, projection_metadata = projected
+    else:
+        sampled = _collect_cv_projection_samples(
+            frame_results=frame_results,
+            reference_probability_by_state=reference_probability_by_state,
+            temperature_kelvin=temperature_kelvin,
+            weight_treatment=weight_treatment,
+            max_points=max_points,
+            x_name=x_name,
+            y_name=y_name,
+        )
+        if sampled is None:
+            return [], projection_metadata
 
-    x_values, y_values, reference_weights, reweighted_weights = sampled
-    hist_range = _axis_range(x_name, y_name)
-    reference_hist, x_edges, y_edges = np.histogram2d(
-        x_values,
-        y_values,
-        bins=bins,
-        range=hist_range,
-        weights=reference_weights,
-    )
-    reweighted_hist, _, _ = np.histogram2d(
-        x_values,
-        y_values,
-        bins=bins,
-        range=hist_range,
-        weights=reweighted_weights,
-    )
-    if reference_hist.sum() > 0.0:
-        reference_hist = reference_hist / float(reference_hist.sum())
-    if reweighted_hist.sum() > 0.0:
-        reweighted_hist = reweighted_hist / float(reweighted_hist.sum())
+        x_values, y_values, reference_weights, reweighted_weights = sampled
+        hist_range = _axis_range(x_name, y_name)
+        reference_hist, x_edges, y_edges = np.histogram2d(
+            x_values,
+            y_values,
+            bins=bins,
+            range=hist_range,
+            weights=reference_weights,
+        )
+        reweighted_hist, _, _ = np.histogram2d(
+            x_values,
+            y_values,
+            bins=bins,
+            range=hist_range,
+            weights=reweighted_weights,
+        )
+        if reference_hist.sum() > 0.0:
+            reference_hist = reference_hist / float(reference_hist.sum())
+        if reweighted_hist.sum() > 0.0:
+            reweighted_hist = reweighted_hist / float(reweighted_hist.sum())
     reference_fe = energy_scale * probability_surface_to_free_energy(
         reference_hist, temperature_kelvin
     )
@@ -1086,6 +1638,7 @@ def _plot_cv_projected_landscapes(
             xlabel=_cv_axis_label(x_name),
             ylabel=_cv_axis_label(y_name),
             fel_max_energy_kj_mol=fel_max_energy_display,
+            colormap=fel_colormap,
         )
     )
     outputs.append(
@@ -1100,9 +1653,10 @@ def _plot_cv_projected_landscapes(
             xlabel=_cv_axis_label(x_name),
             ylabel=_cv_axis_label(y_name),
             fel_max_energy_kj_mol=fel_max_energy_display,
+            colormap=fel_colormap,
         )
     )
-    return outputs
+    return outputs, projection_metadata
 
 
 def _plot_discrete_microstate_cv_projection(
@@ -1120,6 +1674,7 @@ def _plot_discrete_microstate_cv_projection(
     energy_scale: float,
     energy_unit_label: str,
     fel_max_energy_display: float | None,
+    fel_colormap: str,
 ) -> list[str]:
     """Scatter microstate centers on selected CV axes colored by free energy."""
 
@@ -1150,6 +1705,7 @@ def _plot_discrete_microstate_cv_projection(
         "title": title,
         "xlabel": _cv_axis_label(x_name, center=True),
         "ylabel": _cv_axis_label(y_name, center=True),
+        "colormap": fel_colormap,
     }
     if fel_max_energy_display is not None:
         scatter_kwargs["fel_max_energy_kj_mol"] = fel_max_energy_display

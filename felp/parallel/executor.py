@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from concurrent.futures import Future, ProcessPoolExecutor, as_completed
 from dataclasses import replace
+import json
 import multiprocessing as mp
 import os
 import sys
@@ -12,6 +13,8 @@ from typing import Iterable, Iterator, TypeVar
 
 from felp.conversion import StructureConversionService
 from felp.core import (
+    CVSpec,
+    DihedralRestraintSpec,
     FrameResult,
     RunConfig,
     SnapshotJob,
@@ -27,6 +30,7 @@ from felp.perturbation.validation import (
     measurement_deviation,
     target_cv_measurement_from_restraints,
 )
+from felp.protocol_summary import build_protocol_summary
 from felp.restraints import BackboneDihedralCVProtocol
 from felp.reweighting import (
     AssignmentPolicy,
@@ -128,20 +132,28 @@ def initialize_worker(
         distance_cv_specs=config.restraints.distance_cv_specs,
         force_constant=config.restraints.effective_rosetta_force_constant(),
     )
-    _WORKER_PERTURBATION_PROTOCOL = PyRosettaPerturbationProtocol(
-        conversion_service=_WORKER_CONVERSION_SERVICE,
-        target_residue_number=config.perturbation.target_residue_number,
-        score_function_name=config.rosetta.score_function,
-        perturbation_mode=config.rosetta.perturbation_mode,
-        relax_iterations=config.rosetta.relax_iterations,
-        repack_trials=config.rosetta.repack_trials,
-        cartesian=config.rosetta.cartesian,
-        mobility=config.mobility,
-        output_dir=config.output.output_dir,
-        write_pose_pdbs=config.output.write_pose_pdbs,
-        rosetta_distance_constraint_sd_angstrom=(
+    perturbation_protocol_kwargs = {
+        "conversion_service": _WORKER_CONVERSION_SERVICE,
+        "target_residue_number": config.perturbation.target_residue_number,
+        "score_function_name": config.rosetta.score_function,
+        "perturbation_mode": config.rosetta.perturbation_mode,
+        "relax_iterations": config.rosetta.relax_iterations,
+        "repack_trials": config.rosetta.repack_trials,
+        "cartesian": config.rosetta.cartesian,
+        "mobility": config.mobility,
+        "output_dir": config.output.output_dir,
+        "write_pose_pdbs": config.output.write_pose_pdbs,
+        "rosetta_distance_constraint_sd_angstrom": (
             config.restraints.rosetta_distance_constraint_sd_angstrom
         ),
+    }
+    if config.restraints.rosetta_target_backbone_restraints:
+        perturbation_protocol_kwargs["backbone_constraint_tolerance_degrees"] = (
+            config.restraints.rosetta_target_backbone_restraint_tolerance_degrees
+            or config.restraints.cv_measurement_tolerance_degrees
+        )
+    _WORKER_PERTURBATION_PROTOCOL = PyRosettaPerturbationProtocol(
+        **perturbation_protocol_kwargs
     )
     try:
         _WORKER_ENERGY_EVALUATOR = build_energy_evaluator(
@@ -194,6 +206,94 @@ def _build_pyrosetta_options(config: RunConfig) -> str:
 
 def _measure_structure(structure):
     return _WORKER_RESTRAINT_PROTOCOL.measure_structure(structure)
+
+
+def _debug_outputs_enabled(job: SnapshotJob) -> bool:
+    if _WORKER_CONFIG is None or not _WORKER_CONFIG.output.debug_frame_outputs:
+        return False
+    selected = set(_WORKER_CONFIG.output.debug_frame_indices)
+    return not selected or job.frame_index in selected
+
+
+def _debug_frame_dir(job: SnapshotJob) -> str:
+    if _WORKER_CONFIG is None:
+        raise RuntimeError("Worker has not been initialized.")
+    path = os.path.join(
+        _WORKER_CONFIG.output.output_dir,
+        "frame_debug",
+        f"frame_{job.frame_index:05d}",
+    )
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _write_debug_structure(structure, directory: str, filename: str) -> str:
+    path = os.path.join(directory, filename)
+    structure.save(path, overwrite=True)
+    return os.path.relpath(path, _WORKER_CONFIG.output.output_dir)
+
+
+def _write_debug_json(directory: str, filename: str, payload: dict) -> str:
+    path = os.path.join(directory, filename)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+    return os.path.relpath(path, _WORKER_CONFIG.output.output_dir)
+
+
+def _dihedral_restraint_key(spec: DihedralRestraintSpec) -> tuple:
+    return (spec.kind, spec.residue_numbers, spec.atom_names)
+
+
+def _rosetta_backbone_restraint_residue_numbers() -> tuple[int, ...]:
+    if _WORKER_CONFIG is None:
+        raise RuntimeError("Worker has not been initialized.")
+    residue_numbers = _WORKER_CONFIG.restraints.rosetta_backbone_restraint_residue_numbers
+    if residue_numbers:
+        return residue_numbers
+    return (_WORKER_CONFIG.perturbation.target_residue_number,)
+
+
+def _rosetta_target_backbone_restraints(reference_pose) -> tuple[DihedralRestraintSpec, ...]:
+    if _WORKER_CONFIG is None:
+        raise RuntimeError("Worker has not been initialized.")
+    kinds = _WORKER_CONFIG.restraints.rosetta_target_backbone_restraints
+    if not kinds:
+        return ()
+    cv_specs = tuple(
+        CVSpec(
+            kind=kind,
+            residue_number=residue_number,
+            name=f"rosetta_residue_{residue_number}_{kind}",
+        )
+        for residue_number in _rosetta_backbone_restraint_residue_numbers()
+        for kind in kinds
+    )
+    protocol = BackboneDihedralCVProtocol(
+        cv_specs=cv_specs,
+        distance_cv_specs=(),
+        force_constant=(
+            _WORKER_CONFIG.restraints.effective_rosetta_target_backbone_force_constant()
+        ),
+    )
+    return tuple(protocol.build_dihedral_restraints_from_reference_pose(reference_pose))
+
+
+def _rosetta_preparation_restraints(reference_pose, restraint_specs) -> tuple:
+    base_specs = tuple(restraint_specs)
+    extra_specs = _rosetta_target_backbone_restraints(reference_pose)
+    if not extra_specs:
+        return base_specs
+    existing_dihedral_keys = {
+        _dihedral_restraint_key(spec)
+        for spec in base_specs
+        if isinstance(spec, DihedralRestraintSpec)
+    }
+    unique_extra_specs = tuple(
+        spec
+        for spec in extra_specs
+        if _dihedral_restraint_key(spec) not in existing_dihedral_keys
+    )
+    return (*base_specs, *unique_extra_specs)
 
 
 def _run_runtime_protonation_preflight(reference_pose) -> None:
@@ -275,25 +375,44 @@ def process_frame_job(job: SnapshotJob) -> FrameResult:
         reference_measurement,
     )
     restraint_specs = _WORKER_RESTRAINT_PROTOCOL.build_from_reference_pose(reference_pose)
+    rosetta_restraint_specs = _rosetta_preparation_restraints(
+        reference_pose,
+        restraint_specs,
+    )
     cv_tol = _WORKER_CONFIG.restraints.cv_measurement_tolerance_degrees
     distance_tol = _WORKER_CONFIG.restraints.distance_measurement_tolerance_angstrom
+    debug_outputs_enabled = _debug_outputs_enabled(job)
+    debug_dir = _debug_frame_dir(job) if debug_outputs_enabled else None
+    debug_artifacts: dict[str, str] = {}
 
     if _WORKER_CONFIG.energy.backend == "openmm":
         openmm_fc = _WORKER_CONFIG.restraints.effective_openmm_force_constant()
         openmm_restraint_specs = tuple(
             replace(spec, force_constant=openmm_fc) for spec in restraint_specs
         )
+        prepared_reference_pose = _WORKER_PERTURBATION_PROTOCOL.prepare_reference_pose(
+            reference_pose,
+            rosetta_restraint_specs,
+            job.frame_index,
+        )
+        if _WORKER_CONFIG.perturbation.original_residue_name is not None:
+            ensure_pose_residue_matches_expected(
+                prepared_reference_pose,
+                _WORKER_CONFIG.perturbation.target_residue_number,
+                _WORKER_CONFIG.perturbation.original_residue_name,
+                context="Rosetta-prepared reference state",
+            )
         reference_structure = _WORKER_CONVERSION_SERVICE.pose_to_structure(
-            reference_pose
+            prepared_reference_pose
         )
         reference_structure = _WORKER_CONVERSION_SERVICE.prepare_structure_for_openmm(
             reference_structure
         )
         perturbed_pose = _WORKER_PERTURBATION_PROTOCOL.apply_perturbation(
-            reference_pose,
+            prepared_reference_pose,
             _WORKER_CONFIG.perturbation.target_residue_number,
             _WORKER_CONFIG.perturbation.target_residue_name,
-            restraint_specs,
+            rosetta_restraint_specs,
             job.frame_index,
         )
         ensure_pose_residue_matches_expected(
@@ -308,13 +427,32 @@ def process_frame_job(job: SnapshotJob) -> FrameResult:
         perturbed_structure = _WORKER_CONVERSION_SERVICE.prepare_structure_for_openmm(
             perturbed_structure
         )
+        if debug_dir is not None:
+            debug_artifacts["reference_openmm_input_pdb"] = _write_debug_structure(
+                reference_structure,
+                debug_dir,
+                "reference_openmm_input.pdb",
+            )
+            debug_artifacts["perturbed_openmm_input_pdb"] = _write_debug_structure(
+                perturbed_structure,
+                debug_dir,
+                "perturbed_openmm_input.pdb",
+            )
         reference_energy = _WORKER_ENERGY_EVALUATOR.evaluate(
             structure=reference_structure,
             restraint_specs=openmm_restraint_specs,
+            collect_energy_components=debug_outputs_enabled,
+        )
+        protocol_summary = build_protocol_summary(
+            _WORKER_CONFIG,
+            restraint_specs=restraint_specs,
+            rosetta_restraint_specs=rosetta_restraint_specs,
+            openmm_restraint_specs=openmm_restraint_specs,
         )
         perturbed_energy = _WORKER_ENERGY_EVALUATOR.evaluate(
             structure=perturbed_structure,
             restraint_specs=openmm_restraint_specs,
+            collect_energy_components=debug_outputs_enabled,
         )
         reference_minimized_structure = (
             _WORKER_CONVERSION_SERVICE.clone_structure_with_coordinates(
@@ -328,6 +466,17 @@ def process_frame_job(job: SnapshotJob) -> FrameResult:
                 perturbed_energy.minimized_coordinates_angstrom,
             )
         )
+        if debug_dir is not None:
+            debug_artifacts["reference_openmm_minimized_pdb"] = _write_debug_structure(
+                reference_minimized_structure,
+                debug_dir,
+                "reference_openmm_minimized.pdb",
+            )
+            debug_artifacts["perturbed_openmm_minimized_pdb"] = _write_debug_structure(
+                perturbed_minimized_structure,
+                debug_dir,
+                "perturbed_openmm_minimized.pdb",
+            )
         reference_relaxed_measurement = _measure_structure(
             reference_minimized_structure
         )
@@ -351,7 +500,7 @@ def process_frame_job(job: SnapshotJob) -> FrameResult:
     else:
         prepared_reference_pose = _WORKER_PERTURBATION_PROTOCOL.prepare_reference_pose(
             reference_pose,
-            restraint_specs,
+            rosetta_restraint_specs,
             job.frame_index,
         )
         if _WORKER_CONFIG.perturbation.original_residue_name is not None:
@@ -365,7 +514,7 @@ def process_frame_job(job: SnapshotJob) -> FrameResult:
             prepared_reference_pose,
             _WORKER_CONFIG.perturbation.target_residue_number,
             _WORKER_CONFIG.perturbation.target_residue_name,
-            restraint_specs,
+            rosetta_restraint_specs,
             job.frame_index,
         )
         ensure_pose_residue_matches_expected(
@@ -397,10 +546,18 @@ def process_frame_job(job: SnapshotJob) -> FrameResult:
         reference_energy = _WORKER_ENERGY_EVALUATOR.evaluate(
             pose=prepared_reference_pose,
             restraint_specs=restraint_specs,
+            collect_energy_components=debug_outputs_enabled,
         )
         perturbed_energy = _WORKER_ENERGY_EVALUATOR.evaluate(
             pose=perturbed_pose,
             restraint_specs=restraint_specs,
+            collect_energy_components=debug_outputs_enabled,
+        )
+        protocol_summary = build_protocol_summary(
+            _WORKER_CONFIG,
+            restraint_specs=restraint_specs,
+            rosetta_restraint_specs=rosetta_restraint_specs,
+            openmm_restraint_specs=(),
         )
 
     delta_u = perturbed_energy.energy_kj_mol - reference_energy.energy_kj_mol
@@ -431,6 +588,7 @@ def process_frame_job(job: SnapshotJob) -> FrameResult:
         "reference_cv_deviation": reference_deviation,
         "perturbed_cv_deviation": perturbed_deviation,
         "mobility": _WORKER_CONFIG.mobility.__dict__,
+        "protocol": protocol_summary,
     }
     if target_measurement.phi_degrees is not None:
         metadata["target_phi_degrees"] = target_measurement.phi_degrees
@@ -444,6 +602,31 @@ def process_frame_job(job: SnapshotJob) -> FrameResult:
         metadata["perturbed_phi_deviation_degrees"] = perturbed_deviation["phi"]
     if "psi" in perturbed_deviation:
         metadata["perturbed_psi_deviation_degrees"] = perturbed_deviation["psi"]
+    if debug_dir is not None:
+        debug_artifacts["energy_components_json"] = _write_debug_json(
+            debug_dir,
+            "energy_components.json",
+            {
+                "frame_index": job.frame_index,
+                "source_frame_index": job.source_frame_index,
+                "trajectory_id": job.trajectory_id,
+                "microstate_id": assignment.state_id,
+                "microstate_label": assignment.label,
+                "energy_backend": _WORKER_CONFIG.energy.backend,
+                "reference_energy_kj_mol": reference_energy.energy_kj_mol,
+                "perturbed_energy_kj_mol": perturbed_energy.energy_kj_mol,
+                "delta_u_kj_mol": delta_u,
+                "reference_energy_metadata": reference_energy.metadata,
+                "perturbed_energy_metadata": perturbed_energy.metadata,
+                "protocol": protocol_summary,
+                "target_cv_values": target_measurement.as_dict(),
+                "reference_cv_values": reference_relaxed_measurement.as_dict(),
+                "perturbed_cv_values": perturbed_relaxed_measurement.as_dict(),
+                "reference_cv_deviation": reference_deviation,
+                "perturbed_cv_deviation": perturbed_deviation,
+            },
+        )
+        metadata["debug_artifacts"] = dict(debug_artifacts)
 
     return FrameResult(
         frame_index=job.frame_index,
