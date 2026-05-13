@@ -16,6 +16,7 @@ from felp.core import (
     ParallelConfig,
     PerturbationConfig,
     MobilityConfig,
+    ReweightingQCConfig,
     RestraintConfig,
     RosettaConfig,
     RunConfig,
@@ -26,6 +27,7 @@ from felp.core import (
 from felp.energy import resolve_openmm_gpu_platform_name
 from felp.msm import MSMFitConfig, MSMSampleExportConfig
 from felp.plotting import FELPPlotConfig, MSMPlotConfig
+from felp.plotting.common import DEFAULT_FEL_COLORMAP
 
 
 def _default_cv_name(kind: str, residue_number: int, target_residue_number: int) -> str:
@@ -183,6 +185,85 @@ def _add_common_microstate_arguments(parser: argparse.ArgumentParser) -> None:
         help=(
             "Deprecated alias for '--prior-probability-mode raw_counts'. "
             "When set, raw frame counts are used as the reference prior."
+        ),
+    )
+
+
+def _add_reweighting_qc_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add by-state reweighting QC options."""
+
+    group = parser.add_argument_group("Reweighting QC")
+    group.add_argument(
+        "--reweighting-qc-policy",
+        choices=("none", "flag", "exclude-frames"),
+        default="flag",
+        help=(
+            "By-state Zwanzig degeneracy policy. 'flag' records unreliable state "
+            "estimates without changing probabilities; 'exclude-frames' removes "
+            "dominant in-state frame outliers before reweighting."
+        ),
+    )
+    group.add_argument(
+        "--reweighting-qc-method",
+        choices=("auto", "threshold"),
+        default="auto",
+        help=(
+            "By-state degeneracy detector. 'auto' uses a PSIS-style Pareto-tail "
+            "diagnostic with sample-size dependent reliability thresholds; "
+            "'threshold' uses the explicit ESS/weight/leave-one-out cutoffs below."
+        ),
+    )
+    group.add_argument(
+        "--reweighting-weight-treatment",
+        choices=("raw", "psis", "psis-smoothed"),
+        default="raw",
+        help=(
+            "Treatment applied to in-state Boltzmann weights before computing "
+            "Zwanzig averages. 'psis-smoothed' smooths and truncates the upper "
+            "importance-weight tail to reduce variance in heavy-tailed states "
+            "('psis' is accepted as a short alias)."
+        ),
+    )
+    group.add_argument(
+        "--reweighting-qc-min-frame-count",
+        type=int,
+        default=20,
+        help=(
+            "Minimum evaluated frames required before threshold-based by-state QC "
+            "can flag a state."
+        ),
+    )
+    group.add_argument(
+        "--reweighting-qc-max-frame-weight-fraction",
+        type=float,
+        default=0.5,
+        help=(
+            "Flag states where one frame contributes more than this fraction of "
+            "the state's in-state Boltzmann weight."
+        ),
+    )
+    group.add_argument(
+        "--reweighting-qc-min-state-ess",
+        type=float,
+        default=5.0,
+        help="Flag states whose in-state importance-sampling ESS is below this value.",
+    )
+    group.add_argument(
+        "--reweighting-qc-max-leave-one-out-shift-kj-mol",
+        type=float,
+        default=10.0,
+        help=(
+            "Flag states where removing the dominant frame shifts the state's "
+            "Zwanzig free-energy estimate by more than this many kJ/mol."
+        ),
+    )
+    group.add_argument(
+        "--reweighting-qc-max-excluded-frames-per-state",
+        type=int,
+        default=5,
+        help=(
+            "Maximum dominant frames to remove per state when "
+            "--reweighting-qc-policy=exclude-frames."
         ),
     )
 
@@ -439,15 +520,75 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
             "becomes unstable."
         ),
     )
+    restraint_group.add_argument(
+        "--rosetta-restraint-target-backbone",
+        action="store_true",
+        help=(
+            "During Rosetta preparation, add restraint-only backbone dihedral "
+            "constraints on --target-residue-number without adding those dihedrals "
+            "as FELP CVs. Defaults to phi/psi unless "
+            "--rosetta-target-backbone-restraint-kind is supplied."
+        ),
+    )
+    restraint_group.add_argument(
+        "--rosetta-target-backbone-restraint-kind",
+        action="append",
+        choices=("phi", "psi", "omega"),
+        default=[],
+        metavar="KIND",
+        help=(
+            "Repeatable target-backbone dihedral to restrain during Rosetta "
+            "preparation. Supplying this option implies "
+            "--rosetta-restraint-target-backbone."
+        ),
+    )
+    restraint_group.add_argument(
+        "--rosetta-backbone-restraint-residue",
+        action="append",
+        type=int,
+        default=[],
+        metavar="RESIDUE",
+        help=(
+            "Repeatable pose residue index whose backbone dihedrals should be "
+            "restrained during Rosetta preparation without becoming FELP CVs. "
+            "Use with --rosetta-target-backbone-restraint-kind; when kinds are "
+            "omitted, phi/psi are restrained. For example, repeat this for 3, 4, "
+            "and 5 to restrain a local sequence window around target residue 4."
+        ),
+    )
+    restraint_group.add_argument(
+        "--rosetta-target-backbone-restraint-force-constant",
+        type=float,
+        default=None,
+        metavar="K",
+        help=(
+            "Optional Rosetta-only force constant for target-backbone dihedral "
+            "restraints. When omitted, the effective Rosetta restraint force "
+            "constant is used."
+        ),
+    )
+    restraint_group.add_argument(
+        "--rosetta-target-backbone-restraint-tolerance-degrees",
+        type=float,
+        default=None,
+        metavar="DEG",
+        help=(
+            "Optional post-Rosetta validation tolerance for Rosetta-only "
+            "target-backbone restraints. When omitted, "
+            "--cv-measurement-tolerance-degrees is used."
+        ),
+    )
 
     mobility_group = parser.add_argument_group("Mobility")
     mobility_group.add_argument(
         "--mobility-mode",
-        choices=("target_only", "radius"),
+        choices=("target_only", "radius", "sequence_window"),
         default="target_only",
         help=(
             "Which residues may relax/minimize after mutation. target_only allows only "
-            "the target residue; radius includes residues near the target."
+            "the target residue; radius includes residues near the target in space; "
+            "sequence_window includes residues within +/- --mobility-sequence-window "
+            "positions of the target."
         ),
     )
     mobility_group.add_argument(
@@ -455,6 +596,17 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
         type=float,
         default=0.0,
         help="Radius in Angstrom used when --mobility-mode=radius.",
+    )
+    mobility_group.add_argument(
+        "--mobility-sequence-window",
+        type=int,
+        default=0,
+        metavar="N",
+        help=(
+            "Number of sequence-neighbor residues on each side of the target to "
+            "include when --mobility-mode=sequence_window. N=1 selects target-1, "
+            "target, and target+1."
+        ),
     )
     mobility_group.add_argument(
         "--mobility-include-backbone",
@@ -509,6 +661,7 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
         default=0,
         help="Random seed for deterministic microstate-stratified frame sampling.",
     )
+    _add_reweighting_qc_arguments(parser)
 
     energy_group = parser.add_argument_group("Energy")
     energy_group.add_argument(
@@ -643,6 +796,26 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
         "--write-pose-pdbs",
         action="store_true",
         help="Write relaxed reference and perturbed PDB files per frame.",
+    )
+    output_group.add_argument(
+        "--debug-frame-outputs",
+        action="store_true",
+        help=(
+            "Write frame_debug artifacts for processed frames: OpenMM input/minimized "
+            "PDBs and per-frame energy metadata. Use --debug-frame-index to restrict "
+            "large runs to specific frames."
+        ),
+    )
+    output_group.add_argument(
+        "--debug-frame-index",
+        action="append",
+        type=int,
+        default=[],
+        metavar="INDEX",
+        help=(
+            "Frame index to include in --debug-frame-outputs. Repeatable. When omitted, "
+            "debug output is written for every processed frame."
+        ),
     )
     output_group.add_argument(
         "--overwrite",
@@ -886,6 +1059,49 @@ def _add_felp_plot_arguments(parser: argparse.ArgumentParser) -> None:
         help="Maximum frames used when building 2D CV heatmaps (uniform subsampling).",
     )
     parser.add_argument(
+        "--fel-estimator",
+        choices=("histogram", "gaussian-kernel"),
+        default="histogram",
+        help=(
+            "Estimator for frame-projected CV free-energy landscapes. "
+            "'histogram' preserves the existing weighted-bin estimator; "
+            "'gaussian-kernel' uses a state-mass-preserving kernel density estimator."
+        ),
+    )
+    parser.add_argument(
+        "--fel-bandwidth",
+        default="auto",
+        help=(
+            "Bandwidth for --fel-estimator=gaussian-kernel: 'auto', one positive "
+            "float, or two comma-separated positive floats for x,y."
+        ),
+    )
+    parser.add_argument(
+        "--fel-bandwidth-rule",
+        choices=("scott", "silverman"),
+        default="scott",
+        help="Automatic bandwidth rule for --fel-bandwidth=auto.",
+    )
+    parser.add_argument(
+        "--fel-cmap",
+        default=DEFAULT_FEL_COLORMAP,
+        help=(
+            "Matplotlib colormap name for CV free-energy heatmaps and projected "
+            "probability / delta-free-energy scatter plots (default: %(default)s)."
+        ),
+    )
+    parser.add_argument(
+        "--reweighting-weight-treatment",
+        choices=("raw", "psis", "psis-smoothed"),
+        default=None,
+        help=(
+            "Override the weight treatment used for frame-projected FEL plots. "
+            "By default, felp-plot reads the treatment recorded in the "
+            "microstate summary. This does not recompute state probabilities; "
+            "use summarize/run for that."
+        ),
+    )
+    parser.add_argument(
         "--plot-cv-x",
         dest="plot_cv_x",
         help=(
@@ -965,6 +1181,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Temperature used when converting probabilities to free energies.",
     )
     _add_common_microstate_arguments(summarize_parser)
+    _add_reweighting_qc_arguments(summarize_parser)
 
     msm_fit_parser = subparsers.add_parser(
         "msm-fit",
@@ -1061,6 +1278,17 @@ def build_run_config(namespace: argparse.Namespace) -> RunConfig:
         microstate_source = "auto"
     if microstate_source == "auto":
         reference_probability_mode = "raw_counts"
+    rosetta_target_backbone_restraints = tuple(
+        namespace.rosetta_target_backbone_restraint_kind
+    )
+    rosetta_backbone_restraint_residues = tuple(
+        namespace.rosetta_backbone_restraint_residue
+    )
+    if (
+        namespace.rosetta_restraint_target_backbone
+        or rosetta_backbone_restraint_residues
+    ) and not rosetta_target_backbone_restraints:
+        rosetta_target_backbone_restraints = ("phi", "psi")
 
     config = RunConfig(
         input=InputConfig(
@@ -1101,12 +1329,23 @@ def build_run_config(namespace: argparse.Namespace) -> RunConfig:
             rosetta_distance_constraint_sd_angstrom=(
                 namespace.rosetta_distance_constraint_sd_angstrom
             ),
+            rosetta_target_backbone_restraints=rosetta_target_backbone_restraints,
+            rosetta_backbone_restraint_residue_numbers=(
+                rosetta_backbone_restraint_residues
+            ),
+            rosetta_target_backbone_restraint_force_constant=(
+                namespace.rosetta_target_backbone_restraint_force_constant
+            ),
+            rosetta_target_backbone_restraint_tolerance_degrees=(
+                namespace.rosetta_target_backbone_restraint_tolerance_degrees
+            ),
             cv_specs=cv_specs,
             distance_cv_specs=distance_cv_specs,
         ),
         mobility=MobilityConfig(
             mode=namespace.mobility_mode,
             radius_angstrom=namespace.mobility_radius_angstrom,
+            sequence_window=namespace.mobility_sequence_window,
             include_backbone=namespace.mobility_include_backbone,
             include_sidechains=namespace.mobility_include_sidechains,
         ),
@@ -1145,6 +1384,8 @@ def build_run_config(namespace: argparse.Namespace) -> RunConfig:
         output=OutputConfig(
             output_dir=namespace.output_dir,
             write_pose_pdbs=namespace.write_pose_pdbs,
+            debug_frame_outputs=namespace.debug_frame_outputs,
+            debug_frame_indices=tuple(namespace.debug_frame_index),
             overwrite=namespace.overwrite,
             resume=namespace.resume,
         ),
@@ -1154,6 +1395,7 @@ def build_run_config(namespace: argparse.Namespace) -> RunConfig:
             microstate_max_samples=namespace.microstate_max_samples,
             microstate_sampling_seed=namespace.microstate_sampling_seed,
         ),
+        reweighting_qc=build_reweighting_qc_config(namespace),
     )
     config.validate()
     return config
@@ -1178,6 +1420,25 @@ def build_microstate_config(
         state_level=namespace.state_level,
         allow_unassigned=namespace.allow_unassigned,
         reference_probability_mode=reference_probability_mode,
+    )
+
+
+def build_reweighting_qc_config(namespace: argparse.Namespace) -> ReweightingQCConfig:
+    """Construct a ReweightingQCConfig from the parsed CLI namespace."""
+
+    return ReweightingQCConfig(
+        policy=namespace.reweighting_qc_policy,
+        method=namespace.reweighting_qc_method,
+        weight_treatment=namespace.reweighting_weight_treatment,
+        min_frame_count=namespace.reweighting_qc_min_frame_count,
+        max_frame_weight_fraction=namespace.reweighting_qc_max_frame_weight_fraction,
+        min_state_ess=namespace.reweighting_qc_min_state_ess,
+        max_leave_one_out_shift_kj_mol=(
+            namespace.reweighting_qc_max_leave_one_out_shift_kj_mol
+        ),
+        max_excluded_frames_per_state=(
+            namespace.reweighting_qc_max_excluded_frames_per_state
+        ),
     )
 
 
@@ -1256,8 +1517,13 @@ def build_felp_plot_config(namespace: argparse.Namespace) -> FELPPlotConfig:
         top_states=namespace.top_states,
         fel_bins=namespace.fel_bins,
         fel_max_points=namespace.fel_max_points,
+        fel_estimator=namespace.fel_estimator,
+        fel_bandwidth=namespace.fel_bandwidth,
+        fel_bandwidth_rule=namespace.fel_bandwidth_rule,
+        fel_colormap=namespace.fel_cmap,
         fel_max_energy_kj_mol=namespace.fel_max_energy_kj_mol,
         plot_energy_unit=namespace.plot_energy_unit,
+        weight_treatment=namespace.reweighting_weight_treatment,
         cv_x=namespace.plot_cv_x,
         cv_y=namespace.plot_cv_y,
         overwrite=namespace.overwrite,

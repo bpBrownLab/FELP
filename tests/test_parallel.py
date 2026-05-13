@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 from felp.core import (
+    CVMeasurement,
+    DihedralRestraintSpec,
     EnergyConfig,
+    EnergyResult,
     FrameResult,
     InputConfig,
+    MicrostateAssignment,
     MicrostateConfig,
     OutputConfig,
     ParallelConfig,
@@ -395,3 +399,221 @@ def test_runtime_protonation_preflight_uses_mutation_path_for_perturbed_state(
     assert ("validate_openmm", prepared_reference_structure) in calls
     assert ("validate_openmm", prepared_perturbed_structure) in calls
     assert calls.count(("mutate_pose", reference_pose, 2, "TYR", ())) == 1
+
+
+def test_openmm_frame_path_prepares_reference_before_mutation(monkeypatch) -> None:
+    calls: list[tuple] = []
+    template_structure = object()
+    raw_structure = object()
+    reference_pose = "reference-pose"
+    enforced_reference_pose = "enforced-reference-pose"
+    prepared_reference_pose = "prepared-reference-pose"
+    perturbed_pose = "perturbed-pose"
+    reference_structure = "reference-structure"
+    perturbed_structure = "perturbed-structure"
+    reference_openmm_structure = "reference-openmm-structure"
+    perturbed_openmm_structure = "perturbed-openmm-structure"
+    reference_minimized_structure = "reference-minimized-structure"
+    perturbed_minimized_structure = "perturbed-minimized-structure"
+    restraint_specs = (
+        DihedralRestraintSpec(
+            label="phi",
+            kind="phi",
+            residue_numbers=(1, 2, 2, 2),
+            atom_names=("C", "N", "CA", "C"),
+            target_angle_degrees=-60.0,
+            force_constant=10000.0,
+        ),
+    )
+
+    class _FakeConversionService:
+        def clone_structure_with_coordinates(self, structure, coordinates):
+            calls.append(("clone_structure", structure, coordinates))
+            if structure is template_structure:
+                return raw_structure
+            if structure == reference_openmm_structure:
+                return reference_minimized_structure
+            if structure == perturbed_openmm_structure:
+                return perturbed_minimized_structure
+            raise AssertionError("unexpected clone")
+
+        def structure_to_pose(self, structure):
+            calls.append(("structure_to_pose", structure))
+            assert structure is raw_structure
+            return reference_pose
+
+        def pose_to_structure(self, pose):
+            calls.append(("pose_to_structure", pose))
+            if pose == prepared_reference_pose:
+                return reference_structure
+            if pose == perturbed_pose:
+                return perturbed_structure
+            raise AssertionError("unexpected pose")
+
+        def prepare_structure_for_openmm(self, structure):
+            calls.append(("prepare_for_openmm", structure))
+            if structure == reference_structure:
+                return reference_openmm_structure
+            if structure == perturbed_structure:
+                return perturbed_openmm_structure
+            raise AssertionError("unexpected structure")
+
+    class _FakePerturbationProtocol:
+        def enforce_residue_identity(
+            self,
+            pose,
+            target_residue_number,
+            target_residue_name,
+        ):
+            calls.append(("enforce", pose, target_residue_number, target_residue_name))
+            assert pose == reference_pose
+            return enforced_reference_pose
+
+        def prepare_reference_pose(self, pose, restraints, frame_index):
+            calls.append(("prepare_reference", pose, tuple(restraints), frame_index))
+            assert pose == enforced_reference_pose
+            return prepared_reference_pose
+
+        def apply_perturbation(
+            self,
+            pose,
+            target_residue_number,
+            target_residue_name,
+            restraints,
+            frame_index,
+        ):
+            calls.append(
+                (
+                    "apply_perturbation",
+                    pose,
+                    target_residue_number,
+                    target_residue_name,
+                    tuple(restraints),
+                    frame_index,
+                )
+            )
+            assert pose == prepared_reference_pose
+            return perturbed_pose
+
+    class _FakeRestraintProtocol:
+        def measure_pose(self, pose):
+            calls.append(("measure_pose", pose))
+            return CVMeasurement({"phi": -60.0})
+
+        def build_from_reference_pose(self, pose):
+            calls.append(("build_restraints", pose))
+            assert pose == enforced_reference_pose
+            return list(restraint_specs)
+
+        def measure_structure(self, structure):
+            calls.append(("measure_structure", structure))
+            return CVMeasurement({"phi": -60.0})
+
+    class _FakeAssignmentPolicy:
+        name = "fake"
+
+        def assign(self, atlas, job, measurement):
+            calls.append(("assign", job.frame_index, measurement.as_dict()))
+            return MicrostateAssignment(
+                state_id="state",
+                label="state",
+                measurements=measurement.as_dict(),
+                state_level="microstate",
+            )
+
+    class _FakeEnergyEvaluator:
+        def evaluate(
+            self,
+            *,
+            structure=None,
+            pose=None,
+            restraint_specs=(),
+            collect_energy_components=False,
+        ):
+            calls.append(("evaluate", structure, pose, tuple(restraint_specs)))
+            if structure == reference_openmm_structure:
+                return EnergyResult(
+                    backend="openmm",
+                    energy_kj_mol=1.0,
+                    minimized_coordinates_angstrom=((0.0, 0.0, 0.0),),
+                )
+            if structure == perturbed_openmm_structure:
+                return EnergyResult(
+                    backend="openmm",
+                    energy_kj_mol=3.0,
+                    minimized_coordinates_angstrom=((1.0, 0.0, 0.0),),
+                )
+            raise AssertionError("unexpected energy structure")
+
+    config = RunConfig(
+        input=InputConfig(topology_file="unused", trajectory_files=(("unused",),)),
+        perturbation=PerturbationConfig(
+            target_residue_number=2,
+            target_residue_name="ALA",
+            original_residue_name="GLY",
+        ),
+        rosetta=RosettaConfig(),
+        restraints=RestraintConfig(),
+        energy=EnergyConfig(backend="openmm"),
+        microstates=MicrostateConfig(reference_probability_mode="raw_counts"),
+        parallel=ParallelConfig(workers=1),
+        output=OutputConfig(output_dir="unused"),
+    )
+    monkeypatch.setattr(executor_module, "_WORKER_CONFIG", config)
+    monkeypatch.setattr(
+        executor_module,
+        "_WORKER_ATLAS",
+        MicrostateAtlas(definitions=()),
+    )
+    monkeypatch.setattr(
+        executor_module,
+        "_WORKER_CONVERSION_SERVICE",
+        _FakeConversionService(),
+    )
+    monkeypatch.setattr(
+        executor_module,
+        "_WORKER_PERTURBATION_PROTOCOL",
+        _FakePerturbationProtocol(),
+    )
+    monkeypatch.setattr(
+        executor_module,
+        "_WORKER_RESTRAINT_PROTOCOL",
+        _FakeRestraintProtocol(),
+    )
+    monkeypatch.setattr(executor_module, "_WORKER_TEMPLATE_STRUCTURE", template_structure)
+    monkeypatch.setattr(executor_module, "_WORKER_ASSIGNMENT_POLICY", _FakeAssignmentPolicy())
+    monkeypatch.setattr(executor_module, "_WORKER_ENERGY_EVALUATOR", _FakeEnergyEvaluator())
+    monkeypatch.setattr(executor_module, "_WORKER_RUNTIME_PROTONATION_PRECHECKED", True)
+    monkeypatch.setattr(
+        executor_module,
+        "ensure_pose_residue_matches_expected",
+        lambda *args, **kwargs: calls.append(("match_pose", args, kwargs)),
+    )
+
+    result = executor_module.process_frame_job(
+        SnapshotJob(
+            frame_index=7,
+            stride_number=7,
+            coordinates_angstrom=((0.0, 0.0, 0.0),),
+        )
+    )
+
+    assert result.delta_u_kj_mol == 2.0
+    assert calls.index(("prepare_reference", enforced_reference_pose, restraint_specs, 7)) < calls.index(
+        ("apply_perturbation", prepared_reference_pose, 2, "ALA", restraint_specs, 7)
+    )
+    assert ("pose_to_structure", prepared_reference_pose) in calls
+    protocol = result.metadata["protocol"]
+    assert protocol["mobility"]["selected_residue_scope"]["residue_numbers"] == [2]
+    assert protocol["rosetta_preparation"]["movemap"]["mobile_backbone_scope"] == (
+        "no backbone torsions"
+    )
+    assert protocol["rosetta_preparation"]["task_factory"]["design_allowed"] is False
+    assert protocol["openmm_final_minimization"]["mass_frozen_dofs"][
+        "mobile_sidechain_scope"
+    ] == "non-backbone atoms on selected residues"
+    assert protocol["rosetta_preparation"]["constraints"]["runtime_restraint_specs"][
+        "specs"
+    ][0][
+        "label"
+    ] == "phi"

@@ -41,7 +41,11 @@ def test_generate_felp_plots_reports_overlap_coefficient_without_matplotlib(
                 "plot_y": "",
                 "phi_center": "",
                 "psi_center": "",
-                "metadata": '{"reference_probability_source":"loaded"}',
+                "metadata": (
+                    '{"reference_probability_source":"loaded",'
+                    '"reweighting_qc":{"flagged_state_count":1,'
+                    '"excluded_frame_count":0}}'
+                ),
             }
         )
         writer.writerow(
@@ -96,4 +100,5 @@ def test_generate_felp_plots_reports_overlap_coefficient_without_matplotlib(
     )
 
     assert summary["overlap_coefficient"] == pytest.approx(0.85)
+    assert summary["reweighting_qc"]["flagged_state_count"] == 1
     assert (tmp_path / "plots" / "plot_summary.json").is_file()

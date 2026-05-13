@@ -4,7 +4,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from felp.core import AtomReference, ConversionError, DihedralRestraintSpec, DistanceRestraintSpec
+from felp.core import (
+    AtomReference,
+    ConversionError,
+    DihedralRestraintSpec,
+    DistanceRestraintSpec,
+    MobilityConfig,
+)
 from felp.perturbation.protocols import PyRosettaPerturbationProtocol
 
 
@@ -31,6 +37,7 @@ class _DummyPose:
         self._psi = float(psi)
         self._omega = float(omega)
         self._residue_name = str(residue_name)
+        self.constraints: list[object] = []
 
     def clone(self):
         return _DummyPose(self._phi, self._psi, self._omega, self._residue_name)
@@ -60,8 +67,14 @@ class _DummyPose:
         self._omega = float(value)
 
     def residue(self, residue_number: int):
-        assert residue_number == 2
-        return SimpleNamespace(name3=lambda: self._residue_name)
+        assert residue_number in {1, 2, 3}
+        return SimpleNamespace(
+            name3=lambda: self._residue_name,
+            atom_index=lambda atom_name: {"C": 1, "N": 2, "CA": 3}.get(atom_name, 4),
+        )
+
+    def add_constraint(self, constraint) -> None:
+        self.constraints.append(constraint)
 
     def dump_pdb(self, path: str) -> None:
         self.dumped_path = path
@@ -142,12 +155,19 @@ def test_relax_pose_uses_locked_movemap_and_task_factory(monkeypatch) -> None:
         create_score_function=create_score_function,
         rosetta=SimpleNamespace(
             core=SimpleNamespace(
+                id=SimpleNamespace(AtomID=lambda atom_index, res: (atom_index, res)),
                 scoring=SimpleNamespace(
                     ScoreType=SimpleNamespace(
                         dihedral_constraint="dihedral_constraint",
                         cart_bonded="cart_bonded",
                         pro_close="pro_close",
-                    )
+                    ),
+                    constraints=SimpleNamespace(
+                        DihedralConstraint=lambda *args: ("dihedral", args),
+                    ),
+                    func=SimpleNamespace(
+                        CircularHarmonicFunc=lambda target, sd: ("circular", target, sd),
+                    ),
                 )
             ),
             protocols=SimpleNamespace(
@@ -203,6 +223,7 @@ def test_relax_pose_uses_locked_movemap_and_task_factory(monkeypatch) -> None:
     assert isinstance(result_pose, _DummyPose)
     assert result_pose.phi(2) == -60.0
     assert result_pose.psi(2) == 140.0
+    assert len(result_pose.constraints) == 2
 
 
 def test_repack_pose_uses_packrotamers_trials(monkeypatch) -> None:
@@ -227,6 +248,18 @@ def test_repack_pose_uses_packrotamers_trials(monkeypatch) -> None:
     fake_pyrosetta = SimpleNamespace(
         create_score_function=create_score_function,
         rosetta=SimpleNamespace(
+            core=SimpleNamespace(
+                id=SimpleNamespace(AtomID=lambda atom_index, res: (atom_index, res)),
+                scoring=SimpleNamespace(
+                    ScoreType=SimpleNamespace(dihedral_constraint="dihedral_constraint"),
+                    constraints=SimpleNamespace(
+                        DihedralConstraint=lambda *args: ("dihedral", args),
+                    ),
+                    func=SimpleNamespace(
+                        CircularHarmonicFunc=lambda target, sd: ("circular", target, sd),
+                    ),
+                ),
+            ),
             protocols=SimpleNamespace(
                 minimization_packing=SimpleNamespace(
                     PackRotamersMover=_FakePackRotamersMover,
@@ -265,6 +298,7 @@ def test_repack_pose_uses_packrotamers_trials(monkeypatch) -> None:
     assert repack_calls["pose"] is result_pose
     assert result_pose.phi(2) == -60.0
     assert result_pose.psi(2) == 140.0
+    assert len(result_pose.constraints) == 2
 
 
 def test_mutate_pose_skips_identity_mutation(monkeypatch) -> None:
@@ -410,3 +444,32 @@ def test_enforce_residue_identity_rejects_incompatible_family(monkeypatch) -> No
 
     with pytest.raises(ConversionError, match="incompatible input residue"):
         protocol.enforce_residue_identity(_DummyPose(residue_name="GLU"), 2, "HIE")
+
+
+def test_sequence_window_mobility_uses_residue_index_selector() -> None:
+    captured_indices: list[str] = []
+
+    class _FakeResidueIndexSelector:
+        def __init__(self, residue_indices: str) -> None:
+            captured_indices.append(residue_indices)
+
+    fake_pyrosetta = SimpleNamespace(
+        rosetta=SimpleNamespace(
+            core=SimpleNamespace(
+                select=SimpleNamespace(
+                    residue_selector=SimpleNamespace(
+                        ResidueIndexSelector=_FakeResidueIndexSelector,
+                    )
+                )
+            )
+        )
+    )
+    protocol = PyRosettaPerturbationProtocol(
+        conversion_service=_DummyConversionService(),
+        target_residue_number=4,
+        mobility=MobilityConfig(mode="sequence_window", sequence_window=1),
+    )
+
+    protocol._build_mobile_selector(fake_pyrosetta)
+
+    assert captured_indices == ["3,4,5"]
