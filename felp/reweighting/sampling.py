@@ -12,11 +12,20 @@ import random
 import tempfile
 from typing import Any, Iterable
 
+import numpy as np
+
 from felp.conversion import StructureConversionService
-from felp.core import ConfigurationError, RunConfig, SamplingConfig, SnapshotJob
+from felp.core import (
+    CVMeasurement,
+    ConfigurationError,
+    RunConfig,
+    SamplingConfig,
+    SnapshotJob,
+)
 from felp.restraints import BackboneDihedralCVProtocol
 
 from .atlas import MicrostateAtlas
+from .coordinate_cv import coordinate_cv_extractors
 
 _MANIFEST_VERSION = 1
 
@@ -181,15 +190,28 @@ def assign_jobs_for_sampling(
         distance_cv_specs=config.restraints.distance_cv_specs,
         force_constant=config.restraints.effective_rosetta_force_constant(),
     )
+    try:
+        extractors = coordinate_cv_extractors(template_structure, cv_protocol)
+    except AttributeError:
+        extractors = {}
+
+    if not extractors:
+        assignments: dict[int, str] = {}
+        for job in jobs:
+            structure = conversion_service.clone_structure_with_coordinates(
+                template_structure,
+                job.coordinates_angstrom,
+            )
+            measurement = cv_protocol.measure_structure(structure)
+            assignment = atlas.assign(measurement)
+            assignments[job.frame_index] = assignment.state_id
+        return assignments
 
     assignments = {}
     for job in jobs:
-        structure = conversion_service.clone_structure_with_coordinates(
-            template_structure,
-            job.coordinates_angstrom,
-        )
-        measurement = cv_protocol.measure_structure(structure)
-        assignment = atlas.assign(measurement)
+        coordinates = np.asarray(job.coordinates_angstrom, dtype=float)
+        values = {name: float(extractors[name](coordinates)) for name in extractors}
+        assignment = atlas.assign(CVMeasurement(values))
         assignments[job.frame_index] = assignment.state_id
     return assignments
 

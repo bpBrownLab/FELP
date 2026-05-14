@@ -6,6 +6,8 @@ from collections import Counter
 from dataclasses import replace
 import json
 import os
+import sys
+import time
 from typing import Any, Sequence
 
 from felp.cli import (
@@ -64,6 +66,10 @@ _OVERLAP_ASSESSMENT_THRESHOLDS = {
 
 def _write_stdout(payload: dict) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def _log_phase(message: str) -> None:
+    print(f"[FELP] {message}", file=sys.stderr, flush=True)
 
 
 def _build_execution_context(config):
@@ -260,6 +266,7 @@ def _build_reweighting_summary(
 
 def run_pipeline(config) -> dict:
     """Execute the main FELP perturbation and reweighting workflow."""
+    pipeline_start = time.perf_counter()
     writer = ResultsWriter(config.output)
     writer.prepare_output_dir()
 
@@ -267,18 +274,39 @@ def run_pipeline(config) -> dict:
     if config.microstates.source == "msm_bundle":
         bundle = load_bundle(config.microstates.msm_bundle_dir)
         bundle.validate_against_input(config.input)
+    load_start = time.perf_counter()
+    _log_phase("loading trajectory frames")
     jobs = TrajectoryLoader(
         config.input,
         bundle=bundle,
         state_level=config.microstates.state_level,
+        load_chunk_size=max(1024, int(config.parallel.chunk_size)),
     ).load_jobs()
+    _log_phase(
+        f"loaded {len(jobs)} frame jobs in {time.perf_counter() - load_start:.1f}s"
+    )
 
+    auto_start = time.perf_counter()
     config, auto_microstate_file = _materialize_auto_microstates(config, jobs)
+    if auto_microstate_file is not None:
+        _log_phase(
+            "auto microstates: "
+            f"{auto_microstate_file.state_count} states from "
+            f"{auto_microstate_file.frame_count} frames in "
+            f"{time.perf_counter() - auto_start:.1f}s"
+        )
     writer.write_run_config(config)
+    context_start = time.perf_counter()
     atlas, assignment_policy, bundle = _build_execution_context(config)
+    _log_phase(f"built execution context in {time.perf_counter() - context_start:.1f}s")
     manifest_path = os.path.join(
         config.output.output_dir,
         config.sampling.sampling_manifest_name,
+    )
+    sampling_start = time.perf_counter()
+    _log_phase(
+        f"building sampling manifest for {len(jobs)} frames "
+        "(assign each frame to a microstate; may take a few minutes at large N)"
     )
     sampling_manifest = load_or_create_sampling_manifest(
         manifest_path=manifest_path,
@@ -287,6 +315,10 @@ def run_pipeline(config) -> dict:
         config=config,
     )
     sampled_jobs = selected_jobs_from_manifest(jobs, sampling_manifest)
+    _log_phase(
+        f"selected {len(sampled_jobs)} sampled jobs in "
+        f"{time.perf_counter() - sampling_start:.1f}s"
+    )
 
     existing_results = writer.read_frame_results() if config.output.resume else []
     ensure_existing_results_match_manifest(
@@ -298,11 +330,17 @@ def run_pipeline(config) -> dict:
         job for job in sampled_jobs if job.frame_index not in completed_indices
     ]
 
+    _log_phase(
+        f"processing {len(pending_jobs)} pending frames with "
+        f"{config.parallel.workers} workers and chunk size {config.parallel.chunk_size}"
+    )
+    frame_start = time.perf_counter()
     frame_results = FrameExecutor(
         config,
         atlas,
         assignment_policy=assignment_policy,
     ).run(pending_jobs)
+    _log_phase(f"frame processing finished in {time.perf_counter() - frame_start:.1f}s")
     all_frame_results = sorted(
         [*existing_results, *frame_results],
         key=lambda item: item.frame_index,
@@ -387,6 +425,7 @@ def run_pipeline(config) -> dict:
         }
     )
     writer.write_summary(summary)
+    _log_phase(f"pipeline finished in {time.perf_counter() - pipeline_start:.1f}s")
     return summary
 
 
@@ -402,18 +441,155 @@ def validate_microstates(namespace) -> dict:
     return summary
 
 
+def _repartition_frame_results(
+    frame_results: list,
+    atlas: "MicrostateAtlas",
+) -> list:
+    """Re-assign every frame to a new atlas using stored CV measurements."""
+
+    from dataclasses import replace as _replace
+
+    repartitioned: list = []
+    unassigned_count = 0
+    for result in frame_results:
+        metadata = getattr(result, "metadata", {}) or {}
+        measurements = metadata.get("assignment_measurements")
+        if measurements is None:
+            if result.phi_degrees is not None and result.psi_degrees is not None:
+                measurements = {"phi": result.phi_degrees, "psi": result.psi_degrees}
+            else:
+                repartitioned.append(result)
+                continue
+
+        try:
+            assignment = atlas.assign(measurements)
+        except Exception:
+            unassigned_count += 1
+            repartitioned.append(result)
+            continue
+
+        updated_metadata = dict(metadata)
+        updated_metadata["phi_center"] = assignment.phi_center
+        updated_metadata["psi_center"] = assignment.psi_center
+        updated_metadata["plot_x"] = assignment.plot_x
+        updated_metadata["plot_y"] = assignment.plot_y
+        repartitioned.append(
+            _replace(
+                result,
+                microstate_id=assignment.state_id,
+                microstate_label=assignment.label,
+                metadata=updated_metadata,
+            )
+        )
+
+    if unassigned_count > 0:
+        print(
+            f"[FELP] repartition: {unassigned_count} frame(s) could not be assigned "
+            f"to the new atlas",
+            file=sys.stderr,
+        )
+    return repartitioned
+
+
+def _build_auto_atlas_from_frame_results(
+    frame_results: list,
+    microstate_config,
+    output_dir: str,
+) -> "MicrostateAtlas":
+    """Build an auto-generated atlas directly from stored CV measurements."""
+
+    import numpy as np
+    from felp.reweighting import build_auto_microstate_payload
+
+    cv_arrays: dict[str, list[float]] = {}
+    for result in frame_results:
+        metadata = getattr(result, "metadata", {}) or {}
+        measurements = metadata.get("assignment_measurements")
+        if measurements is None:
+            if result.phi_degrees is not None and result.psi_degrees is not None:
+                measurements = {"phi": result.phi_degrees, "psi": result.psi_degrees}
+            else:
+                continue
+        for name, value in measurements.items():
+            cv_arrays.setdefault(name, []).append(float(value))
+
+    cv_names = tuple(cv_arrays.keys())
+    if len(cv_names) != 2:
+        from felp.core import ConfigurationError
+        raise ConfigurationError(
+            f"Repartition with auto microstates requires exactly 2 CVs in the stored "
+            f"frame results, but found {len(cv_names)}: {', '.join(cv_names) or '<none>'}."
+        )
+
+    cv_values = {name: np.asarray(values, dtype=float) for name, values in cv_arrays.items()}
+    payload = build_auto_microstate_payload(
+        cv_values=cv_values,
+        cv_names=cv_names,
+        target_frames_per_state=microstate_config.auto_target_frames_per_state,
+        min_bins_per_axis=microstate_config.auto_min_bins_per_axis,
+        max_bins_per_axis=microstate_config.auto_max_bins_per_axis,
+        max_total_states=microstate_config.auto_max_total_states,
+    )
+
+    auto_path = os.path.join(output_dir, "auto_microstates.json")
+    os.makedirs(output_dir, exist_ok=True)
+    with open(auto_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+
+    state_count = len(payload["states"])
+    print(
+        f"[FELP] repartition: auto-generated {state_count} microstates from "
+        f"{len(cv_values[cv_names[0]])} frames -> {auto_path}",
+        file=sys.stderr,
+    )
+
+    from felp.core import MicrostateConfig
+    from dataclasses import replace as _replace
+
+    file_config = _replace(
+        microstate_config,
+        source="file",
+        definition_file=auto_path,
+    )
+    return MicrostateAtlas.from_config(file_config)
+
+
 def summarize_results(namespace) -> dict:
     """Recompute microstate reweighting from an existing frame-results CSV."""
-    atlas = MicrostateAtlas.from_config(build_microstate_config(namespace))
+
+    microstate_config = build_microstate_config(namespace)
+    repartition = getattr(namespace, "repartition", False)
+    overwrite = getattr(namespace, "overwrite", False)
+
     writer = ResultsWriter(
         OutputConfig(
             output_dir=namespace.output_dir,
-            resume=True,
+            resume=not overwrite,
+            overwrite=overwrite,
         )
     )
     writer.prepare_output_dir()
 
     frame_results = load_frame_results_csv(namespace.raw_frame_results)
+
+    if repartition:
+        _log_phase("repartitioning frames to new microstate definitions")
+        if microstate_config.source == "auto":
+            atlas = _build_auto_atlas_from_frame_results(
+                frame_results, microstate_config, namespace.output_dir
+            )
+        else:
+            atlas = MicrostateAtlas.from_config(microstate_config)
+        frame_results = _repartition_frame_results(frame_results, atlas)
+        print(
+            f"[FELP] repartitioned {len(frame_results)} frames into "
+            f"{len(atlas.definitions)} microstates",
+            file=sys.stderr,
+        )
+    else:
+        atlas = MicrostateAtlas.from_config(microstate_config)
+
     sampling_manifest = None
     sampling_manifest_path = os.path.join(
         os.path.dirname(namespace.raw_frame_results),

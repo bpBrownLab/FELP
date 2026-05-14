@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from concurrent.futures import Future
+from dataclasses import replace
+
 from felp.core import (
     CVMeasurement,
     DihedralRestraintSpec,
@@ -71,6 +74,72 @@ def test_frame_executor_serial_path_preserves_order(monkeypatch) -> None:
 
     assert calls["initialized"] is True
     assert [result.frame_index for result in results] == [0, 1]
+
+
+def test_frame_executor_uses_configured_chunk_size(monkeypatch) -> None:
+    submitted_batch_sizes: list[int] = []
+
+    def fake_initialize(config, atlas, assignment_policy=None) -> None:
+        return None
+
+    def fake_process(job: SnapshotJob) -> FrameResult:
+        return FrameResult(
+            frame_index=job.frame_index,
+            stride_number=job.stride_number,
+            microstate_id="state",
+            microstate_label="state",
+            phi_degrees=0.0,
+            psi_degrees=0.0,
+            reference_energy_kj_mol=0.0,
+            perturbed_energy_kj_mol=0.0,
+            delta_u_kj_mol=0.0,
+            reference_relaxed_phi_degrees=0.0,
+            reference_relaxed_psi_degrees=0.0,
+            perturbed_relaxed_phi_degrees=0.0,
+            perturbed_relaxed_psi_degrees=0.0,
+        )
+
+    class FakeProcessPoolExecutor:
+        def __init__(self, *args, initializer=None, initargs=(), **kwargs) -> None:
+            if initializer is not None:
+                initializer(*initargs)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback) -> None:
+            return None
+
+        def submit(self, function, batch):
+            submitted_batch_sizes.append(len(batch))
+            future: Future = Future()
+            future.set_result(function(batch))
+            return future
+
+    monkeypatch.setattr(executor_module, "initialize_worker", fake_initialize)
+    monkeypatch.setattr(executor_module, "safe_process_frame_job", fake_process)
+    monkeypatch.setattr(executor_module, "ProcessPoolExecutor", FakeProcessPoolExecutor)
+
+    jobs = [
+        SnapshotJob(
+            frame_index=index,
+            stride_number=index,
+            coordinates_angstrom=((float(index), 0.0, 0.0),),
+        )
+        for index in range(5)
+    ]
+    config = replace(
+        _config(),
+        parallel=ParallelConfig(workers=2, chunk_size=2, progress_mode="off"),
+    )
+
+    results = executor_module.FrameExecutor(
+        config,
+        MicrostateAtlas(definitions=()),
+    ).run(jobs)
+
+    assert submitted_batch_sizes == [2, 2, 1]
+    assert [result.frame_index for result in results] == [0, 1, 2, 3, 4]
 
 
 def test_apply_cpu_thread_limits_sets_openmm_env(monkeypatch) -> None:

@@ -687,6 +687,10 @@ class MicrostateConfig:
     state_level: str = "cluster"
     allow_unassigned: bool = False
     reference_probability_mode: str = "loaded"
+    auto_target_frames_per_state: int = 100
+    auto_min_bins_per_axis: int = 3
+    auto_max_bins_per_axis: int = 64
+    auto_max_total_states: int = 2500
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "MicrostateConfig":
@@ -716,6 +720,12 @@ class MicrostateConfig:
             state_level=payload.get("state_level", "cluster"),
             allow_unassigned=payload.get("allow_unassigned", False),
             reference_probability_mode=str(reference_probability_mode),
+            auto_target_frames_per_state=payload.get(
+                "auto_target_frames_per_state", 100
+            ),
+            auto_min_bins_per_axis=payload.get("auto_min_bins_per_axis", 3),
+            auto_max_bins_per_axis=payload.get("auto_max_bins_per_axis", 64),
+            auto_max_total_states=payload.get("auto_max_total_states", 2500),
         )
 
 
@@ -1047,6 +1057,22 @@ class RunConfig:
                 "microstates.reference_probability_mode must be one of: "
                 "loaded, raw_counts."
             )
+        if self.microstates.auto_target_frames_per_state < 1:
+            raise ConfigurationError(
+                "auto_target_frames_per_state must be at least 1."
+            )
+        if self.microstates.auto_min_bins_per_axis < 1:
+            raise ConfigurationError("auto_min_bins_per_axis must be at least 1.")
+        if (
+            self.microstates.auto_max_bins_per_axis
+            < self.microstates.auto_min_bins_per_axis
+        ):
+            raise ConfigurationError(
+                "auto_max_bins_per_axis must be greater than or equal to "
+                "auto_min_bins_per_axis."
+            )
+        if self.microstates.auto_max_total_states < 1:
+            raise ConfigurationError("auto_max_total_states must be at least 1.")
         if (
             self.microstates.source == "grid"
             and self.microstates.reference_probability_mode == "loaded"
@@ -1145,7 +1171,7 @@ class SnapshotJob:
 
     frame_index: int
     stride_number: int
-    coordinates_angstrom: tuple[tuple[float, float, float], ...]
+    coordinates_angstrom: Any
     trajectory_id: int = 0
     source_frame_index: Optional[int] = None
     precomputed_state_id: Optional[str] = None

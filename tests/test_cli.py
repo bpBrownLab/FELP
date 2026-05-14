@@ -802,6 +802,12 @@ def test_build_run_config_uses_auto_microstates_for_distance_cv_without_backbone
             "raw_counts",
             "--distance-cv",
             "ends:1:CA:10:CA",
+            "--auto-microstate-target-frames-per-state",
+            "75",
+            "--auto-microstate-max-bins-per-axis",
+            "48",
+            "--auto-microstate-max-states",
+            "1600",
             "--output-dir",
             str(tmp_path / "out"),
         ]
@@ -811,6 +817,9 @@ def test_build_run_config_uses_auto_microstates_for_distance_cv_without_backbone
 
     assert config.microstates.source == "auto"
     assert config.microstates.reference_probability_mode == "raw_counts"
+    assert config.microstates.auto_target_frames_per_state == 75
+    assert config.microstates.auto_max_bins_per_axis == 48
+    assert config.microstates.auto_max_total_states == 1600
     assert config.restraints.cv_specs == ()
     assert [spec.name for spec in config.restraints.distance_cv_specs] == ["ends"]
 

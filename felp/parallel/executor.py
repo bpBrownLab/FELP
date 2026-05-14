@@ -8,6 +8,7 @@ import json
 import multiprocessing as mp
 import os
 import sys
+import time
 import traceback
 from typing import Iterable, Iterator, TypeVar
 
@@ -91,6 +92,7 @@ def initialize_worker(
     assignment_policy: AssignmentPolicy | None = None,
 ) -> None:
     """Initialize heavy dependencies (PyRosetta, OpenMM) exactly once per worker process."""
+    init_start = time.perf_counter()
     global _WORKER_ATLAS
     global _WORKER_ASSIGNMENT_POLICY
     global _WORKER_CONFIG
@@ -166,6 +168,13 @@ def initialize_worker(
         _WORKER_ENERGY_EVALUATOR = build_energy_evaluator(
             config.energy,
             _WORKER_CONVERSION_SERVICE,
+        )
+    if config.parallel.progress_mode != "off":
+        elapsed = time.perf_counter() - init_start
+        print(
+            f"[FELP worker {os.getpid()}] initialized in {elapsed:.1f}s",
+            file=sys.stderr,
+            flush=True,
         )
 
 
@@ -741,6 +750,19 @@ def _maybe_tqdm(
         yield item
 
 
+def _batched(items: list[_T], size: int) -> list[list[_T]]:
+    """Split ``items`` into non-empty batches of at most ``size``."""
+
+    batch_size = max(1, int(size))
+    return [items[start : start + batch_size] for start in range(0, len(items), batch_size)]
+
+
+def process_frame_job_batch(jobs: list[SnapshotJob]) -> list[FrameResult]:
+    """Process a batch of frame jobs in one worker task."""
+
+    return [safe_process_frame_job(job) for job in jobs]
+
+
 class FrameExecutor:
     """Dispatch frame jobs either serially or with multiprocessing."""
 
@@ -780,6 +802,16 @@ class FrameExecutor:
             return results
 
         context = mp.get_context(self.config.parallel.start_method)
+        job_batches = _batched(jobs, self.config.parallel.chunk_size)
+        batch_count = len(job_batches)
+        chunk_sz = max(1, int(self.config.parallel.chunk_size))
+        if batch_count > 1 and chunk_sz > 1:
+            print(
+                f"[FELP] scheduling {len(jobs)} frames as {batch_count} worker batches "
+                f"(chunk_size={chunk_sz}); progress updates as frames finish, not when batches start.",
+                file=sys.stderr,
+                flush=True,
+            )
         with ProcessPoolExecutor(
             max_workers=self.config.parallel.workers,
             mp_context=context,
@@ -787,26 +819,71 @@ class FrameExecutor:
             initargs=(self.config, self.atlas, self.assignment_policy),
         ) as executor:
             futures = [
-                executor.submit(safe_process_frame_job, job)
-                for job in jobs
+                executor.submit(process_frame_job_batch, batch)
+                for batch in job_batches
             ]
-            results_by_future: dict[Future[FrameResult], FrameResult] = {}
-            completed_iter = as_completed(futures)
-            for future in _maybe_tqdm(
-                completed_iter,
-                total=len(futures),
-                desc="frames",
-                enabled=show_bar,
-            ):
-                result = future.result()
-                if self.config.parallel.fail_fast and result.metadata.get("status") == "failed":
+            results_by_future: dict[Future[list[FrameResult]], list[FrameResult]] = {}
+
+            pbar = None
+            if show_bar:
+                try:
+                    from tqdm.auto import tqdm
+
+                    pbar = tqdm(
+                        total=len(jobs),
+                        desc="frames",
+                        leave=True,
+                        dynamic_ncols=True,
+                        file=sys.stderr,
+                        unit="fr",
+                    )
+                except Exception:
+                    pbar = None
+
+            completed_batches = 0
+            for future in as_completed(futures):
+                batch_results = future.result()
+                completed_batches += 1
+                if pbar is not None:
+                    pbar.update(len(batch_results))
+                elif show_bar and batch_count > 1:
+                    if (
+                        completed_batches == 1
+                        or completed_batches == batch_count
+                        or completed_batches % max(batch_count // 50, 1) == 0
+                    ):
+                        print(
+                            f"frame batches: {completed_batches}/{batch_count}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+
+                failed_result = next(
+                    (
+                        result
+                        for result in batch_results
+                        if result.metadata.get("status") == "failed"
+                    ),
+                    None,
+                )
+                if self.config.parallel.fail_fast and failed_result is not None:
+                    if pbar is not None:
+                        pbar.close()
                     for pending in futures:
                         pending.cancel()
                     raise RuntimeError(
-                        f"Frame {result.frame_index} failed while --fail-fast was enabled: "
-                        f"{result.metadata.get('error_type')}: {result.metadata.get('error_message')}"
+                        f"Frame {failed_result.frame_index} failed while --fail-fast was enabled: "
+                        f"{failed_result.metadata.get('error_type')}: "
+                        f"{failed_result.metadata.get('error_message')}"
                     ) from None
-                results_by_future[future] = result
+                results_by_future[future] = batch_results
 
-        ordered = [results_by_future[future] for future in futures]
+            if pbar is not None:
+                pbar.close()
+
+        ordered = [
+            result
+            for future in futures
+            for result in results_by_future[future]
+        ]
         return sorted(ordered, key=lambda item: item.frame_index)

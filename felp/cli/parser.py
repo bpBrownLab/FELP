@@ -154,6 +154,37 @@ def _add_common_microstate_arguments(parser: argparse.ArgumentParser) -> None:
         help="Number of psi bins when using grid microstates.",
     )
     group.add_argument(
+        "--auto-microstate-target-frames-per-state",
+        type=int,
+        default=100,
+        help=(
+            "Target support used to cap automatically generated two-CV microstates. "
+            "The auto grid will not exceed roughly frame_count / this value states "
+            "before also applying --auto-microstate-max-states."
+        ),
+    )
+    group.add_argument(
+        "--auto-microstate-min-bins-per-axis",
+        type=int,
+        default=3,
+        help="Minimum nonconstant-axis bin count for auto two-CV microstates.",
+    )
+    group.add_argument(
+        "--auto-microstate-max-bins-per-axis",
+        type=int,
+        default=64,
+        help="Maximum per-axis bin count for auto two-CV microstates.",
+    )
+    group.add_argument(
+        "--auto-microstate-max-states",
+        type=int,
+        default=2500,
+        help=(
+            "Maximum total states for auto two-CV microstates. Raise this for very "
+            "large trajectories when the default grid is still too coarse."
+        ),
+    )
+    group.add_argument(
         "--msm-bundle-dir",
         help="Directory containing a previously exported MSM bundle.",
     )
@@ -763,7 +794,12 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
         "--chunk-size",
         type=int,
         default=1,
-        help="Number of frames submitted per worker task batch.",
+        help=(
+            "Frames per worker task when using --workers>1. Values >1 cut pickling/scheduling "
+            "overhead but force that many frames to run serially inside one worker before the "
+            "task finishes—so use modest sizes (e.g. 8–32) unless batches are very fast. "
+            "Progress is reported by finished frame count, not by batch start."
+        ),
     )
     parallel_group.add_argument(
         "--start-method",
@@ -1078,9 +1114,14 @@ def _add_felp_plot_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--fel-bandwidth-rule",
-        choices=("scott", "silverman"),
-        default="scott",
-        help="Automatic bandwidth rule for --fel-bandwidth=auto.",
+        choices=("scott", "silverman", "state-adaptive"),
+        default="state-adaptive",
+        help=(
+            "Automatic bandwidth rule for --fel-bandwidth=auto. "
+            "'state-adaptive' preserves state masses while choosing conservative "
+            "per-state kernel widths from each state's local CV support; 'scott' "
+            "and 'silverman' use one global bandwidth."
+        ),
     )
     parser.add_argument(
         "--fel-cmap",
@@ -1179,6 +1220,21 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=300.0,
         help="Temperature used when converting probabilities to free energies.",
+    )
+    summarize_parser.add_argument(
+        "--repartition",
+        action="store_true",
+        help=(
+            "Re-assign every frame to microstates defined by the current "
+            "--microstate-source / --phi-bins / --psi-bins / --auto-* options "
+            "instead of using the microstate_id stored in frame_results.csv. "
+            "This is cheap—it reuses the expensive delta_u values already computed."
+        ),
+    )
+    summarize_parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite the output directory if it already exists.",
     )
     _add_common_microstate_arguments(summarize_parser)
     _add_reweighting_qc_arguments(summarize_parser)
@@ -1373,6 +1429,10 @@ def build_run_config(namespace: argparse.Namespace) -> RunConfig:
             state_level=namespace.state_level,
             allow_unassigned=namespace.allow_unassigned,
             reference_probability_mode=reference_probability_mode,
+            auto_target_frames_per_state=namespace.auto_microstate_target_frames_per_state,
+            auto_min_bins_per_axis=namespace.auto_microstate_min_bins_per_axis,
+            auto_max_bins_per_axis=namespace.auto_microstate_max_bins_per_axis,
+            auto_max_total_states=namespace.auto_microstate_max_states,
         ),
         parallel=ParallelConfig(
             workers=namespace.workers,
@@ -1420,6 +1480,10 @@ def build_microstate_config(
         state_level=namespace.state_level,
         allow_unassigned=namespace.allow_unassigned,
         reference_probability_mode=reference_probability_mode,
+        auto_target_frames_per_state=namespace.auto_microstate_target_frames_per_state,
+        auto_min_bins_per_axis=namespace.auto_microstate_min_bins_per_axis,
+        auto_max_bins_per_axis=namespace.auto_microstate_max_bins_per_axis,
+        auto_max_total_states=namespace.auto_microstate_max_states,
     )
 
 

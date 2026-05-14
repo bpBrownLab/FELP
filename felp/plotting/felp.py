@@ -36,7 +36,7 @@ _KJ_PER_KCAL = 4.184
 _ANGULAR_CV_NAMES = {"phi", "psi", "omega"}
 _DEFAULT_DIHEDRAL_CV_NAMES = {"phi", "psi"}
 _FEL_ESTIMATORS = {"histogram", "gaussian-kernel"}
-_FEL_BANDWIDTH_RULES = {"scott", "silverman"}
+_FEL_BANDWIDTH_RULES = {"scott", "silverman", "state-adaptive"}
 
 
 def _normalize_cv_name(raw: str) -> str:
@@ -114,7 +114,7 @@ class FELPPlotConfig:
     fel_bandwidth: str = "auto"
     """Gaussian-kernel bandwidth: ``auto``, one float, or ``x,y`` floats."""
 
-    fel_bandwidth_rule: str = "scott"
+    fel_bandwidth_rule: str = "state-adaptive"
     """Automatic bandwidth rule for Gaussian-kernel projected FELs."""
 
     fel_colormap: str = DEFAULT_FEL_COLORMAP
@@ -170,7 +170,7 @@ class FELPPlotConfig:
         fel_bandwidth_rule = str(self.fel_bandwidth_rule).strip()
         if fel_bandwidth_rule not in _FEL_BANDWIDTH_RULES:
             raise ConfigurationError(
-                "fel_bandwidth_rule must be one of: scott, silverman."
+                "fel_bandwidth_rule must be one of: scott, silverman, state-adaptive."
             )
         object.__setattr__(self, "fel_bandwidth_rule", fel_bandwidth_rule)
         object.__setattr__(
@@ -1261,6 +1261,84 @@ def _weighted_standard_deviation(values: np.ndarray, weights: np.ndarray) -> flo
     return math.sqrt(max(variance, 0.0))
 
 
+def _weighted_quantile(values: np.ndarray, weights: np.ndarray, quantile: float) -> float | None:
+    """Return a weighted quantile for finite positive-weight values."""
+
+    finite = np.isfinite(values) & np.isfinite(weights) & (weights > 0.0)
+    if not finite.any():
+        fallback = values[np.isfinite(values)]
+        if fallback.size == 0:
+            return None
+        return float(np.quantile(fallback, quantile))
+    finite_values = values[finite]
+    finite_weights = weights[finite]
+    order = np.argsort(finite_values)
+    ordered_values = finite_values[order]
+    ordered_weights = finite_weights[order]
+    cumulative = np.cumsum(ordered_weights)
+    total = float(cumulative[-1])
+    if total <= 0.0:
+        return None
+    threshold = min(max(float(quantile), 0.0), 1.0) * total
+    index = int(np.searchsorted(cumulative, threshold, side="left"))
+    index = min(index, ordered_values.size - 1)
+    return float(ordered_values[index])
+
+
+def _robust_weighted_scale(values: np.ndarray, weights: np.ndarray) -> float:
+    """Return a conservative robust scale for bandwidth selection."""
+
+    std = _weighted_standard_deviation(values, weights)
+    q25 = _weighted_quantile(values, weights, 0.25)
+    q75 = _weighted_quantile(values, weights, 0.75)
+    scales = [std] if std > 0.0 and math.isfinite(std) else []
+    if q25 is not None and q75 is not None:
+        iqr_scale = (q75 - q25) / 1.349
+        if iqr_scale > 0.0 and math.isfinite(iqr_scale):
+            scales.append(float(iqr_scale))
+    return min(scales) if scales else 0.0
+
+
+def _state_adaptive_kernel_bandwidth(
+    *,
+    x_values: np.ndarray,
+    y_values: np.ndarray,
+    reference_weights: np.ndarray,
+    target_weights: np.ndarray,
+    x_edges: np.ndarray,
+    y_edges: np.ndarray,
+) -> tuple[tuple[float, float], dict[str, object]]:
+    """Resolve a conservative local bandwidth for one microstate/state support."""
+
+    x_bin_width = float(np.median(np.diff(x_edges)))
+    y_bin_width = float(np.median(np.diff(y_edges)))
+    minimum = (0.5 * x_bin_width, 0.5 * y_bin_width)
+    reference_ess = _weighted_effective_sample_size(reference_weights)
+    target_ess = _weighted_effective_sample_size(target_weights)
+    positive_ess = [value for value in (reference_ess, target_ess) if value > 0.0]
+    effective_sample_size = min(positive_ess) if positive_ess else 1.0
+    factor = effective_sample_size ** (-1.0 / 6.0)
+    combined_weights = np.asarray(reference_weights, dtype=float) + np.asarray(
+        target_weights,
+        dtype=float,
+    )
+
+    x_scale = _robust_weighted_scale(x_values, combined_weights)
+    y_scale = _robust_weighted_scale(y_values, combined_weights)
+    x_raw = x_scale * factor
+    y_raw = y_scale * factor
+    x_bandwidth = max(minimum[0], x_raw)
+    y_bandwidth = max(minimum[1], y_raw)
+    return (float(x_bandwidth), float(y_bandwidth)), {
+        "bandwidth": [float(x_bandwidth), float(y_bandwidth)],
+        "reference_ess": reference_ess,
+        "target_ess": target_ess,
+        "effective_sample_size": effective_sample_size,
+        "robust_scale": [float(x_scale), float(y_scale)],
+        "minimum_bandwidth": [float(minimum[0]), float(minimum[1])],
+    }
+
+
 def _resolve_kernel_bandwidth(
     *,
     x_values: np.ndarray,
@@ -1441,10 +1519,12 @@ def _gaussian_kernel_projected_surfaces(
 
         state_payloads.append(
             (
+                state_id,
                 state_x,
                 state_y,
                 reference_weights,
                 target_weights,
+                target_conditional,
                 reference_probability,
                 target_probability,
             )
@@ -1458,32 +1538,94 @@ def _gaussian_kernel_projected_surfaces(
             float(target_probability * value) for value in target_conditional
         )
 
-    bandwidth, bandwidth_metadata = _resolve_kernel_bandwidth(
-        x_values=np.asarray(bandwidth_x_values, dtype=float),
-        y_values=np.asarray(bandwidth_y_values, dtype=float),
-        reference_weights=np.asarray(bandwidth_reference_weights, dtype=float),
-        target_weights=np.asarray(bandwidth_target_weights, dtype=float),
-        x_edges=x_edges,
-        y_edges=y_edges,
-        bandwidth_spec=bandwidth_spec,
-        bandwidth_rule=bandwidth_rule,
-    )
+    fixed_bandwidth = _parse_fel_bandwidth(bandwidth_spec)
+    adaptive_bandwidths: dict[str, tuple[float, float]] = {}
+    adaptive_metadata: dict[str, dict[str, object]] = {}
+    if fixed_bandwidth is None and bandwidth_rule == "state-adaptive":
+        for (
+            state_id,
+            state_x,
+            state_y,
+            reference_weights,
+            _target_weights,
+            target_conditional,
+            _reference_probability,
+            _target_probability,
+        ) in state_payloads:
+            state_bandwidth, state_metadata = _state_adaptive_kernel_bandwidth(
+                x_values=state_x,
+                y_values=state_y,
+                reference_weights=reference_weights,
+                target_weights=target_conditional,
+                x_edges=x_edges,
+                y_edges=y_edges,
+            )
+            adaptive_bandwidths[state_id] = state_bandwidth
+            adaptive_metadata[state_id] = state_metadata
+        bandwidth_values = np.asarray(
+            list(adaptive_bandwidths.values()),
+            dtype=float,
+        )
+        bandwidth_metadata = {
+            "cv_frame_projection_bandwidth": (
+                np.median(bandwidth_values, axis=0).astype(float).tolist()
+                if bandwidth_values.size
+                else None
+            ),
+            "cv_frame_projection_bandwidth_rule": "state-adaptive",
+            "cv_frame_projection_bandwidth_source": "state_local_robust_scott",
+            "cv_frame_projection_bandwidth_detail": (
+                "Each state's conditional frame density uses a robust Scott bandwidth "
+                "from that state's local CV support; state probabilities remain fixed."
+            ),
+            "cv_frame_projection_bandwidth_summary": (
+                {
+                    "min": np.min(bandwidth_values, axis=0).astype(float).tolist(),
+                    "median": np.median(bandwidth_values, axis=0).astype(float).tolist(),
+                    "max": np.max(bandwidth_values, axis=0).astype(float).tolist(),
+                }
+                if bandwidth_values.size
+                else {}
+            ),
+            "cv_frame_projection_state_bandwidths": adaptive_metadata,
+            "cv_frame_projection_minimum_bandwidth": [
+                0.5 * float(np.median(np.diff(x_edges))),
+                0.5 * float(np.median(np.diff(y_edges))),
+            ],
+        }
+        bandwidth = None
+    else:
+        bandwidth, bandwidth_metadata = _resolve_kernel_bandwidth(
+            x_values=np.asarray(bandwidth_x_values, dtype=float),
+            y_values=np.asarray(bandwidth_y_values, dtype=float),
+            reference_weights=np.asarray(bandwidth_reference_weights, dtype=float),
+            target_weights=np.asarray(bandwidth_target_weights, dtype=float),
+            x_edges=x_edges,
+            y_edges=y_edges,
+            bandwidth_spec=bandwidth_spec,
+            bandwidth_rule=bandwidth_rule,
+        )
 
     for (
+        state_id,
         state_x,
         state_y,
         reference_weights,
         target_weights,
+        _target_conditional,
         reference_probability,
         target_probability,
     ) in state_payloads:
+        state_bandwidth = adaptive_bandwidths.get(state_id, bandwidth)
+        if state_bandwidth is None:
+            continue
         reference_grid += reference_probability * _state_kernel_probability_grid(
             x_values=state_x,
             y_values=state_y,
             weights=reference_weights,
             x_centers=x_centers,
             y_centers=y_centers,
-            bandwidth=bandwidth,
+            bandwidth=state_bandwidth,
         )
         target_grid += target_probability * _state_kernel_probability_grid(
             x_values=state_x,
@@ -1491,7 +1633,7 @@ def _gaussian_kernel_projected_surfaces(
             weights=target_weights,
             x_centers=x_centers,
             y_centers=y_centers,
-            bandwidth=bandwidth,
+            bandwidth=state_bandwidth,
         )
 
     reference_total = float(reference_grid.sum())

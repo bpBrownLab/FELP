@@ -813,6 +813,55 @@ def test_gaussian_kernel_projection_spreads_sparse_weighted_surface() -> None:
     assert int(np.count_nonzero(target_grid > 1.0e-6)) > 2
 
 
+def test_state_adaptive_gaussian_bandwidth_is_local_and_mass_preserving() -> None:
+    frame_results = [
+        FrameResult(
+            frame_index=index,
+            stride_number=index,
+            microstate_id=state_id,
+            microstate_label=state_id,
+            phi_degrees=None,
+            psi_degrees=None,
+            reference_energy_kj_mol=0.0,
+            perturbed_energy_kj_mol=0.0,
+            delta_u_kj_mol=0.0,
+            reference_relaxed_phi_degrees=None,
+            reference_relaxed_psi_degrees=None,
+            perturbed_relaxed_phi_degrees=None,
+            perturbed_relaxed_psi_degrees=None,
+            metadata={"assignment_measurements": {"ends": ends, "turn": turn}},
+        )
+        for index, (state_id, ends, turn) in enumerate(
+            [
+                *[("a", float(value), 0.0) for value in np.linspace(0.0, 0.4, 8)],
+                *[("b", 10.0 + float(value), 5.0) for value in np.linspace(0.0, 0.4, 8)],
+            ]
+        )
+    ]
+
+    result = _gaussian_kernel_projected_surfaces(
+        frame_results=frame_results,
+        reference_probability_by_state={"a": 0.5, "b": 0.5},
+        target_probability_by_state={"a": 0.5, "b": 0.5},
+        temperature_kelvin=300.0,
+        weight_treatment="raw",
+        bins=40,
+        max_points=100,
+        x_name="ends",
+        y_name="turn",
+        bandwidth_spec="auto",
+        bandwidth_rule="state-adaptive",
+    )
+
+    assert result is not None
+    reference_grid, target_grid, _, _, metadata = result
+    assert reference_grid.sum() == pytest.approx(1.0)
+    assert target_grid.sum() == pytest.approx(1.0)
+    assert metadata["cv_frame_projection_bandwidth_rule"] == "state-adaptive"
+    summary = metadata["cv_frame_projection_bandwidth_summary"]
+    assert summary["max"][0] < 1.0
+
+
 @pytest.mark.parametrize(
     "raw, expected",
     [

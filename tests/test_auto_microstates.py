@@ -32,6 +32,22 @@ def test_build_auto_microstate_payload_writes_complete_two_cv_grid() -> None:
     assert all("plot_x" in state and "plot_y" in state for state in states)
 
 
+def test_auto_microstate_default_cap_scales_with_large_frame_count() -> None:
+    payload = build_auto_microstate_payload(
+        cv_values={
+            "ends": np.linspace(0.0, 30.0, 25_000),
+            "turn": np.linspace(4.0, 11.0, 25_000),
+        },
+        cv_names=("ends", "turn"),
+    )
+
+    metadata = payload["metadata"]
+
+    assert metadata["state_count"] > 144
+    assert metadata["state_count"] <= metadata["policy"]["max_total_states"]
+    assert metadata["state_count"] <= metadata["policy"]["max_states_by_support"]
+
+
 def test_build_auto_microstate_payload_pads_constant_axis() -> None:
     payload = build_auto_microstate_payload(
         cv_values={

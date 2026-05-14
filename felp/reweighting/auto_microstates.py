@@ -16,11 +16,13 @@ from felp.conversion import StructureConversionService
 from felp.core import ConfigurationError, RunConfig, SnapshotJob
 from felp.restraints import BackboneDihedralCVProtocol
 
+from .coordinate_cv import coordinate_cv_extractors
+
 _AUTO_MICROSTATE_VERSION = 1
-_TARGET_FRAMES_PER_STATE = 25
-_MIN_BINS_PER_NONCONSTANT_AXIS = 3
-_MAX_BINS_PER_AXIS = 24
-_MAX_TOTAL_STATES = 144
+_DEFAULT_TARGET_FRAMES_PER_STATE = 100
+_DEFAULT_MIN_BINS_PER_NONCONSTANT_AXIS = 3
+_DEFAULT_MAX_BINS_PER_AXIS = 64
+_DEFAULT_MAX_TOTAL_STATES = 2500
 
 
 @dataclass(frozen=True)
@@ -88,20 +90,22 @@ def _measure_configured_cvs(
         distance_cv_specs=config.restraints.distance_cv_specs,
         force_constant=config.restraints.effective_rosetta_force_constant(),
     )
+    coordinate_extractors = coordinate_cv_extractors(template_structure, cv_protocol)
 
     for job in jobs:
-        structure = conversion_service.clone_structure_with_coordinates(
-            template_structure,
-            job.coordinates_angstrom,
-        )
-        measurement = cv_protocol.measure_structure(structure)
+        coordinates = np.asarray(job.coordinates_angstrom, dtype=float)
         for name in cv_names:
-            values[name].append(float(measurement.values[name]))
+            values[name].append(float(coordinate_extractors[name](coordinates)))
 
     return {name: np.asarray(raw_values, dtype=float) for name, raw_values in values.items()}
 
 
-def _freedman_diaconis_bin_count(values: np.ndarray) -> int:
+def _freedman_diaconis_bin_count(
+    values: np.ndarray,
+    *,
+    min_bins: int,
+    max_bins: int,
+) -> int:
     finite = values[np.isfinite(values)]
     if finite.size <= 1:
         return 1
@@ -121,13 +125,20 @@ def _freedman_diaconis_bin_count(values: np.ndarray) -> int:
     else:
         bins = int(math.ceil(math.sqrt(finite.size)))
 
-    bins = max(_MIN_BINS_PER_NONCONSTANT_AXIS, bins)
-    return min(_MAX_BINS_PER_AXIS, bins)
+    bins = max(int(min_bins), bins)
+    return min(int(max_bins), bins)
 
 
-def _cap_joint_bin_count(x_bins: int, y_bins: int, frame_count: int) -> tuple[int, int]:
-    max_states_by_support = max(1, frame_count // _TARGET_FRAMES_PER_STATE)
-    max_states = max(4, min(_MAX_TOTAL_STATES, max_states_by_support))
+def _cap_joint_bin_count(
+    x_bins: int,
+    y_bins: int,
+    frame_count: int,
+    *,
+    target_frames_per_state: int,
+    max_total_states: int,
+) -> tuple[int, int]:
+    max_states_by_support = max(1, frame_count // int(target_frames_per_state))
+    max_states = max(4, min(int(max_total_states), max_states_by_support))
     x_bins = max(1, int(x_bins))
     y_bins = max(1, int(y_bins))
 
@@ -175,8 +186,17 @@ def build_auto_microstate_payload(
     *,
     cv_values: dict[str, np.ndarray],
     cv_names: tuple[str, str],
+    target_frames_per_state: int = _DEFAULT_TARGET_FRAMES_PER_STATE,
+    min_bins_per_axis: int = _DEFAULT_MIN_BINS_PER_NONCONSTANT_AXIS,
+    max_bins_per_axis: int = _DEFAULT_MAX_BINS_PER_AXIS,
+    max_total_states: int = _DEFAULT_MAX_TOTAL_STATES,
 ) -> dict[str, Any]:
     """Build reusable microstate JSON from observed 2D CV statistics."""
+
+    target_frames_per_state = max(1, int(target_frames_per_state))
+    min_bins_per_axis = max(1, int(min_bins_per_axis))
+    max_bins_per_axis = max(min_bins_per_axis, int(max_bins_per_axis))
+    max_total_states = max(1, int(max_total_states))
 
     x_name, y_name = cv_names
     x_values = cv_values[x_name]
@@ -190,9 +210,25 @@ def build_auto_microstate_payload(
 
     x_values = x_values[finite_mask]
     y_values = y_values[finite_mask]
-    x_bins = _freedman_diaconis_bin_count(x_values)
-    y_bins = _freedman_diaconis_bin_count(y_values)
-    x_bins, y_bins = _cap_joint_bin_count(x_bins, y_bins, int(finite_mask.sum()))
+    x_bins = _freedman_diaconis_bin_count(
+        x_values,
+        min_bins=min_bins_per_axis,
+        max_bins=max_bins_per_axis,
+    )
+    y_bins = _freedman_diaconis_bin_count(
+        y_values,
+        min_bins=min_bins_per_axis,
+        max_bins=max_bins_per_axis,
+    )
+    uncapped_x_bins = int(x_bins)
+    uncapped_y_bins = int(y_bins)
+    x_bins, y_bins = _cap_joint_bin_count(
+        x_bins,
+        y_bins,
+        int(finite_mask.sum()),
+        target_frames_per_state=target_frames_per_state,
+        max_total_states=max_total_states,
+    )
     x_edges = _edges_for_values(x_values, x_bins)
     y_edges = _edges_for_values(y_values, y_bins)
 
@@ -231,9 +267,17 @@ def build_auto_microstate_payload(
         "state_count": len(states),
         "policy": {
             "marginal_rule": "freedman_diaconis",
-            "target_frames_per_state": _TARGET_FRAMES_PER_STATE,
-            "max_total_states": _MAX_TOTAL_STATES,
-            "max_bins_per_axis": _MAX_BINS_PER_AXIS,
+            "target_frames_per_state": target_frames_per_state,
+            "min_bins_per_axis": min_bins_per_axis,
+            "max_total_states": max_total_states,
+            "max_states_by_support": int(
+                max(1, int(finite_mask.sum()) // target_frames_per_state)
+            ),
+            "max_bins_per_axis": max_bins_per_axis,
+            "uncapped_bin_counts": {
+                x_name: uncapped_x_bins,
+                y_name: uncapped_y_bins,
+            },
             "complete_joint_grid": True,
         },
         "axes": {
@@ -260,7 +304,14 @@ def write_auto_microstate_file(
         )
 
     cv_values = _measure_configured_cvs(jobs, config)
-    payload = build_auto_microstate_payload(cv_values=cv_values, cv_names=cv_names)
+    payload = build_auto_microstate_payload(
+        cv_values=cv_values,
+        cv_names=cv_names,
+        target_frames_per_state=config.microstates.auto_target_frames_per_state,
+        min_bins_per_axis=config.microstates.auto_min_bins_per_axis,
+        max_bins_per_axis=config.microstates.auto_max_bins_per_axis,
+        max_total_states=config.microstates.auto_max_total_states,
+    )
     _write_json_atomic(output_path, payload)
     metadata = dict(payload["metadata"])
     return AutoMicrostateFile(

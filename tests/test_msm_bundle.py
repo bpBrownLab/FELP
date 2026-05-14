@@ -143,3 +143,56 @@ def test_trajectory_loader_attaches_precomputed_states(tmp_path: Path, monkeypat
     assert [job.precomputed_state_id for job in jobs] == ["0", "1", "1"]
     assert [job.trajectory_id for job in jobs] == [0, 0, 1]
     assert [job.source_frame_index for job in jobs] == [0, 2, 0]
+
+
+def test_trajectory_loader_streams_grouped_segments_with_global_stride(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    topology = tmp_path / "topology.pdb"
+    trajectory_a = tmp_path / "traj_a.xtc"
+    trajectory_b = tmp_path / "traj_b.xtc"
+    topology.write_text("placeholder\n", encoding="utf-8")
+    trajectory_a.write_text("placeholder\n", encoding="utf-8")
+    trajectory_b.write_text("placeholder\n", encoding="utf-8")
+
+    class FakeChunk:
+        def __init__(self, values: list[float]):
+            self.xyz = np.asarray(
+                [[[value, 0.0, 0.0]] for value in values],
+                dtype=float,
+            )
+
+    class FakeMD:
+        calls: list[tuple[str, int, int]] = []
+
+        @staticmethod
+        def iterload(path: str, chunk: int, top: str, stride: int):
+            assert top == str(topology)
+            FakeMD.calls.append((path, chunk, stride))
+            values = {
+                str(trajectory_a): [0.0, 1.0, 2.0],
+                str(trajectory_b): [3.0, 4.0, 5.0],
+            }[path]
+            selected = values[::stride]
+            for start in range(0, len(selected), chunk):
+                yield FakeChunk(selected[start : start + chunk])
+
+    monkeypatch.setattr("felp.io.trajectory._import_mdtraj", lambda: FakeMD)
+
+    jobs = TrajectoryLoader(
+        InputConfig(
+            topology_file=str(topology),
+            trajectory_files=((str(trajectory_a), str(trajectory_b)),),
+            stride=2,
+        ),
+        load_chunk_size=2,
+    ).load_jobs()
+
+    assert FakeMD.calls == [
+        (str(trajectory_a), 2, 1),
+        (str(trajectory_b), 2, 1),
+    ]
+    assert [job.trajectory_id for job in jobs] == [0, 0, 0]
+    assert [job.source_frame_index for job in jobs] == [0, 2, 4]
+    assert [job.coordinates_angstrom[0][0] for job in jobs] == [0.0, 20.0, 40.0]
