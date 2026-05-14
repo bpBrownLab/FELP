@@ -183,3 +183,5 @@ cython_debug/
 *.log
 *.out
 *.synctex.gz
+*.bcf
+*.run.xml
