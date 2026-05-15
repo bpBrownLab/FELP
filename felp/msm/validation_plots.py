@@ -1,4 +1,4 @@
-"""Extended MSM validation plots (ITS, CK tests, spectra, Ramachandran views)."""
+"""MSM validation diagnostics (ITS, CK tests, transition matrices, relaxation timescales, cluster scatter)."""
 
 from __future__ import annotations
 
@@ -66,6 +66,11 @@ def _normalize_lags(lags: Optional[tuple[int, ...]], max_lag: int, max_points: i
 def _feature_axis_labels(result: PyEMMAPipelineResult, ndim: int) -> list[str]:
     """Best-effort axis labels from the feature spec."""
 
+    _LABEL_MAP = {
+        "phi": r"$\phi$ (deg)",
+        "psi": r"$\psi$ (deg)",
+        "omega": r"$\omega$ (deg)",
+    }
     labels: list[str] = []
     for operation in result.feature_spec.operations:
         raw_labels = operation.parameters.get("labels")
@@ -73,17 +78,7 @@ def _feature_axis_labels(result: PyEMMAPipelineResult, ndim: int) -> list[str]:
             labels.extend(str(label) for label in raw_labels)
     if len(labels) < ndim:
         labels.extend(f"Feature {index}" for index in range(len(labels), ndim))
-    formatted: list[str] = []
-    for label in labels[:ndim]:
-        if label == "phi":
-            formatted.append(r"$\phi$ (deg)")
-        elif label == "psi":
-            formatted.append(r"$\psi$ (deg)")
-        elif label == "omega":
-            formatted.append(r"$\omega$ (deg)")
-        else:
-            formatted.append(label)
-    return formatted
+    return [_LABEL_MAP.get(label, label) for label in labels[:ndim]]
 
 
 def _plot_implied_timescales(pyemma: Any, its: Any, ax: Any, its_processes: int) -> None:
@@ -173,15 +168,21 @@ def write_msm_validation_report(
     ck_n_jobs: int = 1,
     skip_ck: bool = False,
     max_tm_states: int = 48,
-    rama_scatter_max_points: int = 25000,
+    cluster_scatter_max_points: int = 25000,
 ) -> dict[str, str]:
     """
-    Write validation figures under ``output_dir`` (created if missing).
+    Write MSM diagnostic figures under ``output_dir`` (created if missing).
 
-    Includes implied timescales, Chapman–Kolmogorov tests (discrete and/or
-    metastable when available), stationary distribution, transition matrix,
-    implied relaxation timescales, and Ramachandran-style views when the
-    reduced feature dimension is two (typical phi/psi, no reducer).
+    Includes implied timescales, Chapman-Kolmogorov tests, stationary
+    distribution, transition matrices, relaxation timescales, and a
+    microstate cluster scatter (tab20 coloring) for quick visual
+    diagnostics.
+
+    ``cluster_scatter_max_points`` caps scatter point count for
+    ``microstate_clusters.png``; use ``0`` for all frames.
+
+    Publication-style FEL/probability/state projections are generated
+    separately via ``generate_msm_plots`` using the bundle plotting system.
     """
 
     plt, pyemma = _import_plotting()
@@ -319,11 +320,26 @@ def write_msm_validation_report(
         ts = np.asarray(msm.timescales(k=k_ts), dtype=float)
         ts = ts[np.isfinite(ts) & (ts > 0.0)]
         if ts.size:
-            fig, ax = plt.subplots(1, 1, figsize=(6.2, 3.8))
-            ax.semilogy(np.arange(1, len(ts) + 1), ts, "o-", color="C2")
+            indices = np.arange(1, len(ts) + 1)
+            fig, ax = plt.subplots(1, 1, figsize=(6.4, 4.0))
+            ax.semilogy(
+                indices, ts,
+                marker="o",
+                markersize=6,
+                markerfacecolor="C2",
+                markeredgecolor="black",
+                markeredgewidth=0.6,
+                linestyle="-",
+                linewidth=1.4,
+                color="C2",
+            )
             ax.set_xlabel("Process index")
             ax.set_ylabel("Implied timescale (steps)")
             ax.set_title("Relaxation timescales at fitted lag")
+            ax.set_xlim(0.5, len(ts) + 0.5)
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+            ax.grid(axis="y", alpha=0.3, linewidth=0.5)
             fig.tight_layout()
             path = os.path.join(output_dir, "relaxation_timescales.png")
             fig.savefig(path, dpi=300)
@@ -336,44 +352,40 @@ def write_msm_validation_report(
     if reduced and reduced[0].ndim == 2 and reduced[0].shape[1] == 2:
         xy = np.concatenate(reduced, axis=0)
         axis_labels = _feature_axis_labels(result, 2)
-        fig, ax = plt.subplots(1, 1, figsize=(5.2, 4.6))
-        pyemma.plots.plot_free_energy(xy[:, 0], xy[:, 1], ax=ax, legacy=False)
-        ax.set_xlabel(axis_labels[0])
-        ax.set_ylabel(axis_labels[1])
-        ax.set_title("Reference frame free energy")
-        fig.tight_layout()
-        path = os.path.join(output_dir, "rama_feature_free_energy.png")
-        fig.savefig(path, dpi=300)
-        plt.close(fig)
-        written["rama_feature_free_energy"] = path
-
         labels = np.concatenate(
             [np.asarray(t, dtype=int) for t in result.cluster_dtrajs],
             axis=0,
         )
-        rng = np.random.default_rng(0)
         n = xy.shape[0]
-        cap = min(n, rama_scatter_max_points)
-        pick = rng.choice(n, size=cap, replace=False)
-        fig, ax = plt.subplots(1, 1, figsize=(5.2, 4.6))
+        if cluster_scatter_max_points <= 0:
+            cap = n
+            pick = np.arange(n, dtype=int)
+        else:
+            cap = min(n, int(cluster_scatter_max_points))
+            pick = np.random.default_rng(0).choice(n, size=cap, replace=False)
+        fig, ax = plt.subplots(1, 1, figsize=(5.4, 4.8))
         sc = ax.scatter(
             xy[pick, 0],
             xy[pick, 1],
             c=labels[pick],
-            cmap="tab20",
-            s=2,
-            alpha=0.35,
+            cmap="tab20b",
+            s=4,
+            alpha=0.45,
+            edgecolors="black",
+            linewidths=0.1,
             rasterized=True,
         )
         ax.set_xlabel(axis_labels[0])
         ax.set_ylabel(axis_labels[1])
-        ax.set_title(f"K-means clusters (n={cap} subsampled frames)")
-        fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.04, label="cluster")
+        ax.set_title(f"Microstate clusters ({cap:,} frames)")
+        fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.04, label="Cluster")
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
         fig.tight_layout()
-        path = os.path.join(output_dir, "rama_feature_clusters.png")
+        path = os.path.join(output_dir, "microstate_clusters.png")
         fig.savefig(path, dpi=300)
         plt.close(fig)
-        written["rama_feature_clusters"] = path
+        written["microstate_clusters"] = path
 
     summary_path = os.path.join(output_dir, "validation_summary.txt")
     pyemma_errors_note = repr(errors_kw) if errors_kw is not None else "kw omitted"

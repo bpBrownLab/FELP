@@ -914,6 +914,35 @@ def test_build_msm_fit_config_from_cli(tmp_path: Path) -> None:
     assert config.metastable_states == 3
     assert config.its_errors == "none"
     assert config.its_n_jobs == 1
+    assert config.validation_cluster_scatter_max_points == 25000
+
+
+def test_build_msm_fit_config_validation_cluster_scatter_all_frames(tmp_path: Path) -> None:
+    topology = tmp_path / "input.pdb"
+    trajectory = tmp_path / "input.xtc"
+    feature_spec = tmp_path / "features.json"
+    topology.write_text("placeholder\n", encoding="utf-8")
+    trajectory.write_text("placeholder\n", encoding="utf-8")
+    feature_spec.write_text('{"operations": []}\n', encoding="utf-8")
+
+    parser = build_parser()
+    namespace = parser.parse_args(
+        [
+            "msm-fit",
+            "--topology-file",
+            str(topology),
+            "--trajectory",
+            str(trajectory),
+            "--feature-spec-file",
+            str(feature_spec),
+            "--output-dir",
+            str(tmp_path / "bundle"),
+            "--validation-cluster-scatter-max-points",
+            "0",
+        ]
+    )
+    config = build_msm_fit_config(namespace)
+    assert config.validation_cluster_scatter_max_points == 0
 
 
 def test_build_msm_fit_config_explicit_its_lags(tmp_path: Path) -> None:

@@ -34,6 +34,8 @@ class MSMPlotConfig:
     max_state_bars: int = 40
     max_points: int = 50000
     overwrite: bool = False
+    xlabel: str | None = None
+    ylabel: str | None = None
 
     def validate(self) -> None:
         """Validate the plotting configuration."""
@@ -54,6 +56,34 @@ class MSMPlotConfig:
             raise ConfigurationError("max_points must be at least 1.")
 
 
+def _cv_axis_label(name: str) -> str:
+    """Convert a raw CV name into a publication-style label."""
+
+    _LABEL_MAP = {
+        "phi": r"$\phi$ (deg)",
+        "psi": r"$\psi$ (deg)",
+        "omega": r"$\omega$ (deg)",
+    }
+    return _LABEL_MAP.get(name, name)
+
+
+def _axis_labels_from_bundle(bundle) -> tuple[str, str]:
+    """Best-effort axis labels derived from the bundle's feature specification."""
+
+    spec = bundle.manifest.feature_spec
+    labels: list[str] = []
+    for operation in spec.get("operations", []):
+        params = operation if isinstance(operation, dict) else {}
+        raw_labels = params.get("labels") or params.get("parameters", {}).get("labels")
+        if isinstance(raw_labels, list):
+            labels.extend(str(label) for label in raw_labels)
+    if len(labels) >= 2:
+        return _cv_axis_label(labels[0]), _cv_axis_label(labels[1])
+    if len(labels) == 1:
+        return _cv_axis_label(labels[0]), "Projection 2"
+    return "Projection 1", "Projection 2"
+
+
 def generate_msm_plots(config: MSMPlotConfig) -> dict[str, object]:
     """Generate a compact set of pre-processing plots for an MSM bundle."""
 
@@ -65,6 +95,10 @@ def generate_msm_plots(config: MSMPlotConfig) -> dict[str, object]:
     prepare_output_dir(config.output_dir, overwrite=config.overwrite)
     plt = import_matplotlib()
     apply_publication_style()
+
+    auto_x, auto_y = _axis_labels_from_bundle(bundle)
+    xlabel = config.xlabel or auto_x
+    ylabel = config.ylabel or auto_y
 
     probabilities = np.asarray(
         [float(definition.reference_probability or 0.0) for definition in definitions],
@@ -109,6 +143,8 @@ def generate_msm_plots(config: MSMPlotConfig) -> dict[str, object]:
                 bins=config.bins,
                 temperature_kelvin=config.temperature_kelvin,
                 max_points=config.max_points,
+                xlabel=xlabel,
+                ylabel=ylabel,
             )
         )
 
@@ -128,6 +164,8 @@ def generate_msm_plots(config: MSMPlotConfig) -> dict[str, object]:
                     plot_x=plot_x,
                     plot_y=plot_y,
                     probabilities=probabilities,
+                    xlabel=xlabel,
+                    ylabel=ylabel,
                 )
             )
 
@@ -199,6 +237,8 @@ def _plot_reference_projections(
     bins: int,
     temperature_kelvin: float,
     max_points: int,
+    xlabel: str = "Projection 1",
+    ylabel: str = "Projection 2",
 ) -> list[str]:
     """Plot raw and weighted projection surfaces from reduced coordinates."""
 
@@ -223,6 +263,8 @@ def _plot_reference_projections(
         y_edges=y_edges,
         title="Raw Projection Probability",
         colorbar_label="Probability",
+        xlabel=xlabel,
+        ylabel=ylabel,
     )
     outputs.append(raw_prob_path)
 
@@ -235,6 +277,8 @@ def _plot_reference_projections(
         y_edges=y_edges,
         title="Stationary Projection Probability",
         colorbar_label="Probability",
+        xlabel=xlabel,
+        ylabel=ylabel,
     )
     outputs.append(weighted_prob_path)
 
@@ -251,6 +295,8 @@ def _plot_reference_projections(
         y_edges=y_edges,
         title="Reference Free Energy Landscape",
         colorbar_label="Free Energy (kJ/mol)",
+        xlabel=xlabel,
+        ylabel=ylabel,
     )
     outputs.append(free_energy_path)
 
@@ -262,13 +308,13 @@ def _plot_reference_projections(
         sampled_coordinates[:, 0],
         sampled_coordinates[:, 1],
         c=sampled_states,
-        cmap="tab20",
+        cmap="tab20b",
         s=6,
         alpha=0.6,
         linewidths=0.0,
     )
-    ax.set_xlabel("Projection 1")
-    ax.set_ylabel("Projection 2")
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
     ax.set_title("State Assignments")
     colorbar = fig.colorbar(scatter, ax=ax)
     colorbar.set_label("State Index")
@@ -289,6 +335,8 @@ def _plot_probability_heatmap(
     y_edges: np.ndarray,
     title: str,
     colorbar_label: str,
+    xlabel: str = "Projection 1",
+    ylabel: str = "Projection 2",
 ) -> None:
     """Render a 2D histogram-like heatmap."""
 
@@ -300,8 +348,8 @@ def _plot_probability_heatmap(
         y_edges,
         title=title,
         colorbar_label=colorbar_label,
-        xlabel="Projection 1",
-        ylabel="Projection 2",
+        xlabel=xlabel,
+        ylabel=ylabel,
     )
 
 
@@ -311,6 +359,8 @@ def _plot_state_centers(
     plot_x: np.ndarray,
     plot_y: np.ndarray,
     probabilities: np.ndarray,
+    xlabel: str = "Projection 1",
+    ylabel: str = "Projection 2",
 ) -> str:
     """Plot state centers colored by their stationary probabilities."""
 
@@ -323,6 +373,8 @@ def _plot_state_centers(
         values=probabilities[mask],
         colorbar_label="Reference Probability",
         title="State Centers",
+        xlabel=xlabel,
+        ylabel=ylabel,
     )
     fig.tight_layout()
     path = os.path.join(output_dir, "state_center_probabilities.png")

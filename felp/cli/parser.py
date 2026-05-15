@@ -1099,6 +1099,25 @@ def _add_msm_fit_arguments(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Skip Chapman-Kolmogorov validation plots.",
     )
+    validation_group.add_argument(
+        "--xlabel",
+        default=None,
+        help="X-axis label for bundle-style 2D plots (auto-derived from feature spec if omitted).",
+    )
+    validation_group.add_argument(
+        "--ylabel",
+        default=None,
+        help="Y-axis label for bundle-style 2D plots (auto-derived from feature spec if omitted).",
+    )
+    validation_group.add_argument(
+        "--validation-cluster-scatter-max-points",
+        type=int,
+        default=25000,
+        help=(
+            "Max frames on validation/microstate_clusters.png scatter. "
+            "Use 0 to plot all frames (can be slow and produce large files)."
+        ),
+    )
 
 
 def _add_msm_bundle_arguments(parser: argparse.ArgumentParser) -> None:
@@ -1154,6 +1173,16 @@ def _add_msm_plot_arguments(parser: argparse.ArgumentParser) -> None:
         "--overwrite",
         action="store_true",
         help="Allow overwriting an existing plot output directory.",
+    )
+    parser.add_argument(
+        "--xlabel",
+        default=None,
+        help="X-axis label for 2D projection plots (auto-derived from feature spec if omitted).",
+    )
+    parser.add_argument(
+        "--ylabel",
+        default=None,
+        help="Y-axis label for 2D projection plots (auto-derived from feature spec if omitted).",
     )
 
 
@@ -1658,6 +1687,11 @@ def build_msm_fit_config(namespace: argparse.Namespace) -> MSMFitConfig:
         ck_n_jobs=namespace.ck_n_jobs,
         skip_ck=namespace.skip_ck,
         its_errors=str(namespace.its_errors),
+        plot_xlabel=getattr(namespace, "xlabel", None),
+        plot_ylabel=getattr(namespace, "ylabel", None),
+        validation_cluster_scatter_max_points=int(
+            namespace.validation_cluster_scatter_max_points
+        ),
     )
     config.validate()
     return config
@@ -1692,6 +1726,8 @@ def build_msm_plot_config(namespace: argparse.Namespace) -> MSMPlotConfig:
         max_state_bars=namespace.max_state_bars,
         max_points=namespace.max_points,
         overwrite=namespace.overwrite,
+        xlabel=getattr(namespace, "xlabel", None),
+        ylabel=getattr(namespace, "ylabel", None),
     )
     config.validate()
     return config

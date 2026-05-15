@@ -64,6 +64,10 @@ class MSMFitConfig:
     ck_n_jobs: int = 1
     skip_ck: bool = False
     its_errors: str = "none"
+    plot_xlabel: Optional[str] = None
+    plot_ylabel: Optional[str] = None
+    validation_cluster_scatter_max_points: int = 25000
+    """Cap for microstate_clusters.png; 0 means plot every frame."""
 
     def validate(self) -> None:
         """Validate the fit configuration before importing heavy dependencies."""
@@ -140,6 +144,11 @@ class MSMFitConfig:
             raise ConfigurationError("ck_mlags must be at least 1.")
         if self.ck_n_jobs < 1:
             raise ConfigurationError("ck_n_jobs must be at least 1.")
+        if self.validation_cluster_scatter_max_points < 0:
+            raise ConfigurationError(
+                "validation_cluster_scatter_max_points must be non-negative "
+                f"(0 = all frames); got {self.validation_cluster_scatter_max_points}."
+            )
         try:
             normalize_its_errors_kw(self.its_errors)
         except ValueError as exc:

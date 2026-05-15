@@ -272,6 +272,9 @@ class PyEMMAPipeline:
                     ck_mlags=int(self.config.ck_mlags),
                     ck_n_jobs=int(self.config.ck_n_jobs),
                     skip_ck=bool(self.config.skip_ck),
+                    cluster_scatter_max_points=int(
+                        self.config.validation_cluster_scatter_max_points
+                    ),
                 )
             except Exception as exc:
                 os.makedirs(val_dir, exist_ok=True)
@@ -284,6 +287,8 @@ class PyEMMAPipeline:
                     f"[MSM pipeline] WARNING: validation plotting failed; "
                     f"see {warn_path}"
                 )
+
+            self._write_bundle_style_plots(bundle)
             return result
 
         return PyEMMAPipelineResult(
@@ -295,6 +300,40 @@ class PyEMMAPipeline:
             hidden_model=hidden_model,
             metastable_dtrajs=metastable_dtrajs,
         )
+
+    def _write_bundle_style_plots(self, bundle) -> None:
+        """Generate publication-style plots via the shared plotting system."""
+
+        from felp.plotting.msm import MSMPlotConfig, generate_msm_plots
+
+        style_root = os.path.join(
+            self.config.output_dir, "validation", "bundle_style_plots"
+        )
+        for level in ("cluster", "metastable"):
+            if level not in bundle.assignments:
+                continue
+            sub = os.path.join(style_root, level)
+            try:
+                generate_msm_plots(
+                    MSMPlotConfig(
+                        bundle_dir=self.config.output_dir,
+                        output_dir=sub,
+                        state_level=level,
+                        overwrite=True,
+                        xlabel=self.config.plot_xlabel,
+                        ylabel=self.config.plot_ylabel,
+                    )
+                )
+                print(f"[MSM pipeline] wrote bundle-style plots: {sub}")
+            except Exception as exc:
+                os.makedirs(sub, exist_ok=True)
+                warn_path = os.path.join(sub, "plot_warnings.txt")
+                with open(warn_path, "w", encoding="utf-8") as handle:
+                    handle.write(f"Bundle-style plotting failed: {exc}\n")
+                print(
+                    f"[MSM pipeline] WARNING: bundle-style plots failed for "
+                    f"{level}; see {warn_path}"
+                )
 
     def _reduce(
         self,
