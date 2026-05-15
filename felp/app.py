@@ -20,7 +20,7 @@ from felp.cli import (
     build_reweighting_qc_config,
     build_run_config,
 )
-from felp.core import OutputConfig
+from felp.core import ConfigurationError, OutputConfig
 from felp.io import ResultsWriter, TrajectoryLoader, load_frame_results_csv
 from felp.msm import PyEMMAPipeline, export_state_samples, load_bundle
 from felp.parallel import FrameExecutor
@@ -441,25 +441,32 @@ def validate_microstates(namespace) -> dict:
     return summary
 
 
+def _stored_assignment_measurements(result) -> dict[str, float] | None:
+    """Return stored assignment CVs, with phi/psi columns as a legacy fallback."""
+
+    metadata = getattr(result, "metadata", {}) or {}
+    measurements = metadata.get("assignment_measurements")
+    if isinstance(measurements, dict):
+        return {str(name): float(value) for name, value in measurements.items()}
+    if result.phi_degrees is not None and result.psi_degrees is not None:
+        return {"phi": float(result.phi_degrees), "psi": float(result.psi_degrees)}
+    return None
+
+
 def _repartition_frame_results(
     frame_results: list,
     atlas: "MicrostateAtlas",
 ) -> list:
     """Re-assign every frame to a new atlas using stored CV measurements."""
 
-    from dataclasses import replace as _replace
-
     repartitioned: list = []
     unassigned_count = 0
     for result in frame_results:
         metadata = getattr(result, "metadata", {}) or {}
-        measurements = metadata.get("assignment_measurements")
+        measurements = _stored_assignment_measurements(result)
         if measurements is None:
-            if result.phi_degrees is not None and result.psi_degrees is not None:
-                measurements = {"phi": result.phi_degrees, "psi": result.psi_degrees}
-            else:
-                repartitioned.append(result)
-                continue
+            repartitioned.append(result)
+            continue
 
         try:
             assignment = atlas.assign(measurements)
@@ -469,12 +476,16 @@ def _repartition_frame_results(
             continue
 
         updated_metadata = dict(metadata)
-        updated_metadata["phi_center"] = assignment.phi_center
-        updated_metadata["psi_center"] = assignment.psi_center
+        updated_metadata["assignment_measurements"] = assignment.measurements
+        updated_metadata["cv_centers"] = assignment.cv_centers
+        if assignment.phi_center is not None:
+            updated_metadata["phi_center"] = assignment.phi_center
+        if assignment.psi_center is not None:
+            updated_metadata["psi_center"] = assignment.psi_center
         updated_metadata["plot_x"] = assignment.plot_x
         updated_metadata["plot_y"] = assignment.plot_y
         repartitioned.append(
-            _replace(
+            replace(
                 result,
                 microstate_id=assignment.state_id,
                 microstate_label=assignment.label,
@@ -498,30 +509,40 @@ def _build_auto_atlas_from_frame_results(
 ) -> "MicrostateAtlas":
     """Build an auto-generated atlas directly from stored CV measurements."""
 
-    import numpy as np
     from felp.reweighting import build_auto_microstate_payload
 
+    import numpy as np
+
+    cv_names: tuple[str, str] | None = None
     cv_arrays: dict[str, list[float]] = {}
     for result in frame_results:
-        metadata = getattr(result, "metadata", {}) or {}
-        measurements = metadata.get("assignment_measurements")
+        measurements = _stored_assignment_measurements(result)
         if measurements is None:
-            if result.phi_degrees is not None and result.psi_degrees is not None:
-                measurements = {"phi": result.phi_degrees, "psi": result.psi_degrees}
-            else:
-                continue
-        for name, value in measurements.items():
-            cv_arrays.setdefault(name, []).append(float(value))
+            continue
+        if cv_names is None:
+            names = tuple(measurements)
+            if len(names) != 2:
+                raise ConfigurationError(
+                    "Repartition with auto microstates requires exactly 2 CVs in the "
+                    f"stored frame results, but found {len(names)}: "
+                    f"{', '.join(names) or '<none>'}."
+                )
+            cv_names = names  # type: ignore[assignment]
+            cv_arrays = {name: [] for name in cv_names}
+        if not all(name in measurements for name in cv_names):
+            continue
+        for name in cv_names:
+            cv_arrays.setdefault(name, []).append(float(measurements[name]))
 
-    cv_names = tuple(cv_arrays.keys())
-    if len(cv_names) != 2:
-        from felp.core import ConfigurationError
+    if cv_names is None:
         raise ConfigurationError(
-            f"Repartition with auto microstates requires exactly 2 CVs in the stored "
-            f"frame results, but found {len(cv_names)}: {', '.join(cv_names) or '<none>'}."
+            "Repartition with auto microstates requires stored assignment_measurements, "
+            "but no usable frame measurements were found."
         )
 
-    cv_values = {name: np.asarray(values, dtype=float) for name, values in cv_arrays.items()}
+    cv_values = {
+        name: np.asarray(values, dtype=float) for name, values in cv_arrays.items()
+    }
     payload = build_auto_microstate_payload(
         cv_values=cv_values,
         cv_names=cv_names,
@@ -544,10 +565,7 @@ def _build_auto_atlas_from_frame_results(
         file=sys.stderr,
     )
 
-    from felp.core import MicrostateConfig
-    from dataclasses import replace as _replace
-
-    file_config = _replace(
+    file_config = replace(
         microstate_config,
         source="file",
         definition_file=auto_path,

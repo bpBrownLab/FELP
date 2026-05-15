@@ -12,6 +12,7 @@ import numpy as np
 from felp.core import DependencyError, MicrostateDefinition
 
 from .artifacts import MSMBundle, MSMBundleManifest, save_bundle
+from ._compat import patch_threadpoolctl_missing_library_paths
 from .config import MSMFitConfig
 from .features import FeatureSpec, build_featurizer
 
@@ -34,6 +35,7 @@ def _patch_numpy_legacy_aliases() -> None:
 
 def _import_pyemma():
     _patch_numpy_legacy_aliases()
+    patch_threadpoolctl_missing_library_paths()
     try:
         import pyemma
     except ImportError as exc:
@@ -74,12 +76,6 @@ class PyEMMAPipeline:
         self.config.validate()
         pyemma = _import_pyemma()
 
-        spec_path = self.config.feature_spec_file
-        if not os.path.isfile(spec_path):
-            raise FileNotFoundError(f"Feature spec file not found: {spec_path}")
-        # Load before optional rmtree so specs living under output_dir survive overwrite.
-        feature_spec = FeatureSpec.from_file(spec_path)
-
         if os.path.isdir(self.config.output_dir):
             if self.config.overwrite:
                 shutil.rmtree(self.config.output_dir)
@@ -88,6 +84,29 @@ class PyEMMAPipeline:
                     f"Output directory already exists and is not empty: {self.config.output_dir}"
                 )
         os.makedirs(self.config.output_dir, exist_ok=True)
+
+        if self.config.phi_psi_target_residue_number is not None:
+            from .phi_psi_spec import write_phi_psi_feature_spec_json
+
+            spec_path = os.path.join(
+                self.config.output_dir, "inputs", "phi_psi_feature_spec.json"
+            )
+            write_phi_psi_feature_spec_json(
+                self.config.topology_file,
+                spec_path,
+                target_residue_number=int(self.config.phi_psi_target_residue_number),
+                target_residue_name=self.config.phi_psi_target_residue_name,
+                selection=self.config.phi_psi_selection,
+                dihedral_representation=self.config.phi_psi_dihedral_representation,
+            )
+            feature_spec = FeatureSpec.from_file(spec_path)
+        else:
+            spec_path = self.config.feature_spec_file
+            if not spec_path or not os.path.isfile(spec_path):
+                raise FileNotFoundError(
+                    f"Feature spec file not found: {spec_path!r}"
+                )
+            feature_spec = FeatureSpec.from_file(spec_path)
         featurizer = build_featurizer(self.config.topology_file, feature_spec)
 
         source_input = [list(group) for group in self.config.trajectory_groups]
@@ -227,17 +246,45 @@ class PyEMMAPipeline:
             )
 
         if self.config.write_plots:
-            from .qc import write_qc_outputs
-
-            write_qc_outputs(
-                output_dir=self.config.output_dir,
+            result = PyEMMAPipelineResult(
+                bundle=bundle,
+                feature_spec=feature_spec,
                 reduced_trajectories=reduced_trajectories,
                 cluster_dtrajs=cluster_dtrajs,
-                cluster_centers=np.asarray(cluster.clustercenters),
                 discrete_msm=discrete_msm,
                 hidden_model=hidden_model,
                 metastable_dtrajs=metastable_dtrajs,
             )
+            val_dir = os.path.join(self.config.output_dir, "validation")
+            try:
+                from .validation_plots import write_msm_validation_report
+
+                write_msm_validation_report(
+                    result,
+                    val_dir,
+                    its_max_lag=int(self.config.its_max_lag),
+                    its_lag_points=int(self.config.its_lag_points),
+                    its_lags=self.config.its_lags,
+                    its_errors=str(self.config.its_errors),
+                    its_processes=int(self.config.its_processes),
+                    its_n_jobs=int(self.config.its_n_jobs),
+                    ck_nsets=int(self.config.ck_nsets),
+                    ck_mlags=int(self.config.ck_mlags),
+                    ck_n_jobs=int(self.config.ck_n_jobs),
+                    skip_ck=bool(self.config.skip_ck),
+                )
+            except Exception as exc:
+                os.makedirs(val_dir, exist_ok=True)
+                warn_path = os.path.join(val_dir, "validation_plot_warnings.txt")
+                with open(warn_path, "w", encoding="utf-8") as handle:
+                    handle.write(
+                        f"Validation plotting failed after MSM bundle export: {exc}\n"
+                    )
+                print(
+                    f"[MSM pipeline] WARNING: validation plotting failed; "
+                    f"see {warn_path}"
+                )
+            return result
 
         return PyEMMAPipelineResult(
             bundle=bundle,

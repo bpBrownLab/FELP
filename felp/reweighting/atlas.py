@@ -129,6 +129,7 @@ class MicrostateAtlas:
             state_id=definition.state_id,
             label=definition.label,
             measurements=measurements,
+            cv_centers=definition.cv_centers,
             phi_center=definition.phi_center,
             psi_center=definition.psi_center,
             plot_x=definition.plot_x,
@@ -237,8 +238,10 @@ def generate_phi_psi_grid(phi_bins: int, psi_bins: int) -> Iterable[MicrostateDe
             definition = MicrostateDefinition(
                 state_id=f"{phi_bin}_{psi_bin}",
                 label=f"phi{phi_bin}_psi{psi_bin}",
-                phi_range=(phi_lower, phi_upper),
-                psi_range=(psi_lower, psi_upper),
+                cv_ranges={
+                    "phi": (phi_lower, phi_upper),
+                    "psi": (psi_lower, psi_upper),
+                },
                 plot_x=phi_lower + phi_width / 2.0,
                 plot_y=psi_lower + psi_width / 2.0,
                 state_level="microstate",

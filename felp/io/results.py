@@ -329,6 +329,8 @@ class ResultsWriter:
             "label",
             "phi_center",
             "psi_center",
+            "cv_centers",
+            "cv_ranges",
             "plot_x",
             "plot_y",
             "state_level",
@@ -341,7 +343,13 @@ class ResultsWriter:
             writer = csv.DictWriter(handle, fieldnames=surface_fields)
             writer.writeheader()
             for row in rows:
-                writer.writerow({field: row[field] for field in surface_fields})
+                metadata = dict(row.get("metadata", {}) or {})
+                surface_row = {field: row.get(field) for field in surface_fields}
+                surface_row["cv_centers"] = _json_dumps(
+                    metadata.get("cv_centers", {})
+                )
+                surface_row["cv_ranges"] = _json_dumps(metadata.get("cv_ranges", {}))
+                writer.writerow(surface_row)
 
         _write_text_atomic(self.surface_results_path, _write_surface, newline="")
 

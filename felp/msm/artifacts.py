@@ -29,6 +29,10 @@ def _definition_from_payload(payload: dict[str, Any]) -> MicrostateDefinition:
         label=str(payload.get("label", payload["state_id"])),
         phi_range=tuple(payload["phi_range"]) if payload.get("phi_range") is not None else None,
         psi_range=tuple(payload["psi_range"]) if payload.get("psi_range") is not None else None,
+        cv_ranges={
+            str(name): tuple(bounds)
+            for name, bounds in dict(payload.get("cv_ranges", {})).items()
+        },
         reference_probability=payload.get("reference_probability"),
         plot_x=payload.get("plot_x"),
         plot_y=payload.get("plot_y"),
@@ -43,6 +47,9 @@ def _definition_to_payload(definition: MicrostateDefinition) -> dict[str, Any]:
         "label": definition.label,
         "phi_range": list(definition.phi_range) if definition.phi_range is not None else None,
         "psi_range": list(definition.psi_range) if definition.psi_range is not None else None,
+        "cv_ranges": {
+            name: list(bounds) for name, bounds in definition.cv_ranges.items()
+        },
         "reference_probability": definition.reference_probability,
         "plot_x": definition.plot_x,
         "plot_y": definition.plot_y,

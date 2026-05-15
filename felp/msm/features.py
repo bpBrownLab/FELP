@@ -10,6 +10,8 @@ import numpy as np
 
 from felp.core import DependencyError
 
+from ._compat import patch_threadpoolctl_missing_library_paths
+
 
 def _patch_numpy_legacy_aliases() -> None:
     """Provide NumPy aliases still referenced by PyEMMA 2.5.x."""
@@ -29,6 +31,7 @@ def _patch_numpy_legacy_aliases() -> None:
 
 def _import_pyemma():
     _patch_numpy_legacy_aliases()
+    patch_threadpoolctl_missing_library_paths()
     try:
         import pyemma
     except ImportError as exc:

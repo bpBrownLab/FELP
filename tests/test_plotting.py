@@ -225,10 +225,13 @@ def test_generate_felp_plots(tmp_path: Path) -> None:
     assert summary["fel_colormap"] == "nipy_spectral_r"
     assert summary["reference_probability_source"] == "loaded"
     assert summary["phi_psi_frame_projection_available"] is True
+    assert "kl_pre_reweighted_to_reweighted_projected_fel" in summary
     assert (tmp_path / "felp_plots" / "occupancy_shifts.png").is_file()
     assert (tmp_path / "felp_plots" / "delta_u_distribution.png").is_file()
     assert (tmp_path / "felp_plots" / "reference_phi_psi_free_energy_landscape.png").is_file()
     assert (tmp_path / "felp_plots" / "reweighted_phi_psi_free_energy_landscape.png").is_file()
+    assert (tmp_path / "felp_plots" / "kl_phi_psi_projected_fel_contributions.png").is_file()
+    assert (tmp_path / "felp_plots" / "kl_phi_psi_projected_fel_summary.json").is_file()
     assert (tmp_path / "felp_plots" / "discrete_microstate_free_energy_ramachandran.png").is_file()
     assert (tmp_path / "felp_plots" / "plot_summary.json").is_file()
 

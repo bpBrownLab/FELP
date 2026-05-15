@@ -10,7 +10,6 @@ from typing import Any, Iterable
 import numpy as np
 
 from felp.core import (
-    angular_midpoint_degrees,
     FrameResult,
     K_BOLTZMANN_KJ_PER_MOL_K,
     MicrostateResult,
@@ -20,7 +19,6 @@ from felp.core import (
 from .atlas import MicrostateAtlas
 
 _LOW_ESS_THRESHOLDS = (10, 50)
-_ANGULAR_CV_NAMES = {"phi", "psi", "omega"}
 _PSIS_MIN_TAIL_SAMPLES = 3
 _PSIS_CONSERVATIVE_K_THRESHOLD = 0.7
 
@@ -477,19 +475,6 @@ def _apply_state_qc_policy(
     return remaining, original_report, final_report, tuple(excluded)
 
 
-def _cv_range_centers(cv_ranges: dict[str, tuple[float, float]]) -> dict[str, float]:
-    """Return display centers for arbitrary CV ranges."""
-
-    centers: dict[str, float] = {}
-    for name, bounds in cv_ranges.items():
-        lower, upper = (float(value) for value in bounds)
-        if name in _ANGULAR_CV_NAMES:
-            centers[name] = angular_midpoint_degrees(lower, upper)
-        else:
-            centers[name] = (lower + upper) / 2.0
-    return centers
-
-
 @dataclass
 class ReweightingAggregator:
     """Aggregate per-frame deltaU values into reweighted microstate populations."""
@@ -845,12 +830,13 @@ class ReweightingAggregator:
                     * self.temperature_kelvin
                     * math.log(target_probability)
                 )
+            cv_centers = definition.cv_centers
             microstate_results.append(
                 MicrostateResult(
                     state_id=definition.state_id,
                     label=definition.label,
-                    phi_center=definition.phi_center,
-                    psi_center=definition.psi_center,
+                    phi_center=cv_centers.get("phi"),
+                    psi_center=cv_centers.get("psi"),
                     frame_count=item["frame_count"],
                     reference_probability=item["reference_probability"],
                     reweight_factor=item["reweight_factor"],
@@ -867,7 +853,7 @@ class ReweightingAggregator:
                     metadata={
                         **shared_metadata,
                         "cv_ranges": dict(definition.cv_ranges),
-                        "cv_centers": _cv_range_centers(definition.cv_ranges),
+                        "cv_centers": cv_centers,
                         "assigned_frame_count": item["assigned_frame_count"],
                         "evaluated_frame_count": item["original_frame_count"],
                         "filtered_evaluated_frame_count": item["frame_count"],

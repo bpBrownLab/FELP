@@ -8,6 +8,9 @@ from typing import Optional
 import numpy as np
 
 from felp.core import DependencyError
+
+from ._compat import patch_threadpoolctl_missing_library_paths
+from .config import normalize_its_errors_kw
 from .plot_compat import plot_pyemma_cktest
 
 
@@ -23,6 +26,7 @@ def _import_plot_dependencies():
         ) from exc
 
     try:
+        patch_threadpoolctl_missing_library_paths()
         import pyemma
     except ImportError as exc:
         raise DependencyError(
@@ -48,7 +52,17 @@ def write_qc_outputs(
     os.makedirs(plots_dir, exist_ok=True)
 
     lags = [max(1, int(discrete_msm.lag)), max(2, int(discrete_msm.lag) * 2), max(3, int(discrete_msm.lag) * 4)]
-    its = pyemma.msm.its(list(cluster_dtrajs), lags=lags, errors="bayes")
+    _err = normalize_its_errors_kw("none")
+    if _err is None:
+        its = pyemma.msm.its(list(cluster_dtrajs), lags=lags, n_jobs=1, only_timescales=True)
+    else:
+        its = pyemma.msm.its(
+            list(cluster_dtrajs),
+            lags=lags,
+            errors=_err,
+            n_jobs=1,
+            only_timescales=True,
+        )
     fig, ax = plt.subplots(1, 1)
     pyemma.plots.plot_implied_timescales(its, ylog=True, ax=ax)
     fig.tight_layout()

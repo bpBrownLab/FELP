@@ -14,6 +14,7 @@ from felp.cli import (
     build_reweighting_qc_config,
     build_run_config,
 )
+from felp.msm import MSMFitConfig
 
 
 def test_build_run_config_from_cli(tmp_path: Path) -> None:
@@ -911,6 +912,112 @@ def test_build_msm_fit_config_from_cli(tmp_path: Path) -> None:
     assert config.clustering_method == "regspace"
     assert config.msm_lag == 5
     assert config.metastable_states == 3
+    assert config.its_errors == "none"
+    assert config.its_n_jobs == 1
+
+
+def test_build_msm_fit_config_explicit_its_lags(tmp_path: Path) -> None:
+    topology = tmp_path / "input.pdb"
+    trajectory = tmp_path / "input.xtc"
+    feature_spec = tmp_path / "features.json"
+    topology.write_text("placeholder\n", encoding="utf-8")
+    trajectory.write_text("placeholder\n", encoding="utf-8")
+    feature_spec.write_text('{"operations": []}\n', encoding="utf-8")
+
+    parser = build_parser()
+    namespace = parser.parse_args(
+        [
+            "msm-fit",
+            "--topology-file",
+            str(topology),
+            "--trajectory",
+            str(trajectory),
+            "--feature-spec-file",
+            str(feature_spec),
+            "--output-dir",
+            str(tmp_path / "bundle"),
+            "--its-lags",
+            "1",
+            "2",
+            "3",
+            "4",
+            "5",
+            "6",
+            "7",
+            "8",
+            "9",
+            "10",
+        ]
+    )
+
+    config = build_msm_fit_config(namespace)
+    assert config.its_lags == tuple(range(1, 11))
+
+
+def test_build_msm_fit_config_its_errors_bayes(tmp_path: Path) -> None:
+    topology = tmp_path / "input.pdb"
+    trajectory = tmp_path / "input.xtc"
+    feature_spec = tmp_path / "features.json"
+    topology.write_text("placeholder\n", encoding="utf-8")
+    trajectory.write_text("placeholder\n", encoding="utf-8")
+    feature_spec.write_text('{"operations": []}\n', encoding="utf-8")
+
+    parser = build_parser()
+    namespace = parser.parse_args(
+        [
+            "msm-fit",
+            "--topology-file",
+            str(topology),
+            "--trajectory",
+            str(trajectory),
+            "--feature-spec-file",
+            str(feature_spec),
+            "--output-dir",
+            str(tmp_path / "bundle"),
+            "--its-errors",
+            "bayes",
+            "--its-n-jobs",
+            "2",
+        ]
+    )
+
+    config = build_msm_fit_config(namespace)
+    assert config.its_errors == "bayes"
+    assert config.its_n_jobs == 2
+
+
+def test_msm_fit_config_rejects_missing_feature_source(tmp_path: Path) -> None:
+    topology = tmp_path / "input.pdb"
+    trajectory = tmp_path / "input.xtc"
+    topology.write_text("placeholder\n", encoding="utf-8")
+    trajectory.write_text("placeholder\n", encoding="utf-8")
+
+    config = MSMFitConfig(
+        topology_file=str(topology),
+        trajectory_files=((str(trajectory),),),
+        output_dir=str(tmp_path / "out"),
+    )
+    with pytest.raises(ConfigurationError, match="exactly one"):
+        config.validate()
+
+
+def test_msm_fit_config_rejects_both_feature_and_phi_psi(tmp_path: Path) -> None:
+    topology = tmp_path / "input.pdb"
+    trajectory = tmp_path / "input.xtc"
+    spec = tmp_path / "f.json"
+    topology.write_text("placeholder\n", encoding="utf-8")
+    trajectory.write_text("placeholder\n", encoding="utf-8")
+    spec.write_text("{}", encoding="utf-8")
+
+    config = MSMFitConfig(
+        topology_file=str(topology),
+        trajectory_files=((str(trajectory),),),
+        output_dir=str(tmp_path / "out"),
+        feature_spec_file=str(spec),
+        phi_psi_target_residue_number=2,
+    )
+    with pytest.raises(ConfigurationError, match="exactly one"):
+        config.validate()
 
 
 def test_build_msm_fit_config_with_repeatable_trajectory_groups(tmp_path: Path) -> None:

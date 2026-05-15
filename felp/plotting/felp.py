@@ -755,6 +755,35 @@ def _kl_divergence(p: np.ndarray, q: np.ndarray) -> tuple[float, np.ndarray]:
     return float(np.sum(contributions)), contributions
 
 
+def _surface_divergence_summary(
+    p: np.ndarray,
+    q: np.ndarray,
+) -> tuple[dict[str, float], np.ndarray]:
+    """Compute divergence metrics between two probability surfaces."""
+
+    p_flat = np.asarray(p, dtype=float).ravel()
+    q_flat = np.asarray(q, dtype=float).ravel()
+    p_flat = np.where(np.isfinite(p_flat), p_flat, 0.0)
+    q_flat = np.where(np.isfinite(q_flat), q_flat, 0.0)
+    if p_flat.sum() > 0.0:
+        p_flat = p_flat / float(p_flat.sum())
+    if q_flat.sum() > 0.0:
+        q_flat = q_flat / float(q_flat.sum())
+    kl_pq, contributions = _kl_divergence(p_flat, q_flat)
+    kl_qp, _ = _kl_divergence(q_flat, p_flat)
+    js = _jensen_shannon_divergence(p_flat, q_flat)
+    overlap = _overlap_coefficient(p_flat, q_flat)
+    return (
+        {
+            "kl_pre_reweighted_to_reweighted_projected_fel": float(kl_pq),
+            "kl_reweighted_to_pre_reweighted_projected_fel": float(kl_qp),
+            "jensen_shannon_projected_fel": float(js),
+            "projected_fel_overlap_coefficient": float(overlap),
+        },
+        contributions.reshape(np.asarray(p, dtype=float).shape),
+    )
+
+
 def _jensen_shannon_divergence(p: np.ndarray, q: np.ndarray) -> float:
     """Compute the Jensen-Shannon divergence between two distributions."""
 
@@ -1073,7 +1102,7 @@ def _plot_cv_state_landscapes(
             reference_fe,
             x_edges,
             y_edges,
-            title=f"Reference microstate free energy ({x_name}, {y_name})",
+            title=f"Pre-reweighted microstate free energy ({x_name}, {y_name})",
             colorbar_label=f"Relative free energy ({energy_unit_label})",
             xlabel=_cv_axis_label(x_name),
             ylabel=_cv_axis_label(y_name),
@@ -1754,6 +1783,11 @@ def _plot_cv_projected_landscapes(
     reweighted_fe = energy_scale * probability_surface_to_free_energy(
         reweighted_hist, temperature_kelvin
     )
+    divergence_metadata, kl_contribution_grid = _surface_divergence_summary(
+        reference_hist,
+        reweighted_hist,
+    )
+    projection_metadata.update(divergence_metadata)
 
     outputs: list[str] = []
     suffix = _cv_filename_suffix(x_name, y_name)
@@ -1768,6 +1802,16 @@ def _plot_cv_projected_landscapes(
         if legacy_phi_psi
         else f"reweighted_{suffix}_free_energy_landscape.png"
     )
+    kl_filename = (
+        "kl_phi_psi_projected_fel_contributions.png"
+        if legacy_phi_psi
+        else f"kl_{suffix}_projected_fel_contributions.png"
+    )
+    kl_summary_filename = (
+        "kl_phi_psi_projected_fel_summary.json"
+        if legacy_phi_psi
+        else f"kl_{suffix}_projected_fel_summary.json"
+    )
     outputs.append(
         save_pcolormesh_landscape(
             plt,
@@ -1775,7 +1819,7 @@ def _plot_cv_projected_landscapes(
             reference_fe,
             x_edges,
             y_edges,
-            title=f"Reference projected free energy ({x_name}, {y_name})",
+            title=f"Pre-reweighted projected free energy ({x_name}, {y_name})",
             colorbar_label=f"Relative free energy ({energy_unit_label})",
             xlabel=_cv_axis_label(x_name),
             ylabel=_cv_axis_label(y_name),
@@ -1798,6 +1842,23 @@ def _plot_cv_projected_landscapes(
             colormap=fel_colormap,
         )
     )
+    outputs.append(
+        save_pcolormesh_landscape(
+            plt,
+            os.path.join(output_dir, kl_filename),
+            kl_contribution_grid,
+            x_edges,
+            y_edges,
+            title=f"Projected FEL KL contributions ({x_name}, {y_name})",
+            colorbar_label="p_pre log(p_pre / p_reweighted)",
+            xlabel=_cv_axis_label(x_name),
+            ylabel=_cv_axis_label(y_name),
+            colormap="coolwarm",
+        )
+    )
+    kl_summary_path = os.path.join(output_dir, kl_summary_filename)
+    write_json(kl_summary_path, divergence_metadata)
+    outputs.append(kl_summary_path)
     return outputs, projection_metadata
 
 

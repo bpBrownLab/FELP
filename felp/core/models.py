@@ -114,6 +114,14 @@ def cv_value_in_interval(name: str, value: float, lower: float, upper: float) ->
     return float(lower) <= float(value) <= float(upper)
 
 
+def cv_interval_center(name: str, lower: float, upper: float) -> float:
+    """Return the display center for a CV interval."""
+
+    if name in BACKBONE_DIHEDRAL_KINDS:
+        return angular_midpoint_degrees(lower, upper)
+    return (float(lower) + float(upper)) / 2.0
+
+
 def normalize_trajectory_groups(value: Any) -> tuple[tuple[str, ...], ...]:
     """Normalize trajectory input into explicit groups of contiguous files."""
 
@@ -1192,7 +1200,7 @@ class PhiPsiMeasurement:
 
 @dataclass(frozen=True)
 class CVMeasurement:
-    """Measured values for one or more named backbone-dihedral CVs."""
+    """Measured values for one or more named collective variables."""
 
     values: dict[str, float]
 
@@ -1286,22 +1294,25 @@ class MicrostateDefinition:
             object.__setattr__(self, "psi_range", normalized_ranges["psi"])
 
     @property
-    def phi_center(self) -> Optional[float]:
-        """Return the Ramachandran phi center when it exists."""
+    def cv_centers(self) -> dict[str, float]:
+        """Return display centers for all CV ranges."""
 
-        phi_range = self.cv_ranges.get("phi", self.phi_range)
-        if phi_range is None:
-            return None
-        return angular_midpoint_degrees(*phi_range)
+        return {
+            name: cv_interval_center(name, *bounds)
+            for name, bounds in self.cv_ranges.items()
+        }
+
+    @property
+    def phi_center(self) -> Optional[float]:
+        """Return the legacy phi center alias when it exists."""
+
+        return self.cv_centers.get("phi")
 
     @property
     def psi_center(self) -> Optional[float]:
-        """Return the Ramachandran psi center when it exists."""
+        """Return the legacy psi center alias when it exists."""
 
-        psi_range = self.cv_ranges.get("psi", self.psi_range)
-        if psi_range is None:
-            return None
-        return angular_midpoint_degrees(*psi_range)
+        return self.cv_centers.get("psi")
 
     def contains(
         self,
@@ -1340,6 +1351,7 @@ class MicrostateAssignment:
     phi_degrees: Optional[float] = None
     psi_degrees: Optional[float] = None
     measurements: dict[str, float] = field(default_factory=dict)
+    cv_centers: dict[str, float] = field(default_factory=dict)
     phi_center: Optional[float] = None
     psi_center: Optional[float] = None
     plot_x: Optional[float] = None
@@ -1359,6 +1371,18 @@ class MicrostateAssignment:
             object.__setattr__(self, "phi_degrees", measurements["phi"])
         if self.psi_degrees is None and "psi" in measurements:
             object.__setattr__(self, "psi_degrees", measurements["psi"])
+        centers = {
+            str(name): float(value) for name, value in self.cv_centers.items()
+        }
+        if self.phi_center is not None:
+            centers.setdefault("phi", float(self.phi_center))
+        if self.psi_center is not None:
+            centers.setdefault("psi", float(self.psi_center))
+        object.__setattr__(self, "cv_centers", centers)
+        if self.phi_center is None and "phi" in centers:
+            object.__setattr__(self, "phi_center", centers["phi"])
+        if self.psi_center is None and "psi" in centers:
+            object.__setattr__(self, "psi_center", centers["psi"])
 
 
 @dataclass(frozen=True)

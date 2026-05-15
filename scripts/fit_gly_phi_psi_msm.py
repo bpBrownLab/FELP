@@ -3,6 +3,10 @@
 Fit a discrete MSM on GLY (or any) reference trajectories using backbone φ/ψ
 for a single residue, export a FELP ``msm_bundle``, and write validation plots.
 
+**Prefer ``python felp.py msm-fit``** with ``--phi-psi-residue-number`` and
+``--write-plots`` / ``--its-lags``; this script remains as a convenience wrapper
+for bundle-style figures and legacy workflows.
+
 This wraps :class:`felp.msm.PyEMMAPipeline` with opinionated defaults for
 two-dimensional Ramachandran features (``reducer=none``) and a rich report under
 ``<output-dir>/validation/``.
@@ -170,10 +174,39 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         help="Number of slow ITS processes to plot and write to the numeric ITS table.",
     )
     p.add_argument(
+        "--its-n-jobs",
+        type=int,
+        default=1,
+        help="Worker processes for PyEMMA implied-timescale estimation.",
+    )
+    p.add_argument(
+        "--its-errors",
+        choices=("none", "bayes", "calc"),
+        default="none",
+        help="PyEMMA implied-timescale error bands (default: point estimates only).",
+    )
+    p.add_argument(
         "--ck-nsets",
         type=int,
         default=4,
         help="Number of coarse sets for discrete MSM Chapman–Kolmogorov test.",
+    )
+    p.add_argument(
+        "--ck-mlags",
+        type=int,
+        default=10,
+        help="Number of lag multiples for CK validation.",
+    )
+    p.add_argument(
+        "--ck-n-jobs",
+        type=int,
+        default=1,
+        help="Worker processes for PyEMMA CK validation.",
+    )
+    p.add_argument(
+        "--skip-ck",
+        action="store_true",
+        help="Skip Chapman-Kolmogorov validation plots.",
     )
     p.add_argument("--save-pyemma-checkpoints", action="store_true")
     p.add_argument("--overwrite", action="store_true")
@@ -479,8 +512,13 @@ def main(argv: list[str]) -> int:
                 its_max_lag=int(args.its_max_lag),
                 its_lag_points=int(args.its_lag_points),
                 its_lags=tuple(args.its_lags or ()),
+                its_errors=str(args.its_errors),
                 its_processes=int(args.its_processes),
+                its_n_jobs=int(args.its_n_jobs),
                 ck_nsets=int(args.ck_nsets),
+                ck_mlags=int(args.ck_mlags),
+                ck_n_jobs=int(args.ck_n_jobs),
+                skip_ck=bool(args.skip_ck),
             )
         except Exception as exc:
             val_dir.mkdir(parents=True, exist_ok=True)

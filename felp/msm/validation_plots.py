@@ -11,6 +11,8 @@ import numpy as np
 
 from felp.core import DependencyError
 
+from ._compat import patch_threadpoolctl_missing_library_paths
+from .config import normalize_its_errors_kw
 from .plot_compat import plot_pyemma_cktest
 from .pipeline import PyEMMAPipelineResult
 
@@ -24,6 +26,7 @@ def _import_plotting() -> tuple[Any, Any]:
     except ImportError as exc:
         raise DependencyError("matplotlib is required for MSM validation plots.") from exc
     try:
+        patch_threadpoolctl_missing_library_paths()
         import pyemma
     except ImportError as exc:
         raise DependencyError("PyEMMA is required for MSM validation plots.") from exc
@@ -58,6 +61,29 @@ def _normalize_lags(lags: Optional[tuple[int, ...]], max_lag: int, max_points: i
             raise ValueError(f"ITS lags must be positive integers; got {invalid!r}.")
         return normalized
     return _lag_grid(max_lag, max_points)
+
+
+def _feature_axis_labels(result: PyEMMAPipelineResult, ndim: int) -> list[str]:
+    """Best-effort axis labels from the feature spec."""
+
+    labels: list[str] = []
+    for operation in result.feature_spec.operations:
+        raw_labels = operation.parameters.get("labels")
+        if isinstance(raw_labels, list):
+            labels.extend(str(label) for label in raw_labels)
+    if len(labels) < ndim:
+        labels.extend(f"Feature {index}" for index in range(len(labels), ndim))
+    formatted: list[str] = []
+    for label in labels[:ndim]:
+        if label == "phi":
+            formatted.append(r"$\phi$ (deg)")
+        elif label == "psi":
+            formatted.append(r"$\psi$ (deg)")
+        elif label == "omega":
+            formatted.append(r"$\omega$ (deg)")
+        else:
+            formatted.append(label)
+    return formatted
 
 
 def _plot_implied_timescales(pyemma: Any, its: Any, ax: Any, its_processes: int) -> None:
@@ -139,8 +165,13 @@ def write_msm_validation_report(
     its_max_lag: int = 80,
     its_lag_points: int = 35,
     its_lags: Optional[tuple[int, ...]] = None,
+    its_errors: str = "none",
     its_processes: int = 8,
+    its_n_jobs: int = 1,
     ck_nsets: int = 4,
+    ck_mlags: int = 10,
+    ck_n_jobs: int = 1,
+    skip_ck: bool = False,
     max_tm_states: int = 48,
     rama_scatter_max_points: int = 25000,
 ) -> dict[str, str]:
@@ -160,7 +191,17 @@ def write_msm_validation_report(
 
     dtrajs = list(result.cluster_dtrajs)
     lags = _normalize_lags(its_lags, its_max_lag, its_lag_points)
-    its = pyemma.msm.its(dtrajs, lags=lags, errors="bayes")
+    errors_kw = normalize_its_errors_kw(its_errors)
+    its_kwargs = {
+        "lags": lags,
+        "nits": int(its_processes),
+        "n_jobs": int(its_n_jobs),
+        "only_timescales": True,
+    }
+    if errors_kw is None:
+        its = pyemma.msm.its(dtrajs, **its_kwargs)
+    else:
+        its = pyemma.msm.its(dtrajs, errors=errors_kw, **its_kwargs)
     written.update(
         _write_its_numeric_outputs(
             output_dir,
@@ -180,22 +221,25 @@ def write_msm_validation_report(
     msm = result.discrete_msm
     nstates = int(msm.nstates)
     ck_nsets = max(2, min(int(ck_nsets), nstates))
+    ck_mlags = max(1, int(ck_mlags))
+    ck_n_jobs = max(1, int(ck_n_jobs))
 
     def _try_cktest(model, nsets: Optional[int], label: str) -> None:
         try:
             if nsets is None:
-                ck = model.cktest()
+                ck = model.cktest(mlags=ck_mlags, n_jobs=ck_n_jobs)
             else:
-                ck = model.cktest(nsets)
+                ck = model.cktest(nsets, mlags=ck_mlags, n_jobs=ck_n_jobs)
         except Exception as exc:
             warnings.append(f"CK calculation skipped for {label}: {exc}")
             return
         try:
             plot_pyemma_cktest(pyemma, ck, diag=True)
             fig = plt.gcf()
-            fig.set_size_inches(6.5, 5.0, forward=True)
-            fig.suptitle(f"Chapman-Kolmogorov test ({label})")
-            fig.tight_layout()
+            fig.set_size_inches(7.0, 5.2, forward=True)
+            # PyEMMA's CK helper already creates a figure title; adding another
+            # suptitle causes the overlapping text seen in validation reports.
+            fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.94))
             p = os.path.join(output_dir, f"ck_test_{label.replace(' ', '_')}.png")
             fig.savefig(p, dpi=300)
             plt.close(fig)
@@ -204,15 +248,19 @@ def write_msm_validation_report(
             plt.close("all")
             warnings.append(f"CK plot skipped for {label}: {exc}")
 
-    _try_cktest(msm, ck_nsets, "discrete_msm")
-
-    if result.hidden_model is not None:
+    if skip_ck:
+        warnings.append("CK calculation skipped by configuration.")
+    elif result.hidden_model is not None:
         _try_cktest(result.hidden_model, None, "hidden_msm")
     elif result.metastable_dtrajs is not None:
         flat = np.concatenate(result.metastable_dtrajs, axis=0)
         mcount = int(len(np.unique(flat)))
         if mcount >= 2:
             _try_cktest(msm, mcount, "metastable_sets")
+        else:
+            warnings.append("CK calculation skipped: fewer than 2 metastable sets.")
+    else:
+        _try_cktest(msm, ck_nsets, "discrete_msm")
 
     pi = np.asarray(msm.stationary_distribution, dtype=float)
     order = np.argsort(-pi)
@@ -287,11 +335,12 @@ def write_msm_validation_report(
     reduced = result.reduced_trajectories
     if reduced and reduced[0].ndim == 2 and reduced[0].shape[1] == 2:
         xy = np.concatenate(reduced, axis=0)
+        axis_labels = _feature_axis_labels(result, 2)
         fig, ax = plt.subplots(1, 1, figsize=(5.2, 4.6))
         pyemma.plots.plot_free_energy(xy[:, 0], xy[:, 1], ax=ax, legacy=False)
-        ax.set_xlabel("Feature 0 (e.g. φ / deg)")
-        ax.set_ylabel("Feature 1 (e.g. ψ / deg)")
-        ax.set_title("Projected free energy (feature space)")
+        ax.set_xlabel(axis_labels[0])
+        ax.set_ylabel(axis_labels[1])
+        ax.set_title("Reference frame free energy")
         fig.tight_layout()
         path = os.path.join(output_dir, "rama_feature_free_energy.png")
         fig.savefig(path, dpi=300)
@@ -316,8 +365,8 @@ def write_msm_validation_report(
             alpha=0.35,
             rasterized=True,
         )
-        ax.set_xlabel("Feature 0 (e.g. φ / deg)")
-        ax.set_ylabel("Feature 1 (e.g. ψ / deg)")
+        ax.set_xlabel(axis_labels[0])
+        ax.set_ylabel(axis_labels[1])
         ax.set_title(f"K-means clusters (n={cap} subsampled frames)")
         fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.04, label="cluster")
         fig.tight_layout()
@@ -327,13 +376,19 @@ def write_msm_validation_report(
         written["rama_feature_clusters"] = path
 
     summary_path = os.path.join(output_dir, "validation_summary.txt")
+    pyemma_errors_note = repr(errors_kw) if errors_kw is not None else "kw omitted"
     lines = [
         "MSM validation summary",
         "======================",
         f"Discrete states (active): {nstates}",
         f"MSM lag (steps): {int(msm.lag)}",
         f"ITS lags (steps): {', '.join(str(lag) for lag in lags)}",
+        f"ITS error estimate: {its_errors} (PyEMMA errors={pyemma_errors_note})",
         f"ITS plotted processes: {int(its_processes)}",
+        f"ITS worker jobs: {int(its_n_jobs)}",
+        f"CK skipped: {bool(skip_ck)}",
+        f"CK lag multiples: {int(ck_mlags)}",
+        f"CK worker jobs: {int(ck_n_jobs)}",
         f"Active state fraction: {float(msm.active_state_fraction):.4f}",
         f"Active count fraction: {float(msm.active_count_fraction):.4f}",
     ]

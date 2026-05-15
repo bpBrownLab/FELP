@@ -67,4 +67,8 @@ def test_file_microstate_assignment_uses_numeric_intervals_for_distance_cvs(
         MicrostateConfig(source="file", definition_file=str(definitions_path))
     )
 
-    assert atlas.assign({"ends": 8.0, "turn": 4.0}).state_id == "short"
+    assignment = atlas.assign({"ends": 8.0, "turn": 4.0})
+    assert assignment.state_id == "short"
+    assert assignment.cv_centers == {"ends": 5.0, "turn": 2.5}
+    assert assignment.phi_center is None
+    assert assignment.psi_center is None

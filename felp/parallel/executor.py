@@ -582,6 +582,7 @@ def process_frame_job(job: SnapshotJob) -> FrameResult:
     metadata = {
         "energy_backend": _WORKER_CONFIG.energy.backend,
         "assignment_measurements": assignment.measurements,
+        "cv_centers": assignment.cv_centers,
         "phi_center": assignment.phi_center,
         "psi_center": assignment.psi_center,
         "plot_x": assignment.plot_x,

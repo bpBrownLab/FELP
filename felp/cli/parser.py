@@ -890,8 +890,42 @@ def _add_msm_fit_arguments(parser: argparse.ArgumentParser) -> None:
     )
     input_group.add_argument(
         "--feature-spec-file",
-        required=True,
-        help="JSON or YAML feature specification for the PyEMMA featurizer.",
+        required=False,
+        help=(
+            "JSON or YAML feature specification for the PyEMMA featurizer. "
+            "Omit if using --phi-psi-residue-number."
+        ),
+    )
+    input_group.add_argument(
+        "--phi-psi-residue-number",
+        type=int,
+        help=(
+            "Build a phi/psi dihedral feature spec automatically for this residue "
+            "(disambiguation matches --trajectory / FELP conventions: resSeq, then "
+            "1-based topology index). Implies --feature-spec-file is not used; "
+            "writes <output-dir>/inputs/phi_psi_feature_spec.json."
+        ),
+    )
+    input_group.add_argument(
+        "--phi-psi-residue-name",
+        default="GLY",
+        help=(
+            "Expected residue name when resolving --phi-psi-residue-number "
+            "(e.g. GLY for capped dipeptides)."
+        ),
+    )
+    input_group.add_argument(
+        "--phi-psi-selection",
+        help=(
+            "Optional MDTraj selection string identifying exactly one internal residue "
+            "for phi/psi (overrides residue-number / name resolution)."
+        ),
+    )
+    input_group.add_argument(
+        "--phi-psi-representation",
+        choices=("raw", "cossin"),
+        default="raw",
+        help="Feature representation for auto phi/psi: degrees (raw) or sin/cos pairs.",
     )
     input_group.add_argument(
         "--output-dir",
@@ -983,12 +1017,87 @@ def _add_msm_fit_arguments(parser: argparse.ArgumentParser) -> None:
     output_group.add_argument(
         "--write-plots",
         action="store_true",
-        help="Write a compact set of diagnostic MSM plots into the bundle directory.",
+        help=(
+            "Write the validation report under <output-dir>/validation/ "
+            "(implied timescales, CK tests, stationary distribution, transition matrix, "
+            "2D feature projections when applicable). Use --its-lags to fix ITS lag times."
+        ),
     )
     output_group.add_argument(
         "--overwrite",
         action="store_true",
         help="Allow overwriting an existing MSM bundle directory.",
+    )
+
+    validation_group = parser.add_argument_group("Validation plots (--write-plots)")
+    validation_group.add_argument(
+        "--its-max-lag",
+        type=int,
+        default=80,
+        help="Maximum lag (steps) for implied timescales when --its-lags is omitted.",
+    )
+    validation_group.add_argument(
+        "--its-lag-points",
+        type=int,
+        default=35,
+        help="Number of lag samples between 1 and --its-max-lag when --its-lags is omitted.",
+    )
+    validation_group.add_argument(
+        "--its-lags",
+        type=int,
+        nargs="+",
+        help=(
+            "Explicit lag times (steps) for the implied timescale plot, e.g. "
+            "--its-lags 1 2 3 4 5 6 7 8 9 10. Overrides --its-max-lag/--its-lag-points."
+        ),
+    )
+    validation_group.add_argument(
+        "--its-processes",
+        type=int,
+        default=8,
+        help="Number of slow ITS processes to plot and export numerically.",
+    )
+    validation_group.add_argument(
+        "--its-n-jobs",
+        type=int,
+        default=1,
+        help=(
+            "Worker processes for PyEMMA implied-timescale estimation. "
+            "Defaults to 1 because PyEMMA multiprocessing can be slow or fragile "
+            "in CLI/IDE environments."
+        ),
+    )
+    validation_group.add_argument(
+        "--its-errors",
+        choices=("none", "bayes", "calc"),
+        default="none",
+        help=(
+            "Implied-timescale uncertainty in PyEMMA: none (point estimates, default), "
+            "bayes (Bayesian sampling), or calc (error propagation)."
+        ),
+    )
+    validation_group.add_argument(
+        "--ck-nsets",
+        type=int,
+        default=4,
+        help="Number of coarse sets for the discrete MSM Chapman–Kolmogorov test.",
+    )
+    validation_group.add_argument(
+        "--ck-mlags",
+        type=int,
+        default=10,
+        help="Number of lag multiples for CK validation.",
+    )
+    validation_group.add_argument(
+        "--ck-n-jobs",
+        type=int,
+        default=1,
+        help="Worker processes for PyEMMA CK validation.",
+    )
+    validation_group.add_argument(
+        "--skip-ck",
+        action="store_true",
+        help="Skip Chapman-Kolmogorov validation plots.",
     )
 
 
@@ -1509,12 +1618,20 @@ def build_reweighting_qc_config(namespace: argparse.Namespace) -> ReweightingQCC
 def build_msm_fit_config(namespace: argparse.Namespace) -> MSMFitConfig:
     """Construct and validate an MSMFitConfig from the parsed CLI namespace."""
 
+    its_lags: tuple[int, ...] | None = None
+    if namespace.its_lags:
+        its_lags = tuple(int(x) for x in namespace.its_lags)
+
     config = MSMFitConfig(
         topology_file=namespace.topology_file,
         trajectory_files=tuple(
             tuple(group) for group in namespace.trajectory_groups
         ),
         feature_spec_file=namespace.feature_spec_file,
+        phi_psi_target_residue_number=namespace.phi_psi_residue_number,
+        phi_psi_target_residue_name=namespace.phi_psi_residue_name,
+        phi_psi_selection=namespace.phi_psi_selection,
+        phi_psi_dihedral_representation=namespace.phi_psi_representation,
         output_dir=namespace.output_dir,
         stride=namespace.stride,
         dt_traj=namespace.dt_traj,
@@ -1531,6 +1648,16 @@ def build_msm_fit_config(namespace: argparse.Namespace) -> MSMFitConfig:
         save_pyemma_checkpoints=namespace.save_pyemma_checkpoints,
         write_plots=namespace.write_plots,
         overwrite=namespace.overwrite,
+        its_max_lag=namespace.its_max_lag,
+        its_lag_points=namespace.its_lag_points,
+        its_lags=its_lags,
+        its_processes=namespace.its_processes,
+        its_n_jobs=namespace.its_n_jobs,
+        ck_nsets=namespace.ck_nsets,
+        ck_mlags=namespace.ck_mlags,
+        ck_n_jobs=namespace.ck_n_jobs,
+        skip_ck=namespace.skip_ck,
+        its_errors=str(namespace.its_errors),
     )
     config.validate()
     return config
