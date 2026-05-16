@@ -18,6 +18,7 @@ from felp.plotting.felp import (
     _normalize_cv_name,
     _resolve_cv_axes,
     _state_kernel_probability_grid,
+    _symmetric_kl_imbalance_grid,
 )
 
 
@@ -223,11 +224,15 @@ def test_generate_felp_plots(tmp_path: Path) -> None:
     assert "kl_reference_to_target" in summary
     assert summary["overlap_coefficient"] == pytest.approx(0.85)
     assert summary["fel_colormap"] == "nipy_spectral_r"
+    assert summary["probability_colormap"] == "nipy_spectral_r"
+    assert summary["divergence_colormap"] == "felp_kl_twilight"
     assert summary["reference_probability_source"] == "loaded"
     assert summary["phi_psi_frame_projection_available"] is True
     assert "kl_pre_reweighted_to_reweighted_projected_fel" in summary
     assert (tmp_path / "felp_plots" / "occupancy_shifts.png").is_file()
     assert (tmp_path / "felp_plots" / "delta_u_distribution.png").is_file()
+    assert (tmp_path / "felp_plots" / "reference_phi_psi_projected_probability.png").is_file()
+    assert (tmp_path / "felp_plots" / "reweighted_phi_psi_projected_probability.png").is_file()
     assert (tmp_path / "felp_plots" / "reference_phi_psi_free_energy_landscape.png").is_file()
     assert (tmp_path / "felp_plots" / "reweighted_phi_psi_free_energy_landscape.png").is_file()
     assert (tmp_path / "felp_plots" / "kl_phi_psi_projected_fel_contributions.png").is_file()
@@ -342,6 +347,7 @@ def test_generate_felp_plots_fel_energy_cap(tmp_path: Path) -> None:
     )
 
     assert summary["fel_max_energy_kj_mol"] == 12.0
+    assert (tmp_path / "felp_plots" / "reference_phi_psi_projected_probability.png").is_file()
     assert (tmp_path / "felp_plots" / "reference_phi_psi_free_energy_landscape.png").is_file()
     assert (tmp_path / "felp_plots" / "delta_free_energy_projection.png").is_file()
 
@@ -487,6 +493,8 @@ def test_generate_felp_plots_builds_state_grid_landscapes(tmp_path: Path) -> Non
     )
 
     assert summary["reference_probability_source"] == "raw_counts"
+    assert (tmp_path / "felp_plots" / "reference_phi_psi_state_probability_landscape.png").is_file()
+    assert (tmp_path / "felp_plots" / "reweighted_phi_psi_state_probability_landscape.png").is_file()
     assert (tmp_path / "felp_plots" / "reference_phi_psi_state_free_energy_landscape.png").is_file()
     assert (tmp_path / "felp_plots" / "reweighted_phi_psi_state_free_energy_landscape.png").is_file()
 
@@ -593,10 +601,15 @@ def test_generate_felp_plots_supports_custom_cv_axes(tmp_path: Path) -> None:
     assert summary["cv_frame_projection_state_mass_preserved"] is False
     assert summary["state_reweighting_weight_treatment"] == "raw"
     assert "phi_psi_frame_projection_available" not in summary
+    assert (tmp_path / "felp_plots" / "reference_ends_turn_state_probability_landscape.png").is_file()
+    assert (tmp_path / "felp_plots" / "reweighted_ends_turn_state_probability_landscape.png").is_file()
     assert (tmp_path / "felp_plots" / "reference_ends_turn_state_free_energy_landscape.png").is_file()
     assert (tmp_path / "felp_plots" / "reweighted_ends_turn_state_free_energy_landscape.png").is_file()
+    assert (tmp_path / "felp_plots" / "reference_ends_turn_projected_probability.png").is_file()
+    assert (tmp_path / "felp_plots" / "reweighted_ends_turn_projected_probability.png").is_file()
     assert (tmp_path / "felp_plots" / "reference_ends_turn_free_energy_landscape.png").is_file()
     assert (tmp_path / "felp_plots" / "reweighted_ends_turn_free_energy_landscape.png").is_file()
+    assert (tmp_path / "felp_plots" / "kl_ends_turn_projected_fel_contributions.png").is_file()
     assert (tmp_path / "felp_plots" / "discrete_microstate_free_energy_ends_turn.png").is_file()
     assert not (tmp_path / "felp_plots" / "reference_probability_projection.png").is_file()
 
@@ -894,6 +907,18 @@ def test_felp_plot_config_normalizes_spec_strings(tmp_path: Path) -> None:
     assert config.cv_y == "turn"
 
 
+def test_felp_plot_config_rejects_unknown_divergence_colormap(tmp_path: Path) -> None:
+    csv_file = tmp_path / "summary.csv"
+    csv_file.write_text("label,reference_probability,target_probability\n", encoding="utf-8")
+    config = FELPPlotConfig(
+        microstate_summary_csv=str(csv_file),
+        output_dir=str(tmp_path / "plots"),
+        divergence_colormap="not_a_valid_matplotlib_cmap_name_xyz",
+    )
+    with pytest.raises(ConfigurationError):
+        config.validate()
+
+
 def test_felp_plot_config_rejects_unknown_colormap(tmp_path: Path) -> None:
     csv_file = tmp_path / "summary.csv"
     csv_file.write_text("label,reference_probability,target_probability\n", encoding="utf-8")
@@ -904,6 +929,20 @@ def test_felp_plot_config_rejects_unknown_colormap(tmp_path: Path) -> None:
     )
     with pytest.raises(ConfigurationError):
         config.validate()
+
+
+def test_symmetric_kl_imbalance_grid_is_zero_when_equal() -> None:
+    p = np.array([[0.25, 0.25], [0.25, 0.25]], dtype=float)
+    g = _symmetric_kl_imbalance_grid(p, p, eps=1.0e-12)
+    assert np.allclose(g, 0.0)
+
+
+def test_symmetric_kl_imbalance_grid_flips_sign_when_swapped() -> None:
+    p = np.array([[0.7, 0.1], [0.1, 0.1]], dtype=float)
+    q = np.array([[0.1, 0.3], [0.3, 0.3]], dtype=float)
+    g_pq = _symmetric_kl_imbalance_grid(p, q, eps=1.0e-12)
+    g_qp = _symmetric_kl_imbalance_grid(q, p, eps=1.0e-12)
+    assert np.allclose(g_pq, -g_qp)
 
 
 def test_resolve_cv_axes_prefers_custom_cvs_over_phi_psi() -> None:

@@ -18,6 +18,7 @@ from felp.reweighting import is_reweighting_eligible_frame, psis_smooth_weights
 
 from .common import (
     DEFAULT_FEL_COLORMAP,
+    FELP_KL_DIVERGENCE_COLORMAP,
     apply_publication_style,
     finite_top_indices,
     free_energy_from_probabilities,
@@ -33,6 +34,7 @@ from .common import (
 )
 
 _KJ_PER_KCAL = 4.184
+_OCCUPANCY_MARKER_FACE_COLOR = "#e6e6e6"
 _ANGULAR_CV_NAMES = {"phi", "psi", "omega"}
 _DEFAULT_DIHEDRAL_CV_NAMES = {"phi", "psi"}
 _FEL_ESTIMATORS = {"histogram", "gaussian-kernel"}
@@ -118,7 +120,19 @@ class FELPPlotConfig:
     """Automatic bandwidth rule for Gaussian-kernel projected FELs."""
 
     fel_colormap: str = DEFAULT_FEL_COLORMAP
-    """Matplotlib colormap for CV free-energy heatmaps and probability projections."""
+    """Matplotlib colormap for CV free-energy heatmaps and delta-FE scatter plots."""
+
+    probability_colormap: str | None = None
+    """Colormap for 2D probability heatmaps and reference/target probability scatters.
+
+    When omitted, matches ``fel_colormap`` after validation.
+    """
+
+    divergence_colormap: str | None = None
+    """Colormap for projected KL heatmaps (default: built-in ``felp_kl_twilight``)."""
+
+    kl_scale_by_kbt: bool = False
+    """If true, display projected KL grids multiplied by kBT in plot energy units."""
 
     weight_treatment: str | None = None
     """Optional override for frame-projected reweighting weights."""
@@ -173,10 +187,25 @@ class FELPPlotConfig:
                 "fel_bandwidth_rule must be one of: scott, silverman, state-adaptive."
             )
         object.__setattr__(self, "fel_bandwidth_rule", fel_bandwidth_rule)
+        fel_cmap = validate_registered_colormap(self.fel_colormap)
+        object.__setattr__(self, "fel_colormap", fel_cmap)
+        prob_src = (
+            self.probability_colormap if self.probability_colormap is not None else fel_cmap
+        )
         object.__setattr__(
             self,
-            "fel_colormap",
-            validate_registered_colormap(self.fel_colormap),
+            "probability_colormap",
+            validate_registered_colormap(prob_src),
+        )
+        div_src = (
+            self.divergence_colormap
+            if self.divergence_colormap is not None
+            else FELP_KL_DIVERGENCE_COLORMAP
+        )
+        object.__setattr__(
+            self,
+            "divergence_colormap",
+            validate_registered_colormap(div_src),
         )
         if self.weight_treatment is not None:
             weight_treatment = ReweightingQCConfig.normalize_weight_treatment(
@@ -340,6 +369,7 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
                 fel_max_energy_display=fel_max_display,
                 energy_unit_label=energy_unit_label,
                 fel_colormap=config.fel_colormap,
+                probability_colormap=config.probability_colormap,
             )
         )
 
@@ -362,6 +392,7 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
                 energy_unit_label=energy_unit_label,
                 fel_max_energy_display=fel_max_display,
                 fel_colormap=config.fel_colormap,
+                probability_colormap=config.probability_colormap,
             )
         )
 
@@ -406,6 +437,9 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
                 energy_unit_label=energy_unit_label,
                 fel_max_energy_display=fel_max_display,
                 fel_colormap=config.fel_colormap,
+                probability_colormap=config.probability_colormap,
+                divergence_colormap=config.divergence_colormap,
+                kl_scale_by_kbt=config.kl_scale_by_kbt,
                 x_name=cv_axes.x_name,
                 y_name=cv_axes.y_name,
             )
@@ -420,8 +454,8 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
                 y_values=state_y,
                 x_name=cv_axes.x_name if cv_axes is not None else "x",
                 y_name=cv_axes.y_name if cv_axes is not None else "y",
-                free_energy_kj_mol=target_free_energy_kj_mol,
-                target_probability=target_probabilities,
+                free_energy_kj_mol=reference_free_energy_kj_mol,
+                probability=reference_probabilities,
                 labels=labels,
                 output_dir=config.output_dir,
                 temperature_kelvin=config.temperature_kelvin,
@@ -429,6 +463,27 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
                 energy_unit_label=energy_unit_label,
                 fel_max_energy_display=fel_max_display,
                 fel_colormap=config.fel_colormap,
+                free_energy_label="reference",
+                filename_prefix="reference",
+            )
+        )
+        outputs.extend(
+            _plot_discrete_microstate_cv_projection(
+                plt=plt,
+                x_values=state_x,
+                y_values=state_y,
+                x_name=cv_axes.x_name if cv_axes is not None else "x",
+                y_name=cv_axes.y_name if cv_axes is not None else "y",
+                free_energy_kj_mol=target_free_energy_kj_mol,
+                probability=target_probabilities,
+                labels=labels,
+                output_dir=config.output_dir,
+                temperature_kelvin=config.temperature_kelvin,
+                energy_scale=energy_scale,
+                energy_unit_label=energy_unit_label,
+                fel_max_energy_display=fel_max_display,
+                fel_colormap=config.fel_colormap,
+                free_energy_label="reweighted",
             )
         )
 
@@ -483,6 +538,8 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
         "state_reweighting_weight_treatment": summary_weight_treatment,
         "fel_max_energy_kj_mol": config.fel_max_energy_kj_mol,
         "fel_colormap": config.fel_colormap,
+        "probability_colormap": config.probability_colormap,
+        "divergence_colormap": config.divergence_colormap,
         "plot_energy_unit": config.plot_energy_unit,
         "generated_files": outputs,
     }
@@ -746,6 +803,30 @@ def _safe_probabilities(values: np.ndarray) -> np.ndarray:
     return np.clip(np.asarray(values, dtype=float), 1.0e-12, None)
 
 
+def _pointwise_kl_term(a: np.ndarray, b: np.ndarray, *, eps: float) -> np.ndarray:
+    """Compute ``a * log(a/b)`` grid with ``0 * log(0/b) -> 0``."""
+
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    out = np.zeros_like(a, dtype=float)
+    safe_b = np.maximum(b, eps)
+    mask = a > 0.0
+    out[mask] = a[mask] * np.log(np.maximum(a[mask], eps) / safe_b[mask])
+    return out
+
+
+def _symmetric_kl_imbalance_grid(p: np.ndarray, q: np.ndarray, *, eps: float) -> np.ndarray:
+    """Signed per-cell imbalance: ``½ ( p log(p/q) − q log(q/p) )``.
+
+    Zero wherever ``p == q``. Swapping ``p`` and ``q`` flips the sign, so
+    diverging colormaps centered at zero represent both directions fairly.
+    """
+
+    tp = _pointwise_kl_term(p, q, eps=eps)
+    tq = _pointwise_kl_term(q, p, eps=eps)
+    return 0.5 * (tp - tq)
+
+
 def _kl_divergence(p: np.ndarray, q: np.ndarray) -> tuple[float, np.ndarray]:
     """Compute KL divergence and per-state contributions."""
 
@@ -759,7 +840,13 @@ def _surface_divergence_summary(
     p: np.ndarray,
     q: np.ndarray,
 ) -> tuple[dict[str, float], np.ndarray]:
-    """Compute divergence metrics between two probability surfaces."""
+    """Compute divergence metrics between two probability surfaces.
+
+    Scalar entries use KL(P||Q) and KL(Q||P) on flat normalized grids.
+    The returned 2D grid is the signed imbalance
+    ``0.5 * (p*log(p/q) - q*log(q/p))`` per cell (zero when p equals q, sign
+    flips when p and q are swapped), for diverging colormaps centered at zero.
+    """
 
     p_flat = np.asarray(p, dtype=float).ravel()
     q_flat = np.asarray(q, dtype=float).ravel()
@@ -769,10 +856,16 @@ def _surface_divergence_summary(
         p_flat = p_flat / float(p_flat.sum())
     if q_flat.sum() > 0.0:
         q_flat = q_flat / float(q_flat.sum())
-    kl_pq, contributions = _kl_divergence(p_flat, q_flat)
+    kl_pq, _ = _kl_divergence(p_flat, q_flat)
     kl_qp, _ = _kl_divergence(q_flat, p_flat)
     js = _jensen_shannon_divergence(p_flat, q_flat)
     overlap = _overlap_coefficient(p_flat, q_flat)
+    shape = np.asarray(p, dtype=float).shape
+    sym_grid = _symmetric_kl_imbalance_grid(
+        p_flat.reshape(shape),
+        q_flat.reshape(shape),
+        eps=1.0e-12,
+    )
     return (
         {
             "kl_pre_reweighted_to_reweighted_projected_fel": float(kl_pq),
@@ -780,7 +873,7 @@ def _surface_divergence_summary(
             "jensen_shannon_projected_fel": float(js),
             "projected_fel_overlap_coefficient": float(overlap),
         },
-        contributions.reshape(np.asarray(p, dtype=float).shape),
+        sym_grid,
     )
 
 
@@ -813,9 +906,16 @@ def _plot_occupancy_shift(
     indices = finite_top_indices(occupancy_shift, top_states)
     ordered = indices[np.argsort(occupancy_shift[indices])]
     fig, ax = plt.subplots(1, 1, figsize=(7.0, 5.0))
+    ax.set_facecolor("white")
     positions = np.arange(len(ordered))
     colors = ["firebrick" if occupancy_shift[index] > 0 else "steelblue" for index in ordered]
-    ax.barh(positions, occupancy_shift[ordered], color=colors)
+    ax.barh(
+        positions,
+        occupancy_shift[ordered],
+        color=colors,
+        edgecolor="black",
+        linewidth=0.85,
+    )
     ax.set_yticks(positions, [labels[index] for index in ordered])
     ax.set_xlabel("Target - Reference Probability")
     ax.set_ylabel("State")
@@ -837,13 +937,29 @@ def _plot_probability_comparison(
     """Plot reference vs target state probabilities."""
 
     fig, ax = plt.subplots(1, 1)
-    ax.scatter(reference_probabilities, target_probabilities, c="black", s=30, alpha=0.7)
+    ax.set_facecolor("white")
     diagonal_limit = max(
         float(np.max(reference_probabilities)) if reference_probabilities.size else 0.0,
         float(np.max(target_probabilities)) if target_probabilities.size else 0.0,
         1.0e-12,
     )
-    ax.plot([0.0, diagonal_limit], [0.0, diagonal_limit], linestyle="--", color="gray")
+    ax.plot(
+        [0.0, diagonal_limit],
+        [0.0, diagonal_limit],
+        linestyle="--",
+        color="black",
+        linewidth=1.0,
+        zorder=1,
+    )
+    ax.scatter(
+        reference_probabilities,
+        target_probabilities,
+        facecolors=_OCCUPANCY_MARKER_FACE_COLOR,
+        edgecolors="black",
+        s=30,
+        linewidths=0.7,
+        zorder=2,
+    )
     ax.set_xlabel("Reference Probability")
     ax.set_ylabel("Target Probability")
     ax.set_title("State Occupancy Comparison")
@@ -893,18 +1009,20 @@ def _plot_projected_state_quantities(
     fel_max_energy_display: float | None,
     energy_unit_label: str,
     fel_colormap: str,
+    probability_colormap: str,
 ) -> list[str]:
     """Plot state quantities projected onto reduced-space coordinates."""
 
     mask = np.isfinite(plot_x) & np.isfinite(plot_y)
     outputs: list[str] = []
-    for values, title, colorbar_label, filename, cap_delta in (
+    for values, title, colorbar_label, filename, cap_delta, cmap in (
         (
             reference_probabilities,
             "Reference State Probabilities",
             "Reference Probability",
             "reference_probability_projection.png",
             False,
+            probability_colormap,
         ),
         (
             target_probabilities,
@@ -912,6 +1030,7 @@ def _plot_projected_state_quantities(
             "Target Probability",
             "target_probability_projection.png",
             False,
+            probability_colormap,
         ),
         (
             delta_free_energy,
@@ -919,6 +1038,7 @@ def _plot_projected_state_quantities(
             f"Delta Free Energy ({energy_unit_label})",
             "delta_free_energy_projection.png",
             True,
+            fel_colormap,
         ),
     ):
         fig, ax = plt.subplots(1, 1)
@@ -929,7 +1049,7 @@ def _plot_projected_state_quantities(
             "values": values[mask],
             "colorbar_label": colorbar_label,
             "title": title,
-            "colormap": fel_colormap,
+            "colormap": cmap,
         }
         if cap_delta and fel_max_energy_display is not None:
             scatter_kwargs["fel_max_energy_kj_mol"] = fel_max_energy_display
@@ -1058,6 +1178,7 @@ def _plot_cv_state_landscapes(
     energy_unit_label: str,
     fel_max_energy_display: float | None,
     fel_colormap: str,
+    probability_colormap: str,
 ) -> list[str]:
     """Build 2D CV free energy surfaces from discrete state probabilities."""
 
@@ -1085,6 +1206,44 @@ def _plot_cv_state_landscapes(
     outputs: list[str] = []
     suffix = _cv_filename_suffix(x_name, y_name)
     legacy_phi_psi = (x_name, y_name) == ("phi", "psi")
+    reference_prob_filename = (
+        "reference_phi_psi_state_probability_landscape.png"
+        if legacy_phi_psi
+        else f"reference_{suffix}_state_probability_landscape.png"
+    )
+    reweighted_prob_filename = (
+        "reweighted_phi_psi_state_probability_landscape.png"
+        if legacy_phi_psi
+        else f"reweighted_{suffix}_state_probability_landscape.png"
+    )
+    outputs.append(
+        save_pcolormesh_landscape(
+            plt,
+            os.path.join(output_dir, reference_prob_filename),
+            reference_grid,
+            x_edges,
+            y_edges,
+            title=f"Pre-reweighted microstate probability ({x_name}, {y_name})",
+            colorbar_label="Probability",
+            xlabel=_cv_axis_label(x_name),
+            ylabel=_cv_axis_label(y_name),
+            colormap=probability_colormap,
+        )
+    )
+    outputs.append(
+        save_pcolormesh_landscape(
+            plt,
+            os.path.join(output_dir, reweighted_prob_filename),
+            target_grid,
+            x_edges,
+            y_edges,
+            title=f"Reweighted microstate probability ({x_name}, {y_name})",
+            colorbar_label="Probability",
+            xlabel=_cv_axis_label(x_name),
+            ylabel=_cv_axis_label(y_name),
+            colormap=probability_colormap,
+        )
+    )
     reference_filename = (
         "reference_phi_psi_state_free_energy_landscape.png"
         if legacy_phi_psi
@@ -1707,6 +1866,9 @@ def _plot_cv_projected_landscapes(
     energy_unit_label: str,
     fel_max_energy_display: float | None,
     fel_colormap: str,
+    probability_colormap: str,
+    divergence_colormap: str,
+    kl_scale_by_kbt: bool,
     x_name: str,
     y_name: str,
 ) -> tuple[list[str], dict[str, object]]:
@@ -1787,6 +1949,18 @@ def _plot_cv_projected_landscapes(
         reference_hist,
         reweighted_hist,
     )
+    divergence_metadata["kl_grid_definition"] = (
+        "0.5 * [p_pre * log(p_pre / p_reweighted) - "
+        "p_reweighted * log(p_reweighted / p_pre)]"
+    )
+    kl_display_grid, kl_colorbar_label, kl_display_metadata = _kl_display_grid(
+        kl_contribution_grid,
+        temperature_kelvin=temperature_kelvin,
+        energy_scale=energy_scale,
+        energy_unit_label=energy_unit_label,
+        scale_by_kbt=kl_scale_by_kbt,
+    )
+    divergence_metadata.update(kl_display_metadata)
     projection_metadata.update(divergence_metadata)
 
     outputs: list[str] = []
@@ -1802,6 +1976,16 @@ def _plot_cv_projected_landscapes(
         if legacy_phi_psi
         else f"reweighted_{suffix}_free_energy_landscape.png"
     )
+    reference_prob_filename = (
+        "reference_phi_psi_projected_probability.png"
+        if legacy_phi_psi
+        else f"reference_{suffix}_projected_probability.png"
+    )
+    reweighted_prob_filename = (
+        "reweighted_phi_psi_projected_probability.png"
+        if legacy_phi_psi
+        else f"reweighted_{suffix}_projected_probability.png"
+    )
     kl_filename = (
         "kl_phi_psi_projected_fel_contributions.png"
         if legacy_phi_psi
@@ -1811,6 +1995,34 @@ def _plot_cv_projected_landscapes(
         "kl_phi_psi_projected_fel_summary.json"
         if legacy_phi_psi
         else f"kl_{suffix}_projected_fel_summary.json"
+    )
+    outputs.append(
+        save_pcolormesh_landscape(
+            plt,
+            os.path.join(output_dir, reference_prob_filename),
+            reference_hist,
+            x_edges,
+            y_edges,
+            title=f"Pre-reweighted projected probability ({x_name}, {y_name})",
+            colorbar_label="Probability",
+            xlabel=_cv_axis_label(x_name),
+            ylabel=_cv_axis_label(y_name),
+            colormap=probability_colormap,
+        )
+    )
+    outputs.append(
+        save_pcolormesh_landscape(
+            plt,
+            os.path.join(output_dir, reweighted_prob_filename),
+            reweighted_hist,
+            x_edges,
+            y_edges,
+            title=f"Reweighted projected probability ({x_name}, {y_name})",
+            colorbar_label="Probability",
+            xlabel=_cv_axis_label(x_name),
+            ylabel=_cv_axis_label(y_name),
+            colormap=probability_colormap,
+        )
     )
     outputs.append(
         save_pcolormesh_landscape(
@@ -1846,20 +2058,47 @@ def _plot_cv_projected_landscapes(
         save_pcolormesh_landscape(
             plt,
             os.path.join(output_dir, kl_filename),
-            kl_contribution_grid,
+            kl_display_grid,
             x_edges,
             y_edges,
             title=f"Projected FEL KL contributions ({x_name}, {y_name})",
-            colorbar_label="p_pre log(p_pre / p_reweighted)",
+            colorbar_label=kl_colorbar_label,
             xlabel=_cv_axis_label(x_name),
             ylabel=_cv_axis_label(y_name),
-            colormap="coolwarm",
+            colormap=divergence_colormap,
+            symmetric_zero_center=True,
         )
     )
     kl_summary_path = os.path.join(output_dir, kl_summary_filename)
     write_json(kl_summary_path, divergence_metadata)
     outputs.append(kl_summary_path)
     return outputs, projection_metadata
+
+
+def _kl_display_grid(
+    kl_grid: np.ndarray,
+    *,
+    temperature_kelvin: float,
+    energy_scale: float,
+    energy_unit_label: str,
+    scale_by_kbt: bool,
+) -> tuple[np.ndarray, str, dict[str, object]]:
+    """Return the displayed KL grid and metadata for optional kBT scaling."""
+
+    if not scale_by_kbt:
+        return np.asarray(kl_grid, dtype=float), "Signed KL imbalance", {
+            "kl_display_units": "dimensionless",
+            "kl_display_scale_factor": 1.0,
+        }
+    scale = K_BOLTZMANN_KJ_PER_MOL_K * float(temperature_kelvin) * float(energy_scale)
+    return (
+        np.asarray(kl_grid, dtype=float) * scale,
+        f"Signed KL contribution ({energy_unit_label})",
+        {
+            "kl_display_units": energy_unit_label,
+            "kl_display_scale_factor": float(scale),
+        },
+    )
 
 
 def _plot_discrete_microstate_cv_projection(
@@ -1870,7 +2109,7 @@ def _plot_discrete_microstate_cv_projection(
     x_name: str,
     y_name: str,
     free_energy_kj_mol: np.ndarray,
-    target_probability: np.ndarray,
+    probability: np.ndarray,
     labels: list[str],
     output_dir: str,
     temperature_kelvin: float,
@@ -1878,6 +2117,8 @@ def _plot_discrete_microstate_cv_projection(
     energy_unit_label: str,
     fel_max_energy_display: float | None,
     fel_colormap: str,
+    free_energy_label: str,
+    filename_prefix: str | None = None,
 ) -> list[str]:
     """Scatter microstate centers on selected CV axes colored by free energy."""
 
@@ -1888,15 +2129,20 @@ def _plot_discrete_microstate_cv_projection(
     fe = energy_scale * np.asarray(free_energy_kj_mol, dtype=float)
     if not np.isfinite(fe[mask]).any():
         values = energy_scale * free_energy_from_probabilities(
-            np.asarray(target_probability, dtype=float),
+            np.asarray(probability, dtype=float),
             temperature_kelvin=temperature_kelvin,
         )
-        colorbar_label = f"Relative free energy from P_target ({energy_unit_label})"
-        title = f"Microstate centers ({x_name}, {y_name})"
+        colorbar_label = (
+            f"Relative {free_energy_label} free energy from probability "
+            f"({energy_unit_label})"
+        )
+        title = f"{free_energy_label.capitalize()} microstate centers ({x_name}, {y_name})"
     else:
         values = fe
-        colorbar_label = f"Relative free energy ({energy_unit_label})"
-        title = f"Microstate centers ({x_name}, {y_name})"
+        colorbar_label = (
+            f"Relative {free_energy_label} free energy ({energy_unit_label})"
+        )
+        title = f"{free_energy_label.capitalize()} microstate centers ({x_name}, {y_name})"
 
     fig, ax = plt.subplots(1, 1)
     scatter_kwargs: dict = {
@@ -1925,11 +2171,10 @@ def _plot_discrete_microstate_cv_projection(
             )
     fig.tight_layout()
     suffix = _cv_filename_suffix(x_name, y_name)
-    filename = (
-        "discrete_microstate_free_energy_ramachandran.png"
-        if (x_name, y_name) == ("phi", "psi")
-        else f"discrete_microstate_free_energy_{suffix}.png"
-    )
+    stem = "discrete_microstate_free_energy"
+    if filename_prefix:
+        stem = f"{filename_prefix}_{stem}"
+    filename = f"{stem}_ramachandran.png" if (x_name, y_name) == ("phi", "psi") else f"{stem}_{suffix}.png"
     path = os.path.join(output_dir, filename)
     fig.savefig(path)
     plt.close(fig)

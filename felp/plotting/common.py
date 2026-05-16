@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import os
 import shutil
 import tempfile
@@ -161,13 +162,98 @@ def probability_surface_to_free_energy(
     return free_energy
 
 
-_FEL_CAP_OVER_COLOR = "#e8e8e8"
+_FEL_BACKGROUND_COLOR = (1.0, 1.0, 1.0, 1.0)
 
 DEFAULT_FEL_COLORMAP = "nipy_spectral_r"
+
+# Diverging map for symmetric KL heatmaps: twilight_shifted arms + white center.
+FELP_KL_DIVERGENCE_COLORMAP = "felp_kl_twilight"
+
+_FELP_BUILTIN_CMAPS_REGISTERED = False
+
+
+def _ensure_felp_builtin_colormaps_registered() -> None:
+    """Register FELP-specific colormaps exactly once (idempotent).
+
+    ``felp_kl_twilight`` follows the **left** and **right** arms of Matplotlib's
+    ``twilight_shifted`` (indigo→blues toward the peak, then warm tans/browns→
+    burgundy on the downward arm), but replaces the stock pinkish peak with
+    **pure white** and uses **linear** progress in colormap parameter on each
+    arm so the saturated tails are not compressed.
+    """
+
+    global _FELP_BUILTIN_CMAPS_REGISTERED
+    if _FELP_BUILTIN_CMAPS_REGISTERED:
+        return
+
+    import matplotlib as mpl
+    import matplotlib.colors as mcolors
+
+    name = FELP_KL_DIVERGENCE_COLORMAP
+    registry = getattr(mpl, "colormaps", None)
+    if registry is not None and name in registry:
+        _FELP_BUILTIN_CMAPS_REGISTERED = True
+        return
+
+    try:
+        base = mpl.colormaps["twilight_shifted"]
+    except (AttributeError, KeyError, TypeError):
+        base = mpl.cm.get_cmap("twilight_shifted")
+
+    white = np.array([1.0, 1.0, 1.0, 1.0], dtype=float)
+    # Left arm: dark indigo → blues (twilight parameter 0 .. ~0.46).
+    left_u0, left_u1 = 0.0, 0.46
+    # Right arm: warm descent from just past peak through brown/burgundy; stop
+    # before ~0.94 where hues fold back toward purple (cyclical wrap).
+    right_u0, right_u1 = 0.54, 0.91
+    # Fraction of each half (near center) cross-faded to pure white.
+    center_blend = 0.16
+
+    n = 256
+    rgba = np.zeros((n, 4), dtype=float)
+    mid_left = (n - 1) // 2
+    mid_right = n // 2
+
+    for i in range(mid_left + 1):
+        f = i / mid_left if mid_left else 0.0
+        u = left_u0 + f * (left_u1 - left_u0)
+        c = np.clip(np.asarray(base(u), dtype=float), 0.0, 1.0)
+        if f <= 1.0 - center_blend:
+            rgba[i] = c
+        else:
+            t = (f - (1.0 - center_blend)) / center_blend
+            rgba[i] = (1.0 - t) * c + t * white
+
+    for i in range(mid_right, n):
+        g = (i - mid_right) / max(n - 1 - mid_right, 1)
+        if g < center_blend:
+            t = g / center_blend
+            c0 = np.clip(np.asarray(base(right_u0), dtype=float), 0.0, 1.0)
+            rgba[i] = (1.0 - t) * white + t * c0
+        else:
+            gf = (g - center_blend) / max(1.0 - center_blend, 1e-9)
+            u = right_u0 + gf * (right_u1 - right_u0)
+            c = np.clip(np.asarray(base(u), dtype=float), 0.0, 1.0)
+            rgba[i] = c
+
+    rgba[mid_left] = white
+    rgba[mid_right] = white
+
+    cmap = mcolors.ListedColormap(rgba, name=name)
+    cmap.set_bad(color=(0.9, 0.9, 0.9, 1.0))
+
+    if registry is not None:
+        registry.register(cmap, name=name, force=True)
+    else:
+        mpl.cm.register_cmap(name=name, cmap=cmap)
+
+    _FELP_BUILTIN_CMAPS_REGISTERED = True
 
 
 def validate_registered_colormap(name: str) -> str:
     """Return a stripped matplotlib colormap name or raise ``ConfigurationError``."""
+
+    _ensure_felp_builtin_colormaps_registered()
 
     normalized = str(name).strip()
     if not normalized:
@@ -192,7 +278,14 @@ def validate_registered_colormap(name: str) -> str:
 
 
 def _copy_colormap_for_fel_cap(name: str):
-    """Return a mutable copy of ``name`` with bad/over/under set for energy caps."""
+    """Return a mutable copy of ``name`` with norm overflow colors for energy caps.
+
+    Values **above** the display cap map to **white** for any base colormap
+    (``Normalize(..., clip=False)`` + ``set_over``). Values below the display
+    range also map to white, which keeps symmetric capped ΔF plots clean.
+    Invalid cells use the same white background so sparse FEL regions do not
+    render as a separate gray artifact class.
+    """
 
     import matplotlib as mpl
     import matplotlib.cm as mpl_cm
@@ -203,9 +296,9 @@ def _copy_colormap_for_fel_cap(name: str):
     else:
         base = mpl_cm.get_cmap(name)
     cmap = base.copy()
-    cmap.set_bad(_FEL_CAP_OVER_COLOR)
-    cmap.set_over(_FEL_CAP_OVER_COLOR)
-    cmap.set_under(_FEL_CAP_OVER_COLOR)
+    cmap.set_bad(_FEL_BACKGROUND_COLOR)
+    cmap.set_over(_FEL_BACKGROUND_COLOR)
+    cmap.set_under(_FEL_BACKGROUND_COLOR)
     return cmap
 
 
@@ -221,42 +314,69 @@ def scatter_state_projection(
     *,
     fel_max_energy_kj_mol: float | None = None,
     symmetric_energy_cap: bool = False,
+    symmetric_zero_center: bool = False,
     colormap: str | None = None,
 ) -> None:
     """Draw a colored scatter plot for state-wise projected values."""
 
+    import matplotlib.cm as mpl_cm
     import matplotlib.colors as mcolors
 
     cmap_name = colormap if colormap is not None else DEFAULT_FEL_COLORMAP
-    values_plot = np.ma.masked_invalid(np.asarray(values, dtype=float))
-    scatter_kwargs: dict = {
-        "x": x,
-        "y": y,
-        "c": values_plot,
-        "cmap": cmap_name,
-        "s": 60,
-        "edgecolors": "black",
-        "linewidths": 0.3,
-    }
+    x_plot = np.asarray(x, dtype=float)
+    y_plot = np.asarray(y, dtype=float)
+    value_plot = np.asarray(values, dtype=float)
+    position_mask = np.isfinite(x_plot) & np.isfinite(y_plot)
+    x_points = x_plot[position_mask]
+    y_points = y_plot[position_mask]
+    point_values = value_plot[position_mask]
+    finite_value_mask = np.isfinite(point_values)
+    cmap = _copy_colormap_for_fel_cap(cmap_name)
     colorbar_extend: str | None = None
+    norm = mcolors.Normalize()
     if fel_max_energy_kj_mol is not None:
         cap = float(fel_max_energy_kj_mol)
-        scatter_kwargs["cmap"] = _copy_colormap_for_fel_cap(cmap_name)
         if symmetric_energy_cap:
-            scatter_kwargs["norm"] = mcolors.Normalize(
-                vmin=-cap, vmax=cap, clip=False
-            )
+            norm = mcolors.Normalize(vmin=-cap, vmax=cap, clip=False)
             colorbar_extend = "both"
         else:
-            scatter_kwargs["norm"] = mcolors.Normalize(vmin=0.0, vmax=cap, clip=False)
+            norm = mcolors.Normalize(vmin=0.0, vmax=cap, clip=False)
             colorbar_extend = "max"
+    elif symmetric_zero_center and finite_value_mask.any():
+        absmax = float(np.nanmax(np.abs(point_values[finite_value_mask])))
+        if not math.isfinite(absmax) or absmax == 0.0:
+            absmax = 1.0e-15
+        norm = mcolors.Normalize(vmin=-absmax, vmax=absmax, clip=False)
+    elif finite_value_mask.any():
+        norm.autoscale(point_values[finite_value_mask])
 
-    scatter = ax.scatter(**scatter_kwargs)
+    if x_points.size:
+        facecolors = np.tile(
+            np.asarray(_FEL_BACKGROUND_COLOR, dtype=float),
+            (x_points.size, 1),
+        )
+        if finite_value_mask.any():
+            facecolors[finite_value_mask] = cmap(norm(point_values[finite_value_mask]))
+        ax.scatter(
+            x_points,
+            y_points,
+            s=60,
+            facecolors=facecolors,
+            edgecolors="black",
+            linewidths=0.3,
+        )
     ax.set_title(title)
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
-    colorbar = ax.figure.colorbar(scatter, ax=ax, extend=colorbar_extend or "neither")
-    colorbar.set_label(colorbar_label)
+    if finite_value_mask.any():
+        mappable = mpl_cm.ScalarMappable(norm=norm, cmap=cmap)
+        mappable.set_array(point_values[finite_value_mask])
+        colorbar = ax.figure.colorbar(
+            mappable,
+            ax=ax,
+            extend=colorbar_extend or "neither",
+        )
+        colorbar.set_label(colorbar_label)
 
 
 def save_pcolormesh_landscape(
@@ -272,6 +392,7 @@ def save_pcolormesh_landscape(
     ylabel: str,
     fel_max_energy_kj_mol: float | None = None,
     colormap: str | None = None,
+    symmetric_zero_center: bool = False,
 ) -> str:
     """Render a 2D surface on a histogram grid (e.g. probability or free energy)."""
 
@@ -279,10 +400,12 @@ def save_pcolormesh_landscape(
 
     cmap_name = colormap if colormap is not None else DEFAULT_FEL_COLORMAP
     fig, ax = plt.subplots(1, 1)
+    ax.set_facecolor(_FEL_BACKGROUND_COLOR)
     z_plot = np.ma.masked_invalid(np.asarray(z, dtype=float).T)
     colorbar_extend: str | None = None
     if fel_max_energy_kj_mol is not None:
         cap = float(fel_max_energy_kj_mol)
+        z_plot = np.ma.masked_where(z_plot >= cap, z_plot)
         cmap = _copy_colormap_for_fel_cap(cmap_name)
         image = ax.pcolormesh(
             x_edges,
@@ -291,8 +414,23 @@ def save_pcolormesh_landscape(
             shading="auto",
             cmap=cmap,
             norm=mcolors.Normalize(vmin=0.0, vmax=cap, clip=False),
+            antialiased=False,
         )
         colorbar_extend = "max"
+    elif symmetric_zero_center:
+        flat = np.ma.filled(z_plot, np.nan)
+        absmax = float(np.nanmax(np.abs(flat)))
+        if not math.isfinite(absmax) or absmax == 0.0:
+            absmax = 1.0e-15
+        norm = mcolors.Normalize(vmin=-absmax, vmax=absmax, clip=False)
+        image = ax.pcolormesh(
+            x_edges,
+            y_edges,
+            z_plot,
+            shading="auto",
+            cmap=cmap_name,
+            norm=norm,
+        )
     else:
         image = ax.pcolormesh(
             x_edges,

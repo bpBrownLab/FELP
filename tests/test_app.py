@@ -5,8 +5,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from felp.app import summarize_results
+from felp.cli.parser import build_parser
 from felp.core import FrameResult, OutputConfig
-from felp.io import ResultsWriter
+from felp.io import ResultsWriter, load_frame_results_csv
 from felp.reweighting import SamplingManifest
 
 
@@ -182,3 +183,46 @@ def test_summarize_results_uses_sampling_manifest_reference_counts(
     assert summary["sampling"]["total_assigned_frame_count"] == 10
     summary_csv = Path(namespace.output_dir) / "microstate_summary.csv"
     assert "0.9" in summary_csv.read_text(encoding="utf-8")
+
+
+def test_summarize_repartition_writes_matching_frame_results(tmp_path: Path) -> None:
+    raw_writer = ResultsWriter(OutputConfig(output_dir=str(tmp_path / "raw")))
+    raw_writer.prepare_output_dir()
+    raw_writer.write_frame_results(
+        [
+            _frame_result(0, "old_a", 0.0),
+            _frame_result(1, "old_b", 1.0),
+        ]
+    )
+
+    parser = build_parser()
+    output_dir = tmp_path / "summary"
+    namespace = parser.parse_args(
+        [
+            "summarize",
+            "--raw-frame-results",
+            raw_writer.raw_frame_results_path,
+            "--output-dir",
+            str(output_dir),
+            "--repartition",
+            "--microstate-source",
+            "grid",
+            "--phi-bins",
+            "2",
+            "--psi-bins",
+            "2",
+            "--prior-probability-mode",
+            "raw_counts",
+            "--reweighting-qc-policy",
+            "none",
+        ]
+    )
+
+    summarize_results(namespace)
+
+    written_frames = load_frame_results_csv(str(output_dir / "frame_results.csv"))
+    assert [result.microstate_id for result in written_frames] == ["1_1", "1_1"]
+    assert [result.microstate_label for result in written_frames] == [
+        "phi1_psi1",
+        "phi1_psi1",
+    ]

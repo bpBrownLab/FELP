@@ -500,6 +500,24 @@ python felp.py felp-plot \
   --fel-max-energy-kj-mol 12
 ```
 
+Generate a standalone probability-based KL comparison between an MD simulation and
+a FELP reweighted surface:
+
+```bash
+python felp.py md-kl-plot \
+  --felp-output-dir outputs/gly_to_ala_from_bundle \
+  --raw-frame-results outputs/gly_to_ala_from_bundle/frame_results.csv \
+  --topology-file reference.prmtop \
+  --trajectory-file reference_md.nc \
+  --phi-psi-residue-number 2 \
+  --temperature-kelvin 300 \
+  --fel-bins 180 \
+  --fel-cmap gist_earth \
+  --fel-max-energy-kj-mol 15 \
+  --plot-energy-unit kcal_mol \
+  --output-dir outputs/md_vs_reweighted_kl
+```
+
 Use the task-specific wrapper scripts if you prefer shorter entry points:
 
 ```bash
@@ -560,7 +578,7 @@ Each `msm-fit` bundle writes:
 
 Each plotting command writes:
 
-- `plot_summary.json`: plot provenance plus divergence summaries where relevant.
+- `plot_summary.json` or command-specific `*_summary.json`: plot provenance plus divergence summaries where relevant.
 - `*.png`: publication-style occupancy, divergence, projection, and free-energy figures.
 
 For FELP plots, `plot_summary.json` records the current estimator descriptions and whether a free-energy display cap was applied via `fel_max_energy_kj_mol`.

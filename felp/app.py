@@ -12,6 +12,7 @@ from typing import Any, Sequence
 
 from felp.cli import (
     build_felp_plot_config,
+    build_md_kl_plot_config,
     build_microstate_config,
     build_msm_fit_config,
     build_msm_plot_config,
@@ -24,7 +25,7 @@ from felp.core import ConfigurationError, OutputConfig
 from felp.io import ResultsWriter, TrajectoryLoader, load_frame_results_csv
 from felp.msm import PyEMMAPipeline, export_state_samples, load_bundle
 from felp.parallel import FrameExecutor
-from felp.plotting import generate_felp_plots, generate_msm_plots
+from felp.plotting import generate_felp_plots, generate_md_kl_plot, generate_msm_plots
 from felp.protocol_summary import build_protocol_summary
 from felp.reweighting import (
     MicrostateAtlas,
@@ -456,8 +457,20 @@ def _stored_assignment_measurements(result) -> dict[str, float] | None:
 def _repartition_frame_results(
     frame_results: list,
     atlas: "MicrostateAtlas",
+    *,
+    grid_bins: tuple[int, int] | None = None,
 ) -> list:
     """Re-assign every frame to a new atlas using stored CV measurements."""
+
+    if grid_bins is not None:
+        fast = _repartition_frame_results_to_phi_psi_grid(
+            frame_results,
+            atlas,
+            phi_bins=int(grid_bins[0]),
+            psi_bins=int(grid_bins[1]),
+        )
+        if fast is not None:
+            return fast
 
     repartitioned: list = []
     unassigned_count = 0
@@ -499,6 +512,82 @@ def _repartition_frame_results(
             f"to the new atlas",
             file=sys.stderr,
         )
+    return repartitioned
+
+
+def _repartition_frame_results_to_phi_psi_grid(
+    frame_results: list,
+    atlas: "MicrostateAtlas",
+    *,
+    phi_bins: int,
+    psi_bins: int,
+) -> list | None:
+    """Fast path for uniform phi/psi grid repartitioning.
+
+    The generic atlas assignment scans every definition for every frame. That is
+    fine for small/custom state sets, but a 180x180 grid has 32,400 states. For
+    the built-in grid we can compute the bin index directly in O(1) per frame.
+    """
+
+    if phi_bins < 1 or psi_bins < 1:
+        return None
+    by_id = atlas.by_id()
+    if len(by_id) != phi_bins * psi_bins:
+        return None
+    phi_width = 360.0 / float(phi_bins)
+    psi_width = 360.0 / float(psi_bins)
+
+    repartitioned: list = []
+    unassigned_count = 0
+    for result in frame_results:
+        metadata = getattr(result, "metadata", {}) or {}
+        measurements = _stored_assignment_measurements(result)
+        if measurements is None or "phi" not in measurements or "psi" not in measurements:
+            repartitioned.append(result)
+            continue
+
+        try:
+            phi_value = float(measurements["phi"])
+            psi_value = float(measurements["psi"])
+            phi_bin = int(((phi_value + 180.0) % 360.0) / phi_width)
+            psi_bin = int(((psi_value + 180.0) % 360.0) / psi_width)
+            phi_bin = min(max(phi_bin, 0), phi_bins - 1)
+            psi_bin = min(max(psi_bin, 0), psi_bins - 1)
+            definition = by_id[f"{phi_bin}_{psi_bin}"]
+        except Exception:
+            unassigned_count += 1
+            repartitioned.append(result)
+            continue
+
+        updated_metadata = dict(metadata)
+        updated_metadata["assignment_measurements"] = measurements
+        updated_metadata["cv_centers"] = definition.cv_centers
+        if definition.phi_center is not None:
+            updated_metadata["phi_center"] = definition.phi_center
+        if definition.psi_center is not None:
+            updated_metadata["psi_center"] = definition.psi_center
+        updated_metadata["plot_x"] = definition.plot_x
+        updated_metadata["plot_y"] = definition.plot_y
+        repartitioned.append(
+            replace(
+                result,
+                microstate_id=definition.state_id,
+                microstate_label=definition.label,
+                metadata=updated_metadata,
+            )
+        )
+
+    if unassigned_count > 0:
+        print(
+            f"[FELP] fast grid repartition: {unassigned_count} frame(s) could not "
+            "be assigned to the new grid",
+            file=sys.stderr,
+        )
+    print(
+        f"[FELP] fast grid repartition: assigned {len(repartitioned)} frame(s) "
+        f"using direct {phi_bins}x{psi_bins} binning",
+        file=sys.stderr,
+    )
     return repartitioned
 
 
@@ -599,7 +688,16 @@ def summarize_results(namespace) -> dict:
             )
         else:
             atlas = MicrostateAtlas.from_config(microstate_config)
-        frame_results = _repartition_frame_results(frame_results, atlas)
+        grid_bins = (
+            (microstate_config.phi_bins, microstate_config.psi_bins)
+            if microstate_config.source == "grid"
+            else None
+        )
+        frame_results = _repartition_frame_results(
+            frame_results,
+            atlas,
+            grid_bins=grid_bins,
+        )
         print(
             f"[FELP] repartitioned {len(frame_results)} frames into "
             f"{len(atlas.definitions)} microstates",
@@ -618,7 +716,9 @@ def summarize_results(namespace) -> dict:
             sampling_manifest = SamplingManifest.from_dict(json.load(handle))
     reference_counts = (
         manifest_counts_for_atlas(sampling_manifest, atlas)
-        if sampling_manifest is not None and sampling_manifest.skipped_frame_count > 0
+        if not repartition
+        and sampling_manifest is not None
+        and sampling_manifest.skipped_frame_count > 0
         else None
     )
     sampling_metadata = (
@@ -634,6 +734,8 @@ def summarize_results(namespace) -> dict:
         reference_counts=reference_counts,
         sampling_metadata=sampling_metadata,
     )
+    if repartition:
+        writer.write_frame_results(frame_results)
     writer.write_microstate_results(microstate_results)
     summary = _build_reweighting_summary(
         frame_count=len(frame_results),
@@ -696,6 +798,14 @@ def plot_felp_outputs(namespace) -> dict:
     return summary
 
 
+def plot_md_kl(namespace) -> dict:
+    """Generate standalone KL plots comparing MD to reweighted FELP data."""
+
+    summary = generate_md_kl_plot(build_md_kl_plot_config(namespace))
+    _write_stdout(summary)
+    return summary
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """CLI entry point for the FELP application."""
     parser = build_parser()
@@ -724,6 +834,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if namespace.command == "felp-plot":
         plot_felp_outputs(namespace)
+        return 0
+    if namespace.command == "md-kl-plot":
+        plot_md_kl(namespace)
         return 0
     parser.error(f"Unknown command: {namespace.command}")
     return 2

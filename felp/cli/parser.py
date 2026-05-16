@@ -26,8 +26,8 @@ from felp.core import (
 )
 from felp.energy import resolve_openmm_gpu_platform_name
 from felp.msm import MSMFitConfig, MSMSampleExportConfig
-from felp.plotting import FELPPlotConfig, MSMPlotConfig
-from felp.plotting.common import DEFAULT_FEL_COLORMAP
+from felp.plotting import FELPPlotConfig, MDKLPlotConfig, MSMPlotConfig
+from felp.plotting.common import DEFAULT_FEL_COLORMAP, FELP_KL_DIVERGENCE_COLORMAP
 
 
 def _default_cv_name(kind: str, residue_number: int, target_residue_number: int) -> str:
@@ -1265,8 +1265,35 @@ def _add_felp_plot_arguments(parser: argparse.ArgumentParser) -> None:
         "--fel-cmap",
         default=DEFAULT_FEL_COLORMAP,
         help=(
-            "Matplotlib colormap name for CV free-energy heatmaps and projected "
-            "probability / delta-free-energy scatter plots (default: %(default)s)."
+            "Matplotlib colormap for CV free-energy heatmaps, discrete microstate "
+            "FEL scatter, and delta free-energy scatter (default: %(default)s)."
+        ),
+    )
+    parser.add_argument(
+        "--probability-cmap",
+        default=None,
+        help=(
+            "Matplotlib colormap for 2D probability heatmaps (frame-projected and "
+            "state-grid) and reference/target probability scatters. "
+            "Defaults to --fel-cmap when omitted."
+        ),
+    )
+    parser.add_argument(
+        "--divergence-cmap",
+        default=None,
+        dest="divergence_cmap",
+        help=(
+            "Matplotlib colormap for the projected symmetric-KL heatmap "
+            f"(default: {FELP_KL_DIVERGENCE_COLORMAP}, registered by FELP)."
+        ),
+    )
+    parser.add_argument(
+        "--kl-scale-by-kbt",
+        action="store_true",
+        help=(
+            "Display projected KL heatmaps multiplied by kBT. This provides an "
+            "energy-scale view of KL contributions using --temperature-kelvin and "
+            "--plot-energy-unit, but the divergence is still computed from probabilities."
         ),
     )
     parser.add_argument(
@@ -1319,6 +1346,195 @@ def _add_felp_plot_arguments(parser: argparse.ArgumentParser) -> None:
             "--fel-max-energy-kj-mol remain in kJ/mol; values are converted for display "
             "when set to kcal_mol (1 kcal/mol = 4.184 kJ/mol)."
         ),
+    )
+
+
+def _add_md_kl_plot_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add arguments for standalone MD-vs-reweighted KL plots."""
+
+    input_group = parser.add_argument_group("Inputs")
+    input_group.add_argument(
+        "--felp-output-dir",
+        help=(
+            "FELP output directory containing microstate_summary.csv and/or "
+            "reweighted_surface.csv. Use --reweighted-surface to point to a CSV directly."
+        ),
+    )
+    input_group.add_argument(
+        "--reweighted-surface",
+        "--microstate-summary",
+        dest="reweighted_surface",
+        help=(
+            "CSV containing plot_x, plot_y, and target_probability columns "
+            "(for example FELP reweighted_surface.csv or microstate_summary.csv)."
+        ),
+    )
+    input_group.add_argument(
+        "--raw-frame-results",
+        help=(
+            "Frame-level FELP CSV used to project the reweighted distribution from "
+            "actual frame phi/psi coordinates. Strongly recommended for MSM bundle "
+            "or other non-grid microstate summaries."
+        ),
+    )
+    input_group.add_argument(
+        "--topology-file",
+        required=True,
+        help="Topology file for the reference MD trajectory, understood by MDTraj.",
+    )
+    input_group.add_argument(
+        "--trajectory",
+        "--trajectory-file",
+        action="append",
+        nargs="+",
+        required=True,
+        dest="trajectory_groups",
+        metavar="<trajectory>",
+        help=(
+            "Repeatable grouped MD trajectory input. Amber NetCDF (.nc) and other "
+            "MDTraj-readable formats are supported."
+        ),
+    )
+    input_group.add_argument(
+        "--phi-psi-residue-number",
+        type=int,
+        help=(
+            "Residue used to compute the MD phi/psi distribution. Resolution uses "
+            "resSeq, then 1-based topology index. Not required with --phi-psi-selection."
+        ),
+    )
+    input_group.add_argument(
+        "--phi-psi-residue-name",
+        help="Optional expected residue name when resolving --phi-psi-residue-number.",
+    )
+    input_group.add_argument(
+        "--phi-psi-selection",
+        help=(
+            "Optional MDTraj selection string identifying exactly one internal residue "
+            "for phi/psi; overrides residue-number/name resolution."
+        ),
+    )
+    input_group.add_argument(
+        "--stride",
+        type=int,
+        default=1,
+        help="Frame stride used when reading the MD trajectory.",
+    )
+    input_group.add_argument(
+        "--frame-start",
+        type=int,
+        default=0,
+        help="Zero-based selected-frame index to start after applying stride.",
+    )
+    input_group.add_argument(
+        "--frame-stop",
+        type=int,
+        help="Exclusive selected-frame index to stop after applying stride.",
+    )
+    input_group.add_argument(
+        "--chunk-size",
+        type=int,
+        default=1024,
+        help="Number of trajectory frames per MDTraj iterload chunk.",
+    )
+
+    plot_group = parser.add_argument_group("Plotting")
+    plot_group.add_argument(
+        "--temperature-kelvin",
+        type=float,
+        default=300.0,
+        help="Temperature used to reconstruct reweighted frame weights from delta_u.",
+    )
+    plot_group.add_argument(
+        "--fel-bins",
+        type=int,
+        default=180,
+        help=(
+            "Number of bins per phi/psi axis when projecting --raw-frame-results "
+            "and the MD trajectory."
+        ),
+    )
+    plot_group.add_argument(
+        "--fel-max-points",
+        type=int,
+        default=200_000,
+        help="Maximum FELP frame points used for the reweighted projection.",
+    )
+    plot_group.add_argument(
+        "--fel-cmap",
+        default=DEFAULT_FEL_COLORMAP,
+        help=(
+            "Matplotlib colormap for the MD reference free-energy heatmap "
+            "(default: %(default)s)."
+        ),
+    )
+    plot_group.add_argument(
+        "--fel-max-energy-kj-mol",
+        type=float,
+        default=None,
+        help=(
+            "Cap the MD reference free-energy color scale at this value (kJ/mol). "
+            "Bins above the cap are drawn in the flat background color."
+        ),
+    )
+    plot_group.add_argument(
+        "--plot-energy-unit",
+        choices=("kj_mol", "kcal_mol"),
+        default="kj_mol",
+        help=(
+            "Energy unit for the MD reference free-energy plot. "
+            "--fel-max-energy-kj-mol remains in kJ/mol and is converted for display."
+        ),
+    )
+    plot_group.add_argument(
+        "--reweighting-weight-treatment",
+        choices=("raw", "psis", "psis-smoothed"),
+        default=None,
+        help=(
+            "Override the weight treatment used for frame-projected reweighted "
+            "probabilities. By default, md-kl-plot reads the treatment recorded "
+            "in the microstate summary."
+        ),
+    )
+    plot_group.add_argument(
+        "--probability-cmap",
+        default=None,
+        dest="probability_cmap",
+        help="Matplotlib colormap for MD and reweighted probability heatmaps.",
+    )
+    plot_group.add_argument(
+        "--divergence-cmap",
+        default=None,
+        dest="divergence_cmap",
+        help=(
+            "Matplotlib colormap for the MD-vs-reweighted KL heatmap "
+            f"(default: {FELP_KL_DIVERGENCE_COLORMAP}, registered by FELP)."
+        ),
+    )
+    plot_group.add_argument(
+        "--kl-scale-by-kbt",
+        action="store_true",
+        help=(
+            "Display the KL heatmap multiplied by kBT. This provides an "
+            "energy-scale view of KL contributions; the divergence is still "
+            "computed from probabilities."
+        ),
+    )
+    plot_group.add_argument(
+        "--kl-energy-unit",
+        choices=("kj_mol", "kcal_mol"),
+        default="kcal_mol",
+        help="Energy unit used when --kl-scale-by-kbt is enabled.",
+    )
+    plot_group.add_argument(
+        "--output-dir",
+        required=True,
+        help="Directory where standalone KL plots and summary JSON should be written.",
+    )
+    plot_group.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Allow overwriting an existing output directory.",
     )
 
 
@@ -1435,6 +1651,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Generate publication-style plots from FELP outputs.",
     )
     _add_felp_plot_arguments(felp_plot_parser)
+
+    md_kl_plot_parser = subparsers.add_parser(
+        "md-kl-plot",
+        help="Generate standalone KL plots comparing MD to reweighted FELP data.",
+    )
+    _add_md_kl_plot_arguments(md_kl_plot_parser)
 
     return parser
 
@@ -1748,11 +1970,48 @@ def build_felp_plot_config(namespace: argparse.Namespace) -> FELPPlotConfig:
         fel_bandwidth=namespace.fel_bandwidth,
         fel_bandwidth_rule=namespace.fel_bandwidth_rule,
         fel_colormap=namespace.fel_cmap,
+        probability_colormap=getattr(namespace, "probability_cmap", None),
+        divergence_colormap=getattr(namespace, "divergence_cmap", None),
+        kl_scale_by_kbt=namespace.kl_scale_by_kbt,
         fel_max_energy_kj_mol=namespace.fel_max_energy_kj_mol,
         plot_energy_unit=namespace.plot_energy_unit,
         weight_treatment=namespace.reweighting_weight_treatment,
         cv_x=namespace.plot_cv_x,
         cv_y=namespace.plot_cv_y,
+        overwrite=namespace.overwrite,
+    )
+    config.validate()
+    return config
+
+
+def build_md_kl_plot_config(namespace: argparse.Namespace) -> MDKLPlotConfig:
+    """Construct and validate an MDKLPlotConfig from the CLI namespace."""
+
+    config = MDKLPlotConfig(
+        reweighted_surface_csv=namespace.reweighted_surface,
+        raw_frame_results_csv=namespace.raw_frame_results,
+        felp_output_dir=namespace.felp_output_dir,
+        topology_file=namespace.topology_file,
+        trajectory_files=tuple(tuple(group) for group in namespace.trajectory_groups),
+        output_dir=namespace.output_dir,
+        temperature_kelvin=namespace.temperature_kelvin,
+        phi_psi_residue_number=namespace.phi_psi_residue_number,
+        phi_psi_residue_name=namespace.phi_psi_residue_name,
+        phi_psi_selection=namespace.phi_psi_selection,
+        stride=namespace.stride,
+        frame_start=namespace.frame_start,
+        frame_stop=namespace.frame_stop,
+        chunk_size=namespace.chunk_size,
+        fel_bins=namespace.fel_bins,
+        fel_max_points=namespace.fel_max_points,
+        fel_max_energy_kj_mol=namespace.fel_max_energy_kj_mol,
+        plot_energy_unit=namespace.plot_energy_unit,
+        fel_colormap=namespace.fel_cmap,
+        weight_treatment=namespace.reweighting_weight_treatment,
+        kl_scale_by_kbt=namespace.kl_scale_by_kbt,
+        kl_energy_unit=namespace.kl_energy_unit,
+        probability_colormap=namespace.probability_cmap,
+        divergence_colormap=namespace.divergence_cmap,
         overwrite=namespace.overwrite,
     )
     config.validate()

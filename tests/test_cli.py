@@ -8,6 +8,7 @@ import pytest
 from felp.core import ConfigurationError
 from felp.cli import (
     build_felp_plot_config,
+    build_md_kl_plot_config,
     build_msm_fit_config,
     build_msm_plot_config,
     build_parser,
@@ -1090,9 +1091,18 @@ def test_build_plot_configs_from_cli(tmp_path: Path) -> None:
     bundle_dir = tmp_path / "bundle"
     summary_csv = tmp_path / "microstate_summary.csv"
     frame_csv = tmp_path / "frame_results.csv"
+    reweighted_surface_csv = tmp_path / "reweighted_surface.csv"
+    topology_file = tmp_path / "topology.pdb"
+    trajectory_file = tmp_path / "trajectory.nc"
     bundle_dir.mkdir()
     summary_csv.write_text("label,reference_probability,target_probability\n", encoding="utf-8")
     frame_csv.write_text("delta_u_kj_mol\n", encoding="utf-8")
+    reweighted_surface_csv.write_text(
+        "plot_x,plot_y,target_probability\n-90,-90,0.5\n90,90,0.5\n",
+        encoding="utf-8",
+    )
+    topology_file.write_text("placeholder\n", encoding="utf-8")
+    trajectory_file.write_text("placeholder\n", encoding="utf-8")
 
     parser = build_parser()
     msm_namespace = parser.parse_args(
@@ -1127,6 +1137,11 @@ def test_build_plot_configs_from_cli(tmp_path: Path) -> None:
             "silverman",
             "--fel-cmap",
             "plasma",
+            "--probability-cmap",
+            "viridis",
+            "--divergence-cmap",
+            "RdBu_r",
+            "--kl-scale-by-kbt",
             "--plot-energy-unit",
             "kcal_mol",
             "--reweighting-weight-treatment",
@@ -1137,9 +1152,58 @@ def test_build_plot_configs_from_cli(tmp_path: Path) -> None:
             "turn",
         ]
     )
+    md_kl_namespace = parser.parse_args(
+        [
+            "md-kl-plot",
+            "--reweighted-surface",
+            str(reweighted_surface_csv),
+            "--raw-frame-results",
+            str(frame_csv),
+            "--topology-file",
+            str(topology_file),
+            "--trajectory-file",
+            str(trajectory_file),
+            "--output-dir",
+            str(tmp_path / "md_kl_plots"),
+            "--phi-psi-residue-number",
+            "2",
+            "--phi-psi-residue-name",
+            "ALA",
+            "--stride",
+            "5",
+            "--frame-start",
+            "10",
+            "--frame-stop",
+            "100",
+            "--chunk-size",
+            "256",
+            "--temperature-kelvin",
+            "310",
+            "--fel-bins",
+            "180",
+            "--fel-max-points",
+            "50000",
+            "--fel-cmap",
+            "gist_earth",
+            "--fel-max-energy-kj-mol",
+            "15",
+            "--plot-energy-unit",
+            "kcal_mol",
+            "--reweighting-weight-treatment",
+            "psis",
+            "--probability-cmap",
+            "viridis",
+            "--divergence-cmap",
+            "RdBu_r",
+            "--kl-scale-by-kbt",
+            "--kl-energy-unit",
+            "kj_mol",
+        ]
+    )
 
     msm_config = build_msm_plot_config(msm_namespace)
     felp_config = build_felp_plot_config(felp_namespace)
+    md_kl_config = build_md_kl_plot_config(md_kl_namespace)
     assert msm_config.state_level == "metastable"
     assert msm_config.output_dir.endswith("msm_plots")
     assert felp_config.raw_frame_results_csv == str(frame_csv)
@@ -1150,10 +1214,35 @@ def test_build_plot_configs_from_cli(tmp_path: Path) -> None:
     assert felp_config.fel_bandwidth == "0.5,1.25"
     assert felp_config.fel_bandwidth_rule == "silverman"
     assert felp_config.fel_colormap == "plasma"
+    assert felp_config.probability_colormap == "viridis"
+    assert felp_config.divergence_colormap == "RdBu_r"
+    assert felp_config.kl_scale_by_kbt is True
     assert felp_config.plot_energy_unit == "kcal_mol"
     assert felp_config.weight_treatment == "psis-smoothed"
     assert felp_config.cv_x == "ends"
     assert felp_config.cv_y == "turn"
+    assert md_kl_config.reweighted_surface_csv == str(reweighted_surface_csv)
+    assert md_kl_config.raw_frame_results_csv == str(frame_csv)
+    assert md_kl_config.topology_file == str(topology_file)
+    assert md_kl_config.trajectory_files == ((str(trajectory_file),),)
+    assert md_kl_config.output_dir.endswith("md_kl_plots")
+    assert md_kl_config.phi_psi_residue_number == 2
+    assert md_kl_config.phi_psi_residue_name == "ALA"
+    assert md_kl_config.stride == 5
+    assert md_kl_config.frame_start == 10
+    assert md_kl_config.frame_stop == 100
+    assert md_kl_config.chunk_size == 256
+    assert md_kl_config.temperature_kelvin == 310.0
+    assert md_kl_config.fel_bins == 180
+    assert md_kl_config.fel_max_points == 50000
+    assert md_kl_config.fel_colormap == "gist_earth"
+    assert md_kl_config.fel_max_energy_kj_mol == 15.0
+    assert md_kl_config.plot_energy_unit == "kcal_mol"
+    assert md_kl_config.weight_treatment == "psis-smoothed"
+    assert md_kl_config.probability_colormap == "viridis"
+    assert md_kl_config.divergence_colormap == "RdBu_r"
+    assert md_kl_config.kl_scale_by_kbt is True
+    assert md_kl_config.kl_energy_unit == "kj_mol"
 
 
 def test_build_felp_plot_config_normalizes_cv_spec_strings(tmp_path: Path) -> None:
