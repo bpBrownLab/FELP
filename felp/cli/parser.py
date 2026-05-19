@@ -12,6 +12,7 @@ from felp.core import (
     EnergyConfig,
     InputConfig,
     MicrostateConfig,
+    MutationSpec,
     OutputConfig,
     ParallelConfig,
     PerturbationConfig,
@@ -26,7 +27,12 @@ from felp.core import (
 )
 from felp.energy import resolve_openmm_gpu_platform_name
 from felp.msm import MSMFitConfig, MSMSampleExportConfig
-from felp.plotting import FELPPlotConfig, MDKLPlotConfig, MSMPlotConfig
+from felp.plotting import (
+    ESSCompareConfig,
+    FELPPlotConfig,
+    MDKLPlotConfig,
+    MSMPlotConfig,
+)
 from felp.plotting.common import DEFAULT_FEL_COLORMAP, FELP_KL_DIVERGENCE_COLORMAP
 
 
@@ -119,6 +125,34 @@ def _parse_distance_cv_specs(
         seen_names.add(spec.name)
         specs.append(spec)
     return tuple(specs)
+
+
+def _parse_mutation_cli_token(token: str) -> MutationSpec:
+    """Parse ``--mutation`` values as ``POS:ORIG:TO``."""
+
+    raw = str(token).strip()
+    parts = [part.strip() for part in raw.split(":")]
+    if len(parts) != 3:
+        raise ConfigurationError(
+            f"Invalid --mutation {token!r}. Expected residue_index:original:target "
+            "(leave original empty to skip chemistry checks before mutation, "
+            "e.g. ``12::ALA``)."
+        )
+    residue_text, original_text, target_text = parts
+    try:
+        residue_number = int(residue_text)
+    except ValueError as exc:
+        raise ConfigurationError(
+            f"Invalid residue index in --mutation {token!r}."
+        ) from exc
+    if not target_text:
+        raise ConfigurationError(f"Mutation target residue name may not be empty in {token!r}.")
+    original = original_text if original_text else None
+    return MutationSpec(
+        residue_number=residue_number,
+        target_residue_name=target_text,
+        original_residue_name=original,
+    )
 
 
 def _add_common_microstate_arguments(parser: argparse.ArgumentParser) -> None:
@@ -348,17 +382,31 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
 
     perturb_group = parser.add_argument_group("Perturbation")
     perturb_group.add_argument(
-        "--target-residue-number",
-        required=True,
-        type=int,
+        "--mutation",
+        action="append",
+        default=None,
+        dest="mutation_tokens",
+        metavar="RES:FROM:TO",
         help=(
-            "Rosetta pose residue index (1..N) to mutate, as in pose.residue(i). "
-            "This is sequential pose numbering, not necessarily PDB residue numbers."
+            "Repeatable mutation site using sequential pose numbering: "
+            "``residue_index:original:target``. Leave ``original`` blank (e.g. "
+            "``12::ALA``) to skip the topology/pose originality check before mutating "
+            "(see also --original-residue-name on the legacy path). "
+            "When set, omit --target-residue-number/--target-residue-name."
+        ),
+    )
+    perturb_group.add_argument(
+        "--target-residue-number",
+        type=int,
+        default=None,
+        help=(
+            "Rosetta pose residue index (1..N) for a single mutation, as in pose.residue(i). "
+            "Ignored when repeatable --mutation is used. Requires --target-residue-name."
         ),
     )
     perturb_group.add_argument(
         "--target-residue-name",
-        required=True,
+        default=None,
         help=(
             "Three-letter Rosetta mutation target. Supports canonical amino acids plus "
             "common protonation/disulfide variants such as HID/HIE/HIP/CYM/CYX/ASH/GLH. "
@@ -1252,13 +1300,52 @@ def _add_felp_plot_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--fel-bandwidth-rule",
-        choices=("scott", "silverman", "state-adaptive"),
+        choices=("scott", "silverman", "state-adaptive", "bin-width"),
         default="state-adaptive",
         help=(
             "Automatic bandwidth rule for --fel-bandwidth=auto. "
-            "'state-adaptive' preserves state masses while choosing conservative "
-            "per-state kernel widths from each state's local CV support; 'scott' "
-            "and 'silverman' use one global bandwidth."
+            "'state-adaptive' uses per-state Scott widths capped to a small "
+            "multiple of the plotting bin width (recommended default). "
+            "'bin-width' sets bandwidth to a multiple of the histogram bin width "
+            "(0.75 by default, or the value passed to --fel-bandwidth). "
+            "'scott' and 'silverman' use one global bandwidth with the same cap."
+        ),
+    )
+    parser.add_argument(
+        "--fel-bandwidth-scale",
+        type=float,
+        default=1.0,
+        help=(
+            "Multiplier for automatic Gaussian-kernel bandwidths. Use values below "
+            "1.0 (for example 0.6) for sharper surfaces."
+        ),
+    )
+    parser.add_argument(
+        "--fel-bandwidth-max-bins",
+        type=float,
+        default=1.25,
+        help=(
+            "Upper cap on automatic kernel bandwidth in units of histogram-bin "
+            "width per axis. Lower values reduce blobby over-smoothing."
+        ),
+    )
+    parser.add_argument(
+        "--fel-bandwidth-min-bins",
+        type=float,
+        default=0.5,
+        help=(
+            "Lower floor on automatic kernel bandwidth in units of histogram-bin "
+            "width per axis. For visibly smoothed KDE surfaces, use at least 1.0–1.5."
+        ),
+    )
+    parser.add_argument(
+        "--fel-surface-smooth-sigma-bins",
+        type=float,
+        default=0.0,
+        help=(
+            "Optional display-only Gaussian smoothing of projected 2D probability "
+            "grids after estimation, in units of histogram bins (requires scipy). "
+            "Does not change microstate reweighting; use for figure aesthetics only."
         ),
     )
     parser.add_argument(
@@ -1267,6 +1354,16 @@ def _add_felp_plot_arguments(parser: argparse.ArgumentParser) -> None:
         help=(
             "Matplotlib colormap for CV free-energy heatmaps, discrete microstate "
             "FEL scatter, and delta free-energy scatter (default: %(default)s)."
+        ),
+    )
+    parser.add_argument(
+        "--fel-plot-style",
+        choices=("default", "contour"),
+        default="default",
+        help=(
+            "Renderer for 2D free-energy/probability landscapes. 'default' draws one "
+            "color per histogram bin (pcolormesh, no inter-bin interpolation). "
+            "'contour' draws filled iso-energy contours on the same bin grid."
         ),
     )
     parser.add_argument(
@@ -1538,6 +1635,61 @@ def _add_md_kl_plot_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_ess_compare_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add arguments for comparing ESS diagnostics across FELP runs."""
+
+    parser.add_argument(
+        "--input",
+        nargs="+",
+        required=True,
+        dest="ess_inputs",
+        metavar="<run-dir-or-summary-json>",
+        help=(
+            "FELP output directories or explicit run_summary.json files to compare. "
+            "Directories are resolved to <dir>/run_summary.json."
+        ),
+    )
+    parser.add_argument(
+        "--output-dir",
+        required=True,
+        help="Directory where ESS comparison plots and CSV should be written.",
+    )
+    parser.add_argument(
+        "--labels",
+        nargs="+",
+        help="Optional labels for inputs; must match the number of --input values.",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Allow overwriting an existing output directory.",
+    )
+    parser.add_argument(
+        "--bootstrap-blocks",
+        type=int,
+        default=None,
+        metavar="L",
+        help=(
+            "Block size (contiguous eligible frames) for circular block bootstrap of "
+            "overlap diagnostics. Requires --bootstrap-draws and run_config.json + "
+            "frame_results.csv in each run output directory."
+        ),
+    )
+    parser.add_argument(
+        "--bootstrap-draws",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Number of bootstrap replicates (use with --bootstrap-blocks).",
+    )
+    parser.add_argument(
+        "--bootstrap-seed",
+        type=int,
+        default=0,
+        help="RNG seed for reproducible bootstrap resampling.",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the central argument parser for the FELP CLI."""
     parser = argparse.ArgumentParser(description="FELP: Free Energy Landscape Perturbation")
@@ -1589,6 +1741,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--overwrite",
         action="store_true",
         help="Overwrite the output directory if it already exists.",
+    )
+    summarize_parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Number of worker threads for by-state summarize QC/aggregation.",
     )
     _add_common_microstate_arguments(summarize_parser)
     _add_reweighting_qc_arguments(summarize_parser)
@@ -1658,6 +1816,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_md_kl_plot_arguments(md_kl_plot_parser)
 
+    ess_compare_parser = subparsers.add_parser(
+        "ess-compare",
+        help="Compare ESS and overlap diagnostics across FELP run summaries.",
+    )
+    _add_ess_compare_arguments(ess_compare_parser)
+
     return parser
 
 
@@ -1683,10 +1847,40 @@ def build_run_config(namespace: argparse.Namespace) -> RunConfig:
             raise ConfigurationError("Do not combine --gpu with --platform-name.")
         platform_name = resolve_openmm_gpu_platform_name()
 
+    mutation_tokens = tuple(namespace.mutation_tokens or ())
+    legacy_number = namespace.target_residue_number
+    legacy_target = namespace.target_residue_name
+    legacy_orig = namespace.original_residue_name
+    if mutation_tokens:
+        if (
+            legacy_number is not None
+            or legacy_target is not None
+            or legacy_orig is not None
+        ):
+            raise ConfigurationError(
+                "Use either repeatable --mutation residue:original:target or the legacy "
+                "--target-residue-number/--target-residue-name options, not both."
+            )
+        perturbation = PerturbationConfig(
+            mutations=tuple(_parse_mutation_cli_token(tok) for tok in mutation_tokens)
+        )
+    else:
+        if legacy_number is None or legacy_target is None:
+            raise ConfigurationError(
+                "--target-residue-number and --target-residue-name are required unless "
+                "one or more --mutation residue:original:target sites are supplied."
+            )
+        perturbation = PerturbationConfig.from_legacy(
+            target_residue_number=legacy_number,
+            target_residue_name=legacy_target,
+            original_residue_name=legacy_orig,
+        )
+    primary_cv_residue_number = perturbation.target_residue_number
+
     distance_cv_specs = _parse_distance_cv_specs(namespace.distance_cv_tokens)
     cv_specs = _parse_cv_specs(
         namespace.cv_tokens,
-        namespace.target_residue_number,
+        primary_cv_residue_number,
         include_legacy_default=not distance_cv_specs,
     )
     microstate_source = namespace.microstate_source
@@ -1717,11 +1911,7 @@ def build_run_config(namespace: argparse.Namespace) -> RunConfig:
             frame_stop=namespace.frame_stop,
             radii_set=namespace.radii_set,
         ),
-        perturbation=PerturbationConfig(
-            target_residue_number=namespace.target_residue_number,
-            target_residue_name=namespace.target_residue_name,
-            original_residue_name=namespace.original_residue_name,
-        ),
+        perturbation=perturbation,
         rosetta=RosettaConfig(
             init_options=namespace.pyrosetta_init_options,
             database_path=namespace.rosetta_database,
@@ -1781,7 +1971,7 @@ def build_run_config(namespace: argparse.Namespace) -> RunConfig:
         ),
         microstates=MicrostateConfig(
             source=microstate_source,
-            target_residue_number=namespace.target_residue_number,
+            target_residue_number=primary_cv_residue_number,
             definition_file=namespace.microstate_file,
             phi_bins=namespace.phi_bins,
             psi_bins=namespace.psi_bins,
@@ -1840,10 +2030,14 @@ def build_microstate_config(
         state_level=namespace.state_level,
         allow_unassigned=namespace.allow_unassigned,
         reference_probability_mode=reference_probability_mode,
-        auto_target_frames_per_state=namespace.auto_microstate_target_frames_per_state,
-        auto_min_bins_per_axis=namespace.auto_microstate_min_bins_per_axis,
-        auto_max_bins_per_axis=namespace.auto_microstate_max_bins_per_axis,
-        auto_max_total_states=namespace.auto_microstate_max_states,
+        auto_target_frames_per_state=getattr(
+            namespace,
+            "auto_microstate_target_frames_per_state",
+            100,
+        ),
+        auto_min_bins_per_axis=getattr(namespace, "auto_microstate_min_bins_per_axis", 3),
+        auto_max_bins_per_axis=getattr(namespace, "auto_microstate_max_bins_per_axis", 64),
+        auto_max_total_states=getattr(namespace, "auto_microstate_max_states", 2500),
     )
 
 
@@ -1851,17 +2045,25 @@ def build_reweighting_qc_config(namespace: argparse.Namespace) -> ReweightingQCC
     """Construct a ReweightingQCConfig from the parsed CLI namespace."""
 
     return ReweightingQCConfig(
-        policy=namespace.reweighting_qc_policy,
-        method=namespace.reweighting_qc_method,
-        weight_treatment=namespace.reweighting_weight_treatment,
-        min_frame_count=namespace.reweighting_qc_min_frame_count,
-        max_frame_weight_fraction=namespace.reweighting_qc_max_frame_weight_fraction,
-        min_state_ess=namespace.reweighting_qc_min_state_ess,
-        max_leave_one_out_shift_kj_mol=(
-            namespace.reweighting_qc_max_leave_one_out_shift_kj_mol
+        policy=getattr(namespace, "reweighting_qc_policy", "flag"),
+        method=getattr(namespace, "reweighting_qc_method", "auto"),
+        weight_treatment=getattr(namespace, "reweighting_weight_treatment", "raw"),
+        min_frame_count=getattr(namespace, "reweighting_qc_min_frame_count", 20),
+        max_frame_weight_fraction=getattr(
+            namespace,
+            "reweighting_qc_max_frame_weight_fraction",
+            0.5,
         ),
-        max_excluded_frames_per_state=(
-            namespace.reweighting_qc_max_excluded_frames_per_state
+        min_state_ess=getattr(namespace, "reweighting_qc_min_state_ess", 5.0),
+        max_leave_one_out_shift_kj_mol=getattr(
+            namespace,
+            "reweighting_qc_max_leave_one_out_shift_kj_mol",
+            10.0,
+        ),
+        max_excluded_frames_per_state=getattr(
+            namespace,
+            "reweighting_qc_max_excluded_frames_per_state",
+            5,
         ),
     )
 
@@ -1969,7 +2171,12 @@ def build_felp_plot_config(namespace: argparse.Namespace) -> FELPPlotConfig:
         fel_estimator=namespace.fel_estimator,
         fel_bandwidth=namespace.fel_bandwidth,
         fel_bandwidth_rule=namespace.fel_bandwidth_rule,
+        fel_bandwidth_scale=namespace.fel_bandwidth_scale,
+        fel_bandwidth_max_bins=namespace.fel_bandwidth_max_bins,
+        fel_bandwidth_min_bins=namespace.fel_bandwidth_min_bins,
+        fel_surface_smooth_sigma_bins=namespace.fel_surface_smooth_sigma_bins,
         fel_colormap=namespace.fel_cmap,
+        fel_plot_style=namespace.fel_plot_style,
         probability_colormap=getattr(namespace, "probability_cmap", None),
         divergence_colormap=getattr(namespace, "divergence_cmap", None),
         kl_scale_by_kbt=namespace.kl_scale_by_kbt,
@@ -2013,6 +2220,23 @@ def build_md_kl_plot_config(namespace: argparse.Namespace) -> MDKLPlotConfig:
         probability_colormap=namespace.probability_cmap,
         divergence_colormap=namespace.divergence_cmap,
         overwrite=namespace.overwrite,
+    )
+    config.validate()
+    return config
+
+
+def build_ess_compare_config(namespace: argparse.Namespace) -> ESSCompareConfig:
+    """Construct and validate an ESSCompareConfig from the CLI namespace."""
+
+    labels = tuple(namespace.labels) if namespace.labels else None
+    config = ESSCompareConfig(
+        input_paths=tuple(namespace.ess_inputs),
+        output_dir=namespace.output_dir,
+        labels=labels,
+        overwrite=namespace.overwrite,
+        bootstrap_block_size=namespace.bootstrap_blocks,
+        bootstrap_draws=namespace.bootstrap_draws,
+        bootstrap_seed=namespace.bootstrap_seed,
     )
     config.validate()
     return config

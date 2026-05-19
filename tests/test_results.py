@@ -7,7 +7,12 @@ from pathlib import Path
 import pytest
 
 from felp.core import FrameResult, OutputConfig
-from felp.io import ResultsWriter, load_frame_results_csv
+from felp.io import (
+    ResultsWriter,
+    load_frame_results_csv,
+    load_reweighting_eligible_frame_results_csv,
+)
+from felp.reweighting import is_reweighting_eligible_frame
 
 
 def test_results_writer_round_trip_and_resume(tmp_path: Path) -> None:
@@ -66,8 +71,63 @@ def test_results_writer_round_trip_with_generalized_cv_metadata(tmp_path: Path) 
     assert loaded == [frame_result]
 
 
-def test_results_writer_moves_tracebacks_out_of_main_csv(tmp_path: Path) -> None:
+def test_results_writer_does_not_write_traceback_files_by_default(
+    tmp_path: Path,
+) -> None:
     writer = ResultsWriter(OutputConfig(output_dir=str(tmp_path)))
+    writer.prepare_output_dir()
+
+    frame_result = FrameResult(
+        frame_index=9,
+        stride_number=9,
+        microstate_id="failed",
+        microstate_label="failed",
+        phi_degrees=None,
+        psi_degrees=None,
+        reference_energy_kj_mol=float("nan"),
+        perturbed_energy_kj_mol=float("nan"),
+        delta_u_kj_mol=float("nan"),
+        reference_relaxed_phi_degrees=None,
+        reference_relaxed_psi_degrees=None,
+        perturbed_relaxed_phi_degrees=None,
+        perturbed_relaxed_psi_degrees=None,
+        assignment_source="failed",
+        state_level="failed",
+        metadata={
+            "status": "failed",
+            "error_type": "OpenMMException",
+            "error_message": "Particle coordinate is NaN.",
+            "traceback": "Traceback ...",
+        },
+    )
+
+    writer.write_frame_results([frame_result])
+
+    traceback_file = tmp_path / "frame_failures" / "frame_9.traceback.txt"
+    assert not traceback_file.exists()
+
+    with open(writer.raw_frame_results_path, newline="", encoding="utf-8") as handle:
+        row = next(csv.DictReader(handle))
+    assert row["status"] == "failed"
+    assert row["error_type"] == "OpenMMException"
+    assert row["error_message"] == "Particle coordinate is NaN."
+    assert row["traceback_path"] == ""
+    assert "traceback" not in row["metadata"]
+
+    loaded = writer.read_frame_results()
+    assert len(loaded) == 1
+    assert loaded[0].metadata["status"] == "failed"
+    assert loaded[0].metadata["error_type"] == "OpenMMException"
+    assert "traceback_path" not in loaded[0].metadata
+    assert isnan(loaded[0].delta_u_kj_mol)
+
+
+def test_results_writer_writes_traceback_files_for_debug_outputs(
+    tmp_path: Path,
+) -> None:
+    writer = ResultsWriter(
+        OutputConfig(output_dir=str(tmp_path), debug_frame_outputs=True)
+    )
     writer.prepare_output_dir()
 
     frame_result = FrameResult(
@@ -102,18 +162,7 @@ def test_results_writer_moves_tracebacks_out_of_main_csv(tmp_path: Path) -> None
 
     with open(writer.raw_frame_results_path, newline="", encoding="utf-8") as handle:
         row = next(csv.DictReader(handle))
-    assert row["status"] == "failed"
-    assert row["error_type"] == "OpenMMException"
-    assert row["error_message"] == "Particle coordinate is NaN."
     assert row["traceback_path"] == "frame_failures/frame_9.traceback.txt"
-    assert "traceback" not in row["metadata"]
-
-    loaded = writer.read_frame_results()
-    assert len(loaded) == 1
-    assert loaded[0].metadata["status"] == "failed"
-    assert loaded[0].metadata["error_type"] == "OpenMMException"
-    assert loaded[0].metadata["traceback_path"] == "frame_failures/frame_9.traceback.txt"
-    assert isnan(loaded[0].delta_u_kj_mol)
 
 
 def test_load_frame_results_csv_fails_fast_on_invalid_metadata(tmp_path: Path) -> None:
@@ -141,3 +190,46 @@ def test_load_frame_results_csv_fails_fast_on_invalid_metadata(tmp_path: Path) -
 
     with pytest.raises(ValueError, match="Invalid metadata JSON"):
         load_frame_results_csv(str(frame_csv))
+
+
+def test_load_reweighting_eligible_frame_results_matches_full_filter(tmp_path: Path) -> None:
+    writer = ResultsWriter(OutputConfig(output_dir=str(tmp_path)))
+    writer.prepare_output_dir()
+    ok = FrameResult(
+        frame_index=1,
+        stride_number=1,
+        microstate_id="s",
+        microstate_label="s",
+        phi_degrees=0.0,
+        psi_degrees=0.0,
+        reference_energy_kj_mol=-1.0,
+        perturbed_energy_kj_mol=-1.0,
+        delta_u_kj_mol=0.0,
+        reference_relaxed_phi_degrees=None,
+        reference_relaxed_psi_degrees=None,
+        perturbed_relaxed_phi_degrees=None,
+        perturbed_relaxed_psi_degrees=None,
+        metadata={},
+    )
+    bad = FrameResult(
+        frame_index=2,
+        stride_number=1,
+        microstate_id="failed",
+        microstate_label="failed",
+        phi_degrees=None,
+        psi_degrees=None,
+        reference_energy_kj_mol=float("nan"),
+        perturbed_energy_kj_mol=float("nan"),
+        delta_u_kj_mol=float("nan"),
+        reference_relaxed_phi_degrees=None,
+        reference_relaxed_psi_degrees=None,
+        perturbed_relaxed_phi_degrees=None,
+        perturbed_relaxed_psi_degrees=None,
+        metadata={"status": "failed"},
+    )
+    writer.write_frame_results([bad, ok])
+    path = str(tmp_path / "frame_results.csv")
+    full = [f for f in load_frame_results_csv(path) if is_reweighting_eligible_frame(f)]
+    fast = load_reweighting_eligible_frame_results_csv(path)
+    assert [f.frame_index for f in full] == [f.frame_index for f in fast]
+    assert full == fast

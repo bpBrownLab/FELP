@@ -10,38 +10,53 @@ from felp.core import DihedralRestraintSpec, DistanceRestraintSpec, RunConfig
 _BACKBONE_ATOM_NAMES = ("N", "CA", "C", "O", "OXT")
 
 
+def _mutation_anchor_residues_sorted(config: RunConfig) -> list[int]:
+    return sorted(set(int(r) for r in config.perturbation.mutation_residue_numbers))
+
+
+def _sequence_window_union_residue_numbers(config: RunConfig) -> list[int]:
+    residues: set[int] = set()
+    window = config.mobility.sequence_window
+    for anchor in config.perturbation.mutation_residue_numbers:
+        first_residue = max(1, int(anchor) - int(window))
+        last_residue = int(anchor) + int(window)
+        residues.update(range(first_residue, last_residue + 1))
+    return sorted(residues)
+
+
 def _selected_residue_scope(config: RunConfig) -> dict[str, object]:
+    anchor_list = _mutation_anchor_residues_sorted(config)
+    anchor_text = ", ".join(str(r) for r in anchor_list)
     if config.mobility.mode == "target_only":
         return {
             "mode": "target_only",
-            "residue_numbers": [config.perturbation.target_residue_number],
-            "description": "Only the target residue is selected.",
+            "residue_numbers": anchor_list,
+            "mutation_anchor_residue_numbers": anchor_list,
+            "description": (
+                "All configured mutation residues are selected (sequential pose indices: "
+                f"{anchor_text})."
+            ),
         }
     if config.mobility.mode == "sequence_window":
-        first_residue = max(
-            1,
-            config.perturbation.target_residue_number - config.mobility.sequence_window,
-        )
-        last_residue = (
-            config.perturbation.target_residue_number + config.mobility.sequence_window
-        )
+        residues = _sequence_window_union_residue_numbers(config)
         return {
             "mode": "sequence_window",
-            "target_residue_number": config.perturbation.target_residue_number,
+            "mutation_anchor_residue_numbers": anchor_list,
             "sequence_window": config.mobility.sequence_window,
-            "residue_numbers": list(range(first_residue, last_residue + 1)),
+            "residue_numbers": residues,
             "description": (
-                "The target residue plus sequence-neighbor residues within the "
-                "configured window are selected."
+                "Union of residue-centered sequence windows around all mutation anchors "
+                f"({anchor_text}) given the configured window."
             ),
         }
     return {
         "mode": "radius",
-        "target_residue_number": config.perturbation.target_residue_number,
+        "mutation_anchor_residue_numbers": anchor_list,
         "radius_angstrom": config.mobility.radius_angstrom,
         "description": (
-            "The target residue plus residues with atoms within the configured radius "
-            "of the target residue are selected; exact residues are frame-dependent."
+            "Union over all mutation residues of residues with atoms within the "
+            f"configured radius around each mutation site (anchors {anchor_text}); "
+            "exact residues are frame-dependent."
         ),
     }
 
@@ -143,7 +158,7 @@ def _distance_cv_templates(config: RunConfig) -> list[dict[str, object]]:
 def _target_backbone_templates(config: RunConfig) -> list[dict[str, object]]:
     residue_numbers = (
         config.restraints.rosetta_backbone_restraint_residue_numbers
-        or (config.perturbation.target_residue_number,)
+        or config.perturbation.mutation_residue_numbers
     )
     return [
         {
@@ -195,6 +210,7 @@ def build_protocol_summary(
         "mobility": {
             "mode": config.mobility.mode,
             "target_residue_number": config.perturbation.target_residue_number,
+            "mutation_residue_numbers": list(config.perturbation.mutation_residue_numbers),
             "radius_angstrom": config.mobility.radius_angstrom,
             "sequence_window": config.mobility.sequence_window,
             "include_backbone": config.mobility.include_backbone,
@@ -257,7 +273,7 @@ def build_protocol_summary(
                     ),
                     "rosetta_only_backbone_restraint_residue_numbers": list(
                         config.restraints.rosetta_backbone_restraint_residue_numbers
-                        or (config.perturbation.target_residue_number,)
+                        or config.perturbation.mutation_residue_numbers,
                     )
                     if config.restraints.rosetta_target_backbone_restraints
                     else [],

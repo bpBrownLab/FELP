@@ -35,10 +35,16 @@ from .common import (
 
 _KJ_PER_KCAL = 4.184
 _OCCUPANCY_MARKER_FACE_COLOR = "#e6e6e6"
+_ESS_COLORMAP = "viridis"
 _ANGULAR_CV_NAMES = {"phi", "psi", "omega"}
 _DEFAULT_DIHEDRAL_CV_NAMES = {"phi", "psi"}
 _FEL_ESTIMATORS = {"histogram", "gaussian-kernel"}
-_FEL_BANDWIDTH_RULES = {"scott", "silverman", "state-adaptive"}
+_FEL_BANDWIDTH_RULES = {"scott", "silverman", "state-adaptive", "bin-width"}
+_FEL_PLOT_STYLES = {"default", "contour"}
+_DEFAULT_KERNEL_MIN_BINS = 0.5
+_DEFAULT_KERNEL_MAX_BINS = 1.25
+_DEFAULT_KERNEL_SPREAD_CAP_BINS = 2.0
+_DEFAULT_BIN_WIDTH_MULTIPLIER = 0.75
 
 
 def _normalize_cv_name(raw: str) -> str:
@@ -119,8 +125,23 @@ class FELPPlotConfig:
     fel_bandwidth_rule: str = "state-adaptive"
     """Automatic bandwidth rule for Gaussian-kernel projected FELs."""
 
+    fel_bandwidth_scale: float = 1.0
+    """Multiplier applied to automatic or bin-width Gaussian kernel bandwidths."""
+
+    fel_bandwidth_max_bins: float = _DEFAULT_KERNEL_MAX_BINS
+    """Upper cap on automatic kernel bandwidth, in histogram-bin widths per axis."""
+
+    fel_bandwidth_min_bins: float = _DEFAULT_KERNEL_MIN_BINS
+    """Lower floor on automatic kernel bandwidth, in histogram-bin widths per axis."""
+
+    fel_surface_smooth_sigma_bins: float = 0.0
+    """Optional Gaussian smoothing (in bin units) applied to projected 2D surfaces."""
+
     fel_colormap: str = DEFAULT_FEL_COLORMAP
     """Matplotlib colormap for CV free-energy heatmaps and delta-FE scatter plots."""
+
+    fel_plot_style: str = "default"
+    """2D landscape renderer: ``default`` (per-bin heatmap) or ``contour`` (filled contours)."""
 
     probability_colormap: str | None = None
     """Colormap for 2D probability heatmaps and reference/target probability scatters.
@@ -184,11 +205,50 @@ class FELPPlotConfig:
         fel_bandwidth_rule = str(self.fel_bandwidth_rule).strip()
         if fel_bandwidth_rule not in _FEL_BANDWIDTH_RULES:
             raise ConfigurationError(
-                "fel_bandwidth_rule must be one of: scott, silverman, state-adaptive."
+                "fel_bandwidth_rule must be one of: "
+                "scott, silverman, state-adaptive, bin-width."
             )
         object.__setattr__(self, "fel_bandwidth_rule", fel_bandwidth_rule)
+        fel_bandwidth_scale = float(self.fel_bandwidth_scale)
+        if fel_bandwidth_scale <= 0.0 or not math.isfinite(fel_bandwidth_scale):
+            raise ConfigurationError("fel_bandwidth_scale must be a positive finite float.")
+        object.__setattr__(self, "fel_bandwidth_scale", fel_bandwidth_scale)
+        fel_bandwidth_max_bins = float(self.fel_bandwidth_max_bins)
+        if fel_bandwidth_max_bins <= 0.0 or not math.isfinite(fel_bandwidth_max_bins):
+            raise ConfigurationError(
+                "fel_bandwidth_max_bins must be a positive finite float."
+            )
+        object.__setattr__(self, "fel_bandwidth_max_bins", fel_bandwidth_max_bins)
+        fel_bandwidth_min_bins = float(self.fel_bandwidth_min_bins)
+        if fel_bandwidth_min_bins <= 0.0 or not math.isfinite(fel_bandwidth_min_bins):
+            raise ConfigurationError(
+                "fel_bandwidth_min_bins must be a positive finite float."
+            )
+        if fel_bandwidth_min_bins > fel_bandwidth_max_bins:
+            raise ConfigurationError(
+                "fel_bandwidth_min_bins must not exceed fel_bandwidth_max_bins."
+            )
+        object.__setattr__(self, "fel_bandwidth_min_bins", fel_bandwidth_min_bins)
+        fel_surface_smooth_sigma_bins = float(self.fel_surface_smooth_sigma_bins)
+        if fel_surface_smooth_sigma_bins < 0.0 or not math.isfinite(
+            fel_surface_smooth_sigma_bins
+        ):
+            raise ConfigurationError(
+                "fel_surface_smooth_sigma_bins must be a non-negative finite float."
+            )
+        object.__setattr__(
+            self,
+            "fel_surface_smooth_sigma_bins",
+            fel_surface_smooth_sigma_bins,
+        )
         fel_cmap = validate_registered_colormap(self.fel_colormap)
         object.__setattr__(self, "fel_colormap", fel_cmap)
+        fel_plot_style = str(self.fel_plot_style).strip()
+        if fel_plot_style not in _FEL_PLOT_STYLES:
+            raise ConfigurationError(
+                "fel_plot_style must be one of: default, contour."
+            )
+        object.__setattr__(self, "fel_plot_style", fel_plot_style)
         prob_src = (
             self.probability_colormap if self.probability_colormap is not None else fel_cmap
         )
@@ -261,6 +321,20 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
     )
     target_probabilities = np.asarray(
         [float(row["target_probability"]) for row in rows],
+        dtype=float,
+    )
+    effective_sample_sizes = np.asarray(
+        [
+            _as_nan(parse_optional_float(row.get("effective_sample_size")))
+            for row in rows
+        ],
+        dtype=float,
+    )
+    state_effective_sample_sizes = np.asarray(
+        [
+            _as_nan(_metadata_float(_row_metadata(row), "state_effective_sample_size"))
+            for row in rows
+        ],
         dtype=float,
     )
     plot_x = np.asarray(
@@ -393,6 +467,7 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
                 fel_max_energy_display=fel_max_display,
                 fel_colormap=config.fel_colormap,
                 probability_colormap=config.probability_colormap,
+                fel_plot_style=config.fel_plot_style,
             )
         )
 
@@ -430,6 +505,10 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
                 fel_estimator=config.fel_estimator,
                 fel_bandwidth=config.fel_bandwidth,
                 fel_bandwidth_rule=config.fel_bandwidth_rule,
+                fel_bandwidth_scale=config.fel_bandwidth_scale,
+                fel_bandwidth_max_bins=config.fel_bandwidth_max_bins,
+                fel_bandwidth_min_bins=config.fel_bandwidth_min_bins,
+                fel_surface_smooth_sigma_bins=config.fel_surface_smooth_sigma_bins,
                 bins=config.fel_bins,
                 max_points=config.fel_max_points,
                 output_dir=config.output_dir,
@@ -440,6 +519,7 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
                 probability_colormap=config.probability_colormap,
                 divergence_colormap=config.divergence_colormap,
                 kl_scale_by_kbt=config.kl_scale_by_kbt,
+                fel_plot_style=config.fel_plot_style,
                 x_name=cv_axes.x_name,
                 y_name=cv_axes.y_name,
             )
@@ -484,6 +564,32 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
                 fel_max_energy_display=fel_max_display,
                 fel_colormap=config.fel_colormap,
                 free_energy_label="reweighted",
+            )
+        )
+        outputs.extend(
+            _plot_ess_projection(
+                plt=plt,
+                x_values=state_x,
+                y_values=state_y,
+                x_name=cv_axes.x_name if cv_axes is not None else "x",
+                y_name=cv_axes.y_name if cv_axes is not None else "y",
+                ess_values=effective_sample_sizes,
+                output_dir=config.output_dir,
+                title="Globally scaled ESS by microstate",
+                filename="effective_sample_size_projection.png",
+            )
+        )
+        outputs.extend(
+            _plot_ess_projection(
+                plt=plt,
+                x_values=state_x,
+                y_values=state_y,
+                x_name=cv_axes.x_name if cv_axes is not None else "x",
+                y_name=cv_axes.y_name if cv_axes is not None else "y",
+                ess_values=state_effective_sample_sizes,
+                output_dir=config.output_dir,
+                title="In-state QC ESS by microstate",
+                filename="state_effective_sample_size_projection.png",
             )
         )
 
@@ -538,6 +644,11 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
         "state_reweighting_weight_treatment": summary_weight_treatment,
         "fel_max_energy_kj_mol": config.fel_max_energy_kj_mol,
         "fel_colormap": config.fel_colormap,
+        "fel_plot_style": config.fel_plot_style,
+        "fel_bandwidth_scale": config.fel_bandwidth_scale,
+        "fel_bandwidth_max_bins": config.fel_bandwidth_max_bins,
+        "fel_bandwidth_min_bins": config.fel_bandwidth_min_bins,
+        "fel_surface_smooth_sigma_bins": config.fel_surface_smooth_sigma_bins,
         "probability_colormap": config.probability_colormap,
         "divergence_colormap": config.divergence_colormap,
         "plot_energy_unit": config.plot_energy_unit,
@@ -584,6 +695,16 @@ def _parse_metadata(raw: str | None) -> dict[str, Any]:
 
 def _row_metadata(row: dict[str, str]) -> dict[str, Any]:
     return _parse_metadata(row.get("metadata"))
+
+
+def _metadata_float(metadata: dict[str, Any], key: str) -> float | None:
+    value = metadata.get(key)
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _mapping_from_metadata(metadata: dict[str, Any], key: str) -> dict[str, Any]:
@@ -1179,6 +1300,7 @@ def _plot_cv_state_landscapes(
     fel_max_energy_display: float | None,
     fel_colormap: str,
     probability_colormap: str,
+    fel_plot_style: str,
 ) -> list[str]:
     """Build 2D CV free energy surfaces from discrete state probabilities."""
 
@@ -1228,6 +1350,7 @@ def _plot_cv_state_landscapes(
             xlabel=_cv_axis_label(x_name),
             ylabel=_cv_axis_label(y_name),
             colormap=probability_colormap,
+            plot_style=fel_plot_style,
         )
     )
     outputs.append(
@@ -1242,6 +1365,7 @@ def _plot_cv_state_landscapes(
             xlabel=_cv_axis_label(x_name),
             ylabel=_cv_axis_label(y_name),
             colormap=probability_colormap,
+            plot_style=fel_plot_style,
         )
     )
     reference_filename = (
@@ -1267,6 +1391,7 @@ def _plot_cv_state_landscapes(
             ylabel=_cv_axis_label(y_name),
             fel_max_energy_kj_mol=fel_max_energy_display,
             colormap=fel_colormap,
+            plot_style=fel_plot_style,
         )
     )
     outputs.append(
@@ -1282,6 +1407,7 @@ def _plot_cv_state_landscapes(
             ylabel=_cv_axis_label(y_name),
             fel_max_energy_kj_mol=fel_max_energy_display,
             colormap=fel_colormap,
+            plot_style=fel_plot_style,
         )
     )
     return outputs
@@ -1487,6 +1613,91 @@ def _robust_weighted_scale(values: np.ndarray, weights: np.ndarray) -> float:
     return min(scales) if scales else 0.0
 
 
+def _histogram_bin_widths(
+    x_edges: np.ndarray,
+    y_edges: np.ndarray,
+) -> tuple[float, float]:
+    return (
+        float(np.median(np.diff(x_edges))),
+        float(np.median(np.diff(y_edges))),
+    )
+
+
+def _clamp_kernel_bandwidth(
+    bandwidth: tuple[float, float],
+    x_edges: np.ndarray,
+    y_edges: np.ndarray,
+    *,
+    scale: float,
+    min_bins: float = _DEFAULT_KERNEL_MIN_BINS,
+    max_bins: float = _DEFAULT_KERNEL_MAX_BINS,
+) -> tuple[float, float]:
+    """Clamp and scale kernel bandwidths relative to the plotting histogram grid."""
+
+    x_bin_width, y_bin_width = _histogram_bin_widths(x_edges, y_edges)
+    hx, hy = (float(bandwidth[0]) * float(scale), float(bandwidth[1]) * float(scale))
+    hx = min(max(hx, min_bins * x_bin_width), max_bins * x_bin_width)
+    hy = min(max(hy, min_bins * y_bin_width), max_bins * y_bin_width)
+    return (hx, hy)
+
+
+def _smooth_probability_surface(
+    surface: np.ndarray,
+    *,
+    sigma_bins: float,
+) -> np.ndarray:
+    """Apply display-only Gaussian smoothing to a normalized 2D probability grid."""
+
+    if sigma_bins <= 0.0:
+        return np.asarray(surface, dtype=float)
+    try:
+        from scipy.ndimage import gaussian_filter
+    except ImportError as exc:
+        raise ConfigurationError(
+            "fel_surface_smooth_sigma_bins > 0 requires scipy to be installed."
+        ) from exc
+    grid = np.asarray(surface, dtype=float)
+    if grid.size == 0:
+        return grid
+    mask = grid > 0.0
+    if not mask.any():
+        return grid
+    smoothed = gaussian_filter(np.where(mask, grid, 0.0), sigma=float(sigma_bins))
+    total = float(smoothed.sum())
+    if total <= 0.0:
+        return grid
+    return smoothed / total
+
+
+def _bin_width_kernel_bandwidth(
+    *,
+    x_edges: np.ndarray,
+    y_edges: np.ndarray,
+    bandwidth_spec: str,
+    scale: float,
+) -> tuple[tuple[float, float], dict[str, object]]:
+    """Use a multiple of the histogram bin width as the kernel bandwidth."""
+
+    x_bin_width, y_bin_width = _histogram_bin_widths(x_edges, y_edges)
+    fixed = _parse_fel_bandwidth(bandwidth_spec)
+    multiplier = (
+        float(fixed[0]) if fixed is not None else _DEFAULT_BIN_WIDTH_MULTIPLIER
+    )
+    bandwidth = (
+        multiplier * x_bin_width * float(scale),
+        multiplier * y_bin_width * float(scale),
+    )
+    return bandwidth, {
+        "cv_frame_projection_bandwidth": [float(bandwidth[0]), float(bandwidth[1])],
+        "cv_frame_projection_bandwidth_rule": "bin-width",
+        "cv_frame_projection_bandwidth_source": (
+            "cli" if fixed is not None else "default_multiplier"
+        ),
+        "cv_frame_projection_bandwidth_multiplier": float(multiplier),
+        "cv_frame_projection_histogram_bin_width": [x_bin_width, y_bin_width],
+    }
+
+
 def _state_adaptive_kernel_bandwidth(
     *,
     x_values: np.ndarray,
@@ -1495,12 +1706,14 @@ def _state_adaptive_kernel_bandwidth(
     target_weights: np.ndarray,
     x_edges: np.ndarray,
     y_edges: np.ndarray,
+    scale: float,
+    min_bins: float,
+    max_bins: float,
+    spread_cap_bins: float = _DEFAULT_KERNEL_SPREAD_CAP_BINS,
 ) -> tuple[tuple[float, float], dict[str, object]]:
-    """Resolve a conservative local bandwidth for one microstate/state support."""
+    """Resolve a local bandwidth tied to plot-grid resolution, not full state spread."""
 
-    x_bin_width = float(np.median(np.diff(x_edges)))
-    y_bin_width = float(np.median(np.diff(y_edges)))
-    minimum = (0.5 * x_bin_width, 0.5 * y_bin_width)
+    x_bin_width, y_bin_width = _histogram_bin_widths(x_edges, y_edges)
     reference_ess = _weighted_effective_sample_size(reference_weights)
     target_ess = _weighted_effective_sample_size(target_weights)
     positive_ess = [value for value in (reference_ess, target_ess) if value > 0.0]
@@ -1513,17 +1726,28 @@ def _state_adaptive_kernel_bandwidth(
 
     x_scale = _robust_weighted_scale(x_values, combined_weights)
     y_scale = _robust_weighted_scale(y_values, combined_weights)
-    x_raw = x_scale * factor
-    y_raw = y_scale * factor
-    x_bandwidth = max(minimum[0], x_raw)
-    y_bandwidth = max(minimum[1], y_raw)
-    return (float(x_bandwidth), float(y_bandwidth)), {
-        "bandwidth": [float(x_bandwidth), float(y_bandwidth)],
+    x_scale = min(x_scale, spread_cap_bins * x_bin_width)
+    y_scale = min(y_scale, spread_cap_bins * y_bin_width)
+    raw_bandwidth = (x_scale * factor, y_scale * factor)
+    bandwidth = _clamp_kernel_bandwidth(
+        raw_bandwidth,
+        x_edges,
+        y_edges,
+        scale=scale,
+        min_bins=min_bins,
+        max_bins=max_bins,
+    )
+    return bandwidth, {
+        "bandwidth": [float(bandwidth[0]), float(bandwidth[1])],
         "reference_ess": reference_ess,
         "target_ess": target_ess,
         "effective_sample_size": effective_sample_size,
         "robust_scale": [float(x_scale), float(y_scale)],
-        "minimum_bandwidth": [float(minimum[0]), float(minimum[1])],
+        "raw_bandwidth_before_clamp": [float(raw_bandwidth[0]), float(raw_bandwidth[1])],
+        "histogram_bin_width": [x_bin_width, y_bin_width],
+        "spread_cap_bins": float(spread_cap_bins),
+        "min_bins": float(min_bins),
+        "max_bins": float(max_bins),
     }
 
 
@@ -1537,22 +1761,36 @@ def _resolve_kernel_bandwidth(
     y_edges: np.ndarray,
     bandwidth_spec: str,
     bandwidth_rule: str,
+    scale: float,
+    min_bins: float,
+    max_bins: float,
 ) -> tuple[tuple[float, float], dict[str, object]]:
     """Resolve a fixed or automatic Gaussian-kernel bandwidth."""
 
     fixed_bandwidth = _parse_fel_bandwidth(bandwidth_spec)
-    x_bin_width = float(np.median(np.diff(x_edges)))
-    y_bin_width = float(np.median(np.diff(y_edges)))
+    x_bin_width, y_bin_width = _histogram_bin_widths(x_edges, y_edges)
     reference_ess = _weighted_effective_sample_size(reference_weights)
     target_ess = _weighted_effective_sample_size(target_weights)
     if fixed_bandwidth is not None:
-        return fixed_bandwidth, {
-            "cv_frame_projection_bandwidth": list(fixed_bandwidth),
+        scaled = (
+            fixed_bandwidth[0] * float(scale),
+            fixed_bandwidth[1] * float(scale),
+        )
+        return scaled, {
+            "cv_frame_projection_bandwidth": [float(scaled[0]), float(scaled[1])],
             "cv_frame_projection_bandwidth_rule": "fixed",
             "cv_frame_projection_bandwidth_source": "cli",
             "cv_frame_projection_reference_ess": reference_ess,
             "cv_frame_projection_target_ess": target_ess,
         }
+
+    if bandwidth_rule == "bin-width":
+        return _bin_width_kernel_bandwidth(
+            x_edges=x_edges,
+            y_edges=y_edges,
+            bandwidth_spec=bandwidth_spec,
+            scale=scale,
+        )
 
     positive_ess = [value for value in (reference_ess, target_ess) if value > 0.0]
     effective_sample_size = min(positive_ess) if positive_ess else 1.0
@@ -1568,12 +1806,25 @@ def _resolve_kernel_bandwidth(
         target_weights,
         dtype=float,
     )
-    x_std = _weighted_standard_deviation(x_values, combined_weights)
-    y_std = _weighted_standard_deviation(y_values, combined_weights)
-    x_bandwidth = max(x_bin_width, x_std * factor)
-    y_bandwidth = max(y_bin_width, y_std * factor)
-    return (float(x_bandwidth), float(y_bandwidth)), {
-        "cv_frame_projection_bandwidth": [float(x_bandwidth), float(y_bandwidth)],
+    x_std = min(
+        _weighted_standard_deviation(x_values, combined_weights),
+        _DEFAULT_KERNEL_SPREAD_CAP_BINS * x_bin_width,
+    )
+    y_std = min(
+        _weighted_standard_deviation(y_values, combined_weights),
+        _DEFAULT_KERNEL_SPREAD_CAP_BINS * y_bin_width,
+    )
+    raw_bandwidth = (max(x_bin_width, x_std * factor), max(y_bin_width, y_std * factor))
+    bandwidth = _clamp_kernel_bandwidth(
+        raw_bandwidth,
+        x_edges,
+        y_edges,
+        scale=scale,
+        min_bins=min_bins,
+        max_bins=max_bins,
+    )
+    return bandwidth, {
+        "cv_frame_projection_bandwidth": [float(bandwidth[0]), float(bandwidth[1])],
         "cv_frame_projection_bandwidth_rule": bandwidth_rule,
         "cv_frame_projection_bandwidth_source": "auto",
         "cv_frame_projection_reference_ess": reference_ess,
@@ -1581,7 +1832,11 @@ def _resolve_kernel_bandwidth(
         "cv_frame_projection_effective_sample_size_for_bandwidth": (
             effective_sample_size
         ),
-        "cv_frame_projection_minimum_bandwidth": [x_bin_width, y_bin_width],
+        "cv_frame_projection_histogram_bin_width": [x_bin_width, y_bin_width],
+        "cv_frame_projection_raw_bandwidth_before_clamp": [
+            float(raw_bandwidth[0]),
+            float(raw_bandwidth[1]),
+        ],
     }
 
 
@@ -1635,6 +1890,9 @@ def _gaussian_kernel_projected_surfaces(
     y_name: str,
     bandwidth_spec: str,
     bandwidth_rule: str,
+    bandwidth_scale: float,
+    bandwidth_min_bins: float,
+    bandwidth_max_bins: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, object]] | None:
     """Estimate state-mass-preserving projected reference/target probability grids."""
 
@@ -1729,7 +1987,14 @@ def _gaussian_kernel_projected_surfaces(
     fixed_bandwidth = _parse_fel_bandwidth(bandwidth_spec)
     adaptive_bandwidths: dict[str, tuple[float, float]] = {}
     adaptive_metadata: dict[str, dict[str, object]] = {}
-    if fixed_bandwidth is None and bandwidth_rule == "state-adaptive":
+    if bandwidth_rule == "bin-width" and fixed_bandwidth is None:
+        bandwidth, bandwidth_metadata = _bin_width_kernel_bandwidth(
+            x_edges=x_edges,
+            y_edges=y_edges,
+            bandwidth_spec=bandwidth_spec,
+            scale=bandwidth_scale,
+        )
+    elif fixed_bandwidth is None and bandwidth_rule == "state-adaptive":
         for (
             state_id,
             state_x,
@@ -1747,6 +2012,9 @@ def _gaussian_kernel_projected_surfaces(
                 target_weights=target_conditional,
                 x_edges=x_edges,
                 y_edges=y_edges,
+                scale=bandwidth_scale,
+                min_bins=bandwidth_min_bins,
+                max_bins=bandwidth_max_bins,
             )
             adaptive_bandwidths[state_id] = state_bandwidth
             adaptive_metadata[state_id] = state_metadata
@@ -1754,6 +2022,7 @@ def _gaussian_kernel_projected_surfaces(
             list(adaptive_bandwidths.values()),
             dtype=float,
         )
+        x_bin_width, y_bin_width = _histogram_bin_widths(x_edges, y_edges)
         bandwidth_metadata = {
             "cv_frame_projection_bandwidth": (
                 np.median(bandwidth_values, axis=0).astype(float).tolist()
@@ -1763,9 +2032,13 @@ def _gaussian_kernel_projected_surfaces(
             "cv_frame_projection_bandwidth_rule": "state-adaptive",
             "cv_frame_projection_bandwidth_source": "state_local_robust_scott",
             "cv_frame_projection_bandwidth_detail": (
-                "Each state's conditional frame density uses a robust Scott bandwidth "
-                "from that state's local CV support; state probabilities remain fixed."
+                "Each state uses a robust local Scott bandwidth capped to a small "
+                "multiple of the plotting histogram bin width so kernels do not "
+                "smear across the full intra-state CV spread."
             ),
+            "cv_frame_projection_bandwidth_scale": float(bandwidth_scale),
+            "cv_frame_projection_bandwidth_min_bins": float(bandwidth_min_bins),
+            "cv_frame_projection_bandwidth_max_bins": float(bandwidth_max_bins),
             "cv_frame_projection_bandwidth_summary": (
                 {
                     "min": np.min(bandwidth_values, axis=0).astype(float).tolist(),
@@ -1776,10 +2049,7 @@ def _gaussian_kernel_projected_surfaces(
                 else {}
             ),
             "cv_frame_projection_state_bandwidths": adaptive_metadata,
-            "cv_frame_projection_minimum_bandwidth": [
-                0.5 * float(np.median(np.diff(x_edges))),
-                0.5 * float(np.median(np.diff(y_edges))),
-            ],
+            "cv_frame_projection_histogram_bin_width": [x_bin_width, y_bin_width],
         }
         bandwidth = None
     else:
@@ -1792,6 +2062,9 @@ def _gaussian_kernel_projected_surfaces(
             y_edges=y_edges,
             bandwidth_spec=bandwidth_spec,
             bandwidth_rule=bandwidth_rule,
+            scale=bandwidth_scale,
+            min_bins=bandwidth_min_bins,
+            max_bins=bandwidth_max_bins,
         )
 
     for (
@@ -1859,6 +2132,10 @@ def _plot_cv_projected_landscapes(
     fel_estimator: str,
     fel_bandwidth: str,
     fel_bandwidth_rule: str,
+    fel_bandwidth_scale: float,
+    fel_bandwidth_min_bins: float,
+    fel_bandwidth_max_bins: float,
+    fel_surface_smooth_sigma_bins: float,
     bins: int,
     max_points: int,
     output_dir: str,
@@ -1869,6 +2146,7 @@ def _plot_cv_projected_landscapes(
     probability_colormap: str,
     divergence_colormap: str,
     kl_scale_by_kbt: bool,
+    fel_plot_style: str,
     x_name: str,
     y_name: str,
 ) -> tuple[list[str], dict[str, object]]:
@@ -1902,6 +2180,9 @@ def _plot_cv_projected_landscapes(
             y_name=y_name,
             bandwidth_spec=fel_bandwidth,
             bandwidth_rule=fel_bandwidth_rule,
+            bandwidth_scale=fel_bandwidth_scale,
+            bandwidth_min_bins=fel_bandwidth_min_bins,
+            bandwidth_max_bins=fel_bandwidth_max_bins,
         )
         if projected is None:
             return [], projection_metadata
@@ -1939,6 +2220,38 @@ def _plot_cv_projected_landscapes(
             reference_hist = reference_hist / float(reference_hist.sum())
         if reweighted_hist.sum() > 0.0:
             reweighted_hist = reweighted_hist / float(reweighted_hist.sum())
+    x_bin_width, y_bin_width = _histogram_bin_widths(x_edges, y_edges)
+    if fel_surface_smooth_sigma_bins > 0.0:
+        reference_hist = _smooth_probability_surface(
+            reference_hist,
+            sigma_bins=fel_surface_smooth_sigma_bins,
+        )
+        reweighted_hist = _smooth_probability_surface(
+            reweighted_hist,
+            sigma_bins=fel_surface_smooth_sigma_bins,
+        )
+        projection_metadata["cv_frame_projection_display_smoothing_sigma_bins"] = (
+            float(fel_surface_smooth_sigma_bins)
+        )
+    bandwidth = projection_metadata.get("cv_frame_projection_bandwidth")
+    if isinstance(bandwidth, list) and len(bandwidth) == 2:
+        bandwidth_x_ratio = float(bandwidth[0]) / x_bin_width
+        bandwidth_y_ratio = float(bandwidth[1]) / y_bin_width
+        projection_metadata["cv_frame_projection_bandwidth_in_bin_widths"] = [
+            bandwidth_x_ratio,
+            bandwidth_y_ratio,
+        ]
+        if fel_estimator == "gaussian-kernel" and (
+            bandwidth_x_ratio < 1.0 or bandwidth_y_ratio < 1.0
+        ):
+            projection_metadata["cv_frame_projection_visual_note"] = (
+                "Gaussian-kernel bandwidth is below one histogram-bin width on at least "
+                "one axis, so projected surfaces can look nearly identical to a raw "
+                "histogram. Raise --fel-bandwidth-min-bins (for example 1.25), "
+                "--fel-bandwidth-max-bins, or add --fel-surface-smooth-sigma-bins "
+                "for display-only smoothing. Files named *_state_* use discrete "
+                "microstate centers and are never kernel-smoothed."
+            )
     reference_fe = energy_scale * probability_surface_to_free_energy(
         reference_hist, temperature_kelvin
     )
@@ -2008,6 +2321,7 @@ def _plot_cv_projected_landscapes(
             xlabel=_cv_axis_label(x_name),
             ylabel=_cv_axis_label(y_name),
             colormap=probability_colormap,
+            plot_style=fel_plot_style,
         )
     )
     outputs.append(
@@ -2022,6 +2336,7 @@ def _plot_cv_projected_landscapes(
             xlabel=_cv_axis_label(x_name),
             ylabel=_cv_axis_label(y_name),
             colormap=probability_colormap,
+            plot_style=fel_plot_style,
         )
     )
     outputs.append(
@@ -2037,6 +2352,7 @@ def _plot_cv_projected_landscapes(
             ylabel=_cv_axis_label(y_name),
             fel_max_energy_kj_mol=fel_max_energy_display,
             colormap=fel_colormap,
+            plot_style=fel_plot_style,
         )
     )
     outputs.append(
@@ -2052,6 +2368,7 @@ def _plot_cv_projected_landscapes(
             ylabel=_cv_axis_label(y_name),
             fel_max_energy_kj_mol=fel_max_energy_display,
             colormap=fel_colormap,
+            plot_style=fel_plot_style,
         )
     )
     outputs.append(
@@ -2067,6 +2384,7 @@ def _plot_cv_projected_landscapes(
             ylabel=_cv_axis_label(y_name),
             colormap=divergence_colormap,
             symmetric_zero_center=True,
+            plot_style=fel_plot_style,
         )
     )
     kl_summary_path = os.path.join(output_dir, kl_summary_filename)
@@ -2174,7 +2492,55 @@ def _plot_discrete_microstate_cv_projection(
     stem = "discrete_microstate_free_energy"
     if filename_prefix:
         stem = f"{filename_prefix}_{stem}"
-    filename = f"{stem}_ramachandran.png" if (x_name, y_name) == ("phi", "psi") else f"{stem}_{suffix}.png"
+    filename = (
+        f"{stem}_ramachandran.png"
+        if (x_name, y_name) == ("phi", "psi")
+        else f"{stem}_{suffix}.png"
+    )
+    path = os.path.join(output_dir, filename)
+    fig.savefig(path)
+    plt.close(fig)
+    return [path]
+
+
+def _plot_ess_projection(
+    plt,
+    *,
+    x_values: np.ndarray,
+    y_values: np.ndarray,
+    x_name: str,
+    y_name: str,
+    ess_values: np.ndarray,
+    output_dir: str,
+    title: str,
+    filename: str,
+) -> list[str]:
+    """Scatter microstate centers colored by log10 effective sample size."""
+
+    mask = np.isfinite(x_values) & np.isfinite(y_values)
+    if int(mask.sum()) < 1:
+        return []
+
+    ess = np.asarray(ess_values, dtype=float)
+    log_ess = np.full_like(ess, fill_value=np.nan, dtype=float)
+    positive_mask = np.isfinite(ess) & (ess > 0.0)
+    log_ess[positive_mask] = np.log10(ess[positive_mask])
+    if not np.isfinite(log_ess[mask]).any():
+        return []
+
+    fig, ax = plt.subplots(1, 1)
+    scatter_state_projection(
+        ax=ax,
+        x=x_values[mask],
+        y=y_values[mask],
+        values=log_ess[mask],
+        colorbar_label="log10(ESS)",
+        title=title,
+        xlabel=_cv_axis_label(x_name, center=True),
+        ylabel=_cv_axis_label(y_name, center=True),
+        colormap=_ESS_COLORMAP,
+    )
+    fig.tight_layout()
     path = os.path.join(output_dir, filename)
     fig.savefig(path)
     plt.close(fig)

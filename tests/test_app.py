@@ -4,11 +4,13 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from felp.app import summarize_results
+import numpy as np
+
+from felp.app import _repartition_frame_results_to_complete_2d_grid, summarize_results
 from felp.cli.parser import build_parser
-from felp.core import FrameResult, OutputConfig
+from felp.core import FrameResult, MicrostateConfig, OutputConfig
 from felp.io import ResultsWriter, load_frame_results_csv
-from felp.reweighting import SamplingManifest
+from felp.reweighting import MicrostateAtlas, SamplingManifest, build_auto_microstate_payload
 
 
 def _frame_result(frame_index: int, state_id: str, delta_u: float) -> FrameResult:
@@ -26,6 +28,23 @@ def _frame_result(frame_index: int, state_id: str, delta_u: float) -> FrameResul
         reference_relaxed_psi_degrees=0.0,
         perturbed_relaxed_phi_degrees=0.0,
         perturbed_relaxed_psi_degrees=0.0,
+    )
+
+
+def _distance_frame_result(
+    frame_index: int,
+    *,
+    ends: float,
+    turn: float,
+) -> FrameResult:
+    result = _frame_result(frame_index, "old", 0.0)
+    return FrameResult(
+        **{
+            **result.to_row(),
+            "phi_degrees": None,
+            "psi_degrees": None,
+            "metadata": {"assignment_measurements": {"ends": ends, "turn": turn}},
+        }
     )
 
 
@@ -226,3 +245,40 @@ def test_summarize_repartition_writes_matching_frame_results(tmp_path: Path) -> 
         "phi1_psi1",
         "phi1_psi1",
     ]
+
+
+def test_fast_auto_grid_repartition_matches_atlas_assignment(tmp_path: Path) -> None:
+    payload = build_auto_microstate_payload(
+        cv_values={
+            "ends": np.asarray([0.0, 0.5, 9.5, 10.0], dtype=float),
+            "turn": np.asarray([2.0, 2.5, 7.5, 8.0], dtype=float),
+        },
+        cv_names=("ends", "turn"),
+        min_bins_per_axis=2,
+        max_bins_per_axis=2,
+        max_total_states=4,
+        target_frames_per_state=1,
+    )
+    state_file = tmp_path / "auto_microstates.json"
+    state_file.write_text(json.dumps(payload), encoding="utf-8")
+    atlas = MicrostateAtlas.from_config(
+        MicrostateConfig(
+            source="file",
+            definition_file=str(state_file),
+            reference_probability_mode="raw_counts",
+        )
+    )
+    frames = [
+        _distance_frame_result(0, ends=0.0, turn=2.0),
+        _distance_frame_result(1, ends=5.0, turn=5.0),
+        _distance_frame_result(2, ends=10.0, turn=8.0),
+    ]
+
+    repartitioned = _repartition_frame_results_to_complete_2d_grid(frames, atlas)
+
+    assert repartitioned is not None
+    expected_state_ids = [
+        atlas.assign(frame.metadata["assignment_measurements"]).state_id
+        for frame in frames
+    ]
+    assert [frame.microstate_id for frame in repartitioned] == expected_state_ids

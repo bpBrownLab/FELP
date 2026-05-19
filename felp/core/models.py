@@ -230,16 +230,16 @@ class InputConfig:
 
 
 @dataclass(frozen=True)
-class PerturbationConfig:
-    """Configuration for the PyRosetta mutation."""
+class MutationSpec:
+    """Single requested mutation site in sequential pose numbering."""
 
-    target_residue_number: int
+    residue_number: int
     target_residue_name: str
     original_residue_name: Optional[str] = None
 
     def __post_init__(self) -> None:
-        if self.target_residue_number < 1:
-            raise ConfigurationError("Target residue number must be at least 1.")
+        if int(self.residue_number) < 1:
+            raise ConfigurationError("mutation residue_number must be at least 1.")
 
         normalized_target = normalize_mutation_target_name(self.target_residue_name)
         if normalized_target not in ALLOWED_MUTATION_TARGET_NAMES:
@@ -248,6 +248,7 @@ class PerturbationConfig:
                 f"Unsupported mutation target residue {self.target_residue_name!r}. "
                 f"Allowed targets are: {allowed}."
             )
+        object.__setattr__(self, "residue_number", int(self.residue_number))
         object.__setattr__(self, "target_residue_name", normalized_target)
 
         if self.original_residue_name is not None:
@@ -258,12 +259,92 @@ class PerturbationConfig:
             )
 
     @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "MutationSpec":
+        """Rehydrate from a mutation entry (JSON serialization)."""
+
+        return cls(
+            residue_number=int(payload["residue_number"]),
+            target_residue_name=str(payload["target_residue_name"]),
+            original_residue_name=payload.get("original_residue_name"),
+        )
+
+
+@dataclass(frozen=True)
+class PerturbationConfig:
+    """Configuration for PyRosetta mutations."""
+
+    mutations: tuple[MutationSpec, ...]
+
+    def __post_init__(self) -> None:
+        if not self.mutations:
+            raise ConfigurationError("At least one mutation must be configured.")
+        seen: set[int] = set()
+        for spec in self.mutations:
+            if spec.residue_number in seen:
+                raise ConfigurationError(
+                    "Duplicate perturbation residues are not supported: residue "
+                    f"{spec.residue_number} appears more than once."
+                )
+            seen.add(spec.residue_number)
+
+    @classmethod
+    def from_legacy(
+        cls,
+        *,
+        target_residue_number: int,
+        target_residue_name: str,
+        original_residue_name: Optional[str] = None,
+    ) -> "PerturbationConfig":
+        """Single-site perturbation backward compatible with legacy CLI payloads."""
+
+        return cls(
+            mutations=(
+                MutationSpec(
+                    residue_number=target_residue_number,
+                    target_residue_name=target_residue_name,
+                    original_residue_name=original_residue_name,
+                ),
+            )
+        )
+
+    @property
+    def target_residue_number(self) -> int:
+        """Primary mutation residue index (aliases the first mutation)."""
+
+        return self.mutations[0].residue_number
+
+    @property
+    def target_residue_name(self) -> str:
+        """Mutation target residue name alias for the primary site."""
+
+        return self.mutations[0].target_residue_name
+
+    @property
+    def original_residue_name(self) -> Optional[str]:
+        """Optional original residue expectation for the primary site only."""
+
+        return self.mutations[0].original_residue_name
+
+    @property
+    def mutation_residue_numbers(self) -> tuple[int, ...]:
+        """All mutated pose residue indices."""
+
+        return tuple(spec.residue_number for spec in self.mutations)
+
+    @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "PerturbationConfig":
         """Rehydrate the config from a serialized dictionary."""
 
-        return cls(
-            target_residue_number=payload["target_residue_number"],
-            target_residue_name=payload["target_residue_name"],
+        if payload.get("mutations"):
+            raw = payload["mutations"]
+            if not isinstance(raw, (list, tuple)):
+                raise ConfigurationError("perturbation.mutations must be a list when set.")
+            return cls(
+                mutations=tuple(MutationSpec.from_dict(entry) for entry in raw),
+            )
+        return cls.from_legacy(
+            target_residue_number=int(payload["target_residue_number"]),
+            target_residue_name=str(payload["target_residue_name"]),
             original_residue_name=payload.get("original_residue_name"),
         )
 

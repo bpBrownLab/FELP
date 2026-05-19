@@ -53,7 +53,7 @@ def _atlas() -> MicrostateAtlas:
 def _config(*, sampling: SamplingConfig, source: str = "msm_bundle") -> RunConfig:
     return RunConfig(
         input=InputConfig(topology_file="unused", trajectory_files=(("unused",),)),
-        perturbation=PerturbationConfig(target_residue_number=2, target_residue_name="ALA"),
+        perturbation=PerturbationConfig.from_legacy(target_residue_number=2, target_residue_name="ALA"),
         rosetta=RosettaConfig(),
         restraints=RestraintConfig(),
         energy=EnergyConfig(),

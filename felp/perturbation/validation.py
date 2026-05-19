@@ -18,59 +18,49 @@ from felp.core import (
 
 
 def ensure_perturbation_matches_pose(pose, perturbation: PerturbationConfig) -> None:
-    """Verify optional original residue identity against the pose at the Rosetta index.
+    """Verify optional original residue identity against each requested mutation site."""
 
-    ``target_residue_number`` is the sequential Rosetta pose index (``pose.residue(i)``),
-    not necessarily PDB residue numbering. When ``original_residue_name`` is set, this
-    check catches common indexing mistakes before mutation.
-    """
-
-    if perturbation.original_residue_name is None:
-        return
-    residue = pose.residue(perturbation.target_residue_number)
-    observed = normalize_mutation_target_name(residue.name3().strip().upper())
-    expected = perturbation.original_residue_name
-    if mutation_target_family(observed) != mutation_target_family(expected):
-        raise ConversionError(
-            f"Perturbation target mismatch at Rosetta residue index "
-            f"{perturbation.target_residue_number}: expected original residue "
-            f"compatible with {expected!r}, found {observed!r}. "
-            "FELP can enforce protonation/tautomer variants within the same residue "
-            "family, but not a different amino acid. Use the sequential pose index "
-            "(not necessarily PDB numbering)."
-        )
+    for spec in perturbation.mutations:
+        if spec.original_residue_name is None:
+            continue
+        residue = pose.residue(spec.residue_number)
+        observed = normalize_mutation_target_name(residue.name3().strip().upper())
+        expected = spec.original_residue_name
+        if mutation_target_family(observed) != mutation_target_family(expected):
+            raise ConversionError(
+                f"Perturbation target mismatch at Rosetta residue index "
+                f"{spec.residue_number}: expected original residue compatible with "
+                f"{expected!r}, found {observed!r}. "
+                "FELP can enforce protonation/tautomer variants within the same residue "
+                "family, but not a different amino acid. Use the sequential pose index "
+                "(not necessarily PDB numbering)."
+            )
 
 
 def ensure_perturbation_matches_structure(structure, perturbation: PerturbationConfig) -> None:
-    """Verify optional original residue identity against the input topology order.
+    """Verify optional original residues against the sequential topology residue order."""
 
-    The topology residue index is the same sequential residue order later handed to
-    Rosetta by ``structure_to_pose()``, not necessarily the original PDB residue
-    numbering embedded in the source file.
-    """
-
-    if perturbation.original_residue_name is None:
-        return
     residues = getattr(structure, "residues", ())
-    if perturbation.target_residue_number < 1 or perturbation.target_residue_number > len(
-        residues
-    ):
-        raise ConversionError(
-            "Perturbation target mismatch at topology residue index "
-            f"{perturbation.target_residue_number}: topology has {len(residues)} residues."
-        )
-    residue = residues[perturbation.target_residue_number - 1]
-    observed = normalize_mutation_target_name(str(getattr(residue, "name", "")).strip().upper())
-    expected = perturbation.original_residue_name
-    if mutation_target_family(observed) != mutation_target_family(expected):
-        raise ConversionError(
-            f"Perturbation target mismatch at topology residue index "
-            f"{perturbation.target_residue_number}: expected original residue "
-            f"compatible with {expected!r}, found {observed!r}. "
-            "FELP can enforce protonation/tautomer variants within the same residue "
-            "family, but not a different amino acid. Use the sequential topology/Pose "
-            "residue index (not necessarily PDB numbering)."
-        )
+    for spec in perturbation.mutations:
+        if spec.original_residue_name is None:
+            continue
+        if spec.residue_number < 1 or spec.residue_number > len(residues):
+            raise ConversionError(
+                "Perturbation target mismatch at topology residue index "
+                f"{spec.residue_number}: topology has {len(residues)} residues."
+            )
+        residue = residues[spec.residue_number - 1]
+        observed = normalize_mutation_target_name(str(getattr(residue, "name", "")).strip().upper())
+        expected = spec.original_residue_name
+        if mutation_target_family(observed) != mutation_target_family(expected):
+            raise ConversionError(
+                f"Perturbation target mismatch at topology residue index "
+                f"{spec.residue_number}: expected original residue compatible with "
+                f"{expected!r}, found {observed!r}. "
+                "FELP can enforce protonation/tautomer variants within the same residue "
+                "family, but not a different amino acid. Use the sequential topology/Pose "
+                "residue index (not necessarily PDB numbering)."
+            )
 
 
 def _pose_residue_atom_names(pose, residue_number: int) -> set[str]:

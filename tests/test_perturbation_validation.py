@@ -10,6 +10,7 @@ from felp.core import (
     CVMeasurement,
     ConversionError,
     DihedralRestraintSpec,
+    MutationSpec,
     PerturbationConfig,
     PhiPsiMeasurement,
 )
@@ -24,7 +25,7 @@ from felp.perturbation.validation import (
 
 def test_skips_when_original_residue_not_set() -> None:
     pose = SimpleNamespace()
-    perturbation = PerturbationConfig(
+    perturbation = PerturbationConfig.from_legacy(
         target_residue_number=2,
         target_residue_name="ALA",
         original_residue_name=None,
@@ -35,7 +36,7 @@ def test_skips_when_original_residue_not_set() -> None:
 def test_passes_when_names_match() -> None:
     residue = SimpleNamespace(name3=lambda: " GLY ")
     pose = SimpleNamespace(residue=lambda _: residue)
-    perturbation = PerturbationConfig(
+    perturbation = PerturbationConfig.from_legacy(
         target_residue_number=2,
         target_residue_name="ALA",
         original_residue_name="GLY",
@@ -46,7 +47,7 @@ def test_passes_when_names_match() -> None:
 def test_passes_when_common_variant_aliases_normalize() -> None:
     residue = SimpleNamespace(name3=lambda: " HIS_D ")
     pose = SimpleNamespace(residue=lambda _: residue)
-    perturbation = PerturbationConfig(
+    perturbation = PerturbationConfig.from_legacy(
         target_residue_number=2,
         target_residue_name="hip",
         original_residue_name="hid",
@@ -57,7 +58,7 @@ def test_passes_when_common_variant_aliases_normalize() -> None:
 def test_passes_when_pose_family_matches_requested_protonation_variant() -> None:
     residue = SimpleNamespace(name3=lambda: "HIS")
     pose = SimpleNamespace(residue=lambda _: residue)
-    perturbation = PerturbationConfig(
+    perturbation = PerturbationConfig.from_legacy(
         target_residue_number=2,
         target_residue_name="ALA",
         original_residue_name="HIE",
@@ -68,7 +69,7 @@ def test_passes_when_pose_family_matches_requested_protonation_variant() -> None
 def test_raises_on_mismatch() -> None:
     residue = SimpleNamespace(name3=lambda: "ALA")
     pose = SimpleNamespace(residue=lambda _: residue)
-    perturbation = PerturbationConfig(
+    perturbation = PerturbationConfig.from_legacy(
         target_residue_number=2,
         target_residue_name="GLY",
         original_residue_name="GLY",
@@ -79,7 +80,7 @@ def test_raises_on_mismatch() -> None:
 
 def test_structure_validation_passes_when_names_match() -> None:
     structure = SimpleNamespace(residues=[SimpleNamespace(name="GLY"), SimpleNamespace(name="HIE")])
-    perturbation = PerturbationConfig(
+    perturbation = PerturbationConfig.from_legacy(
         target_residue_number=2,
         target_residue_name="ALA",
         original_residue_name="HIE",
@@ -89,7 +90,7 @@ def test_structure_validation_passes_when_names_match() -> None:
 
 def test_structure_validation_normalizes_common_variant_aliases() -> None:
     structure = SimpleNamespace(residues=[SimpleNamespace(name="CYZ")])
-    perturbation = PerturbationConfig(
+    perturbation = PerturbationConfig.from_legacy(
         target_residue_number=1,
         target_residue_name="ALA",
         original_residue_name="CYM",
@@ -99,7 +100,7 @@ def test_structure_validation_normalizes_common_variant_aliases() -> None:
 
 def test_structure_validation_passes_when_family_matches_requested_variant() -> None:
     structure = SimpleNamespace(residues=[SimpleNamespace(name="GLU")])
-    perturbation = PerturbationConfig(
+    perturbation = PerturbationConfig.from_legacy(
         target_residue_number=1,
         target_residue_name="ALA",
         original_residue_name="GLH",
@@ -109,7 +110,7 @@ def test_structure_validation_passes_when_family_matches_requested_variant() -> 
 
 def test_structure_validation_raises_on_mismatch() -> None:
     structure = SimpleNamespace(residues=[SimpleNamespace(name="HIS"), SimpleNamespace(name="GLU")])
-    perturbation = PerturbationConfig(
+    perturbation = PerturbationConfig.from_legacy(
         target_residue_number=2,
         target_residue_name="ALA",
         original_residue_name="HIE",
@@ -252,3 +253,27 @@ def test_ensure_measurement_matches_restraints_raises_on_drift() -> None:
             tolerance_degrees=1.0,
             context="OpenMM-minimized perturbed state",
         )
+
+
+def test_pose_validation_checks_every_original_when_multi_site() -> None:
+    residue_good = SimpleNamespace(name3=lambda: " GLY ")
+    residue_bad = SimpleNamespace(name3=lambda: " ALA ")
+    pose = SimpleNamespace(
+        residue=lambda index: residue_good if int(index) == 2 else residue_bad,
+    )
+    perturbation = PerturbationConfig(
+        mutations=(
+            MutationSpec(
+                residue_number=2,
+                target_residue_name="SER",
+                original_residue_name="GLY",
+            ),
+            MutationSpec(
+                residue_number=3,
+                target_residue_name="ALA",
+                original_residue_name="GLY",
+            ),
+        ),
+    )
+    with pytest.raises(ConversionError, match="Rosetta residue index 3"):
+        ensure_perturbation_matches_pose(pose, perturbation)

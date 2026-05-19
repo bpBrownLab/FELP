@@ -8,6 +8,7 @@ from felp.core import (
     InputConfig,
     MicrostateConfig,
     MobilityConfig,
+    MutationSpec,
     OutputConfig,
     ParallelConfig,
     PerturbationConfig,
@@ -21,7 +22,7 @@ from felp.protocol_summary import build_protocol_summary
 def test_protocol_summary_explicitly_reports_target_only_backbone_scope() -> None:
     config = RunConfig(
         input=InputConfig(topology_file="unused", trajectory_files=(("unused",),)),
-        perturbation=PerturbationConfig(target_residue_number=4, target_residue_name="ALA"),
+        perturbation=PerturbationConfig.from_legacy(target_residue_number=4, target_residue_name="ALA"),
         rosetta=RosettaConfig(),
         restraints=RestraintConfig(
             distance_cv_specs=(
@@ -67,7 +68,7 @@ def test_protocol_summary_explicitly_reports_target_only_backbone_scope() -> Non
 def test_protocol_summary_reports_actual_runtime_restraints_when_available() -> None:
     config = RunConfig(
         input=InputConfig(topology_file="unused", trajectory_files=(("unused",),)),
-        perturbation=PerturbationConfig(target_residue_number=4, target_residue_name="ALA"),
+        perturbation=PerturbationConfig.from_legacy(target_residue_number=4, target_residue_name="ALA"),
         rosetta=RosettaConfig(),
         restraints=RestraintConfig(
             distance_cv_specs=(
@@ -109,7 +110,7 @@ def test_protocol_summary_reports_actual_runtime_restraints_when_available() -> 
 def test_protocol_summary_reports_sequence_window_and_backbone_restraint_residues() -> None:
     config = RunConfig(
         input=InputConfig(topology_file="unused", trajectory_files=(("unused",),)),
-        perturbation=PerturbationConfig(target_residue_number=4, target_residue_name="ALA"),
+        perturbation=PerturbationConfig.from_legacy(target_residue_number=4, target_residue_name="ALA"),
         rosetta=RosettaConfig(),
         restraints=RestraintConfig(
             distance_cv_specs=(
@@ -154,3 +155,26 @@ def test_protocol_summary_reports_sequence_window_and_backbone_restraint_residue
         "force_constant": 2500.0,
         "target_source": "measured from each reference frame",
     }
+
+
+def test_protocol_summary_multi_mutation_reports_union_target_only() -> None:
+    config = RunConfig(
+        input=InputConfig(topology_file="unused", trajectory_files=(("unused",),)),
+        perturbation=PerturbationConfig(
+            mutations=(
+                MutationSpec(residue_number=3, target_residue_name="ALA"),
+                MutationSpec(residue_number=11, target_residue_name="SER"),
+            ),
+        ),
+        rosetta=RosettaConfig(),
+        restraints=RestraintConfig(),
+        energy=EnergyConfig(backend="openmm"),
+        microstates=MicrostateConfig(source="auto"),
+        parallel=ParallelConfig(workers=1),
+        output=OutputConfig(output_dir="unused"),
+        mobility=MobilityConfig(mode="target_only"),
+    )
+    summary = build_protocol_summary(config)
+    mobility = summary["mobility"]
+    assert mobility["mutation_residue_numbers"] == [3, 11]
+    assert mobility["selected_residue_scope"]["residue_numbers"] == [3, 11]

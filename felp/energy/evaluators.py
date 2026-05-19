@@ -109,7 +109,7 @@ class OpenMMEnergyEvaluator(EnergyEvaluator):
     platform_name: str | None = None
     cpu_threads: int = 1
     mobility: MobilityConfig = MobilityConfig()
-    target_residue_number: int = 1
+    mutation_residue_numbers: tuple[int, ...] = (1,)
 
     @staticmethod
     def _residue_name_summary(structure) -> str:
@@ -212,19 +212,11 @@ class OpenMMEnergyEvaluator(EnergyEvaluator):
             system.addForce(distance_force)
 
     def _mobile_atom_indices(self, structure) -> set[int]:
-        mobile_residues = {int(self.target_residue_number)}
-        if self.mobility.mode == "sequence_window":
-            first_residue = max(
-                1,
-                int(self.target_residue_number) - int(self.mobility.sequence_window),
-            )
-            last_residue = min(
-                len(structure.residues),
-                int(self.target_residue_number) + int(self.mobility.sequence_window),
-            )
-            mobile_residues = set(range(first_residue, last_residue + 1))
-        if self.mobility.mode == "radius":
-            target_residue = find_structure_atom(structure, self.target_residue_number, "CA").residue
+        anchors = tuple(int(number) for number in self.mutation_residue_numbers)
+        mobile_residues: set[int] = set(anchors)
+
+        def _accumulate_radius(target_residue_number: int) -> None:
+            target_residue = find_structure_atom(structure, target_residue_number, "CA").residue
             target_atoms = list(getattr(target_residue, "atoms", ()))
             radius_sq = float(self.mobility.radius_angstrom) ** 2
             for residue in structure.residues:
@@ -238,6 +230,22 @@ class OpenMMEnergyEvaluator(EnergyEvaluator):
                     ):
                         mobile_residues.add(structure.residues.index(residue) + 1)
                         break
+
+        window = int(self.mobility.sequence_window)
+        if self.mobility.mode == "sequence_window":
+            mobile_residues.clear()
+            for anchor in anchors:
+                first_residue = max(1, anchor - window)
+                last_residue = min(
+                    len(structure.residues),
+                    anchor + window,
+                )
+                mobile_residues.update(range(first_residue, last_residue + 1))
+
+        elif self.mobility.mode == "radius":
+            mobile_residues.clear()
+            for anchor in anchors:
+                _accumulate_radius(anchor)
 
         mobile_atoms: set[int] = set()
         backbone_names = {"N", "CA", "C", "O", "OXT"}
@@ -272,7 +280,12 @@ class OpenMMEnergyEvaluator(EnergyEvaluator):
         )
         return {
             "mobility_mode": self.mobility.mode,
-            "target_residue_number": self.target_residue_number,
+            "target_residue_number": (
+                self.mutation_residue_numbers[0]
+                if self.mutation_residue_numbers
+                else None
+            ),
+            "mutation_residue_numbers": list(self.mutation_residue_numbers),
             "mobility_radius_angstrom": self.mobility.radius_angstrom,
             "mobility_sequence_window": self.mobility.sequence_window,
             "include_backbone": self.mobility.include_backbone,
@@ -518,7 +531,7 @@ def build_energy_evaluator(
     conversion_service: StructureConversionService,
     *,
     mobility_config: MobilityConfig | None = None,
-    target_residue_number: int = 1,
+    mutation_residue_numbers: tuple[int, ...] = (1,),
 ) -> EnergyEvaluator:
     """Factory method to build the configured EnergyEvaluator."""
     if energy_config.backend == "openmm":
@@ -534,7 +547,7 @@ def build_energy_evaluator(
             platform_name=energy_config.platform_name,
             cpu_threads=energy_config.cpu_threads,
             mobility=mobility_config or MobilityConfig(),
-            target_residue_number=target_residue_number,
+            mutation_residue_numbers=mutation_residue_numbers,
         )
     return RosettaEnergyEvaluator(
         conversion_service=conversion_service,

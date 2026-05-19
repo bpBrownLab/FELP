@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import os
 import shutil
 import tempfile
@@ -152,6 +153,27 @@ def _frame_result_from_row(
         ) from exc
 
 
+def _csv_row_definitely_ineligible_for_reweighting(row: dict[str, str]) -> bool:
+    """Cheap row filter: True only when the row cannot be reweighting-eligible."""
+
+    status = (row.get("status") or "").strip().lower()
+    if status == "failed":
+        return True
+    if (row.get("microstate_id") or "").strip() == "failed":
+        return True
+    if (row.get("assignment_source") or "").strip() == "failed":
+        return True
+    try:
+        ref = float(row["reference_energy_kj_mol"])
+        pert = float(row["perturbed_energy_kj_mol"])
+        delta_u = float(row["delta_u_kj_mol"])
+    except (KeyError, ValueError, TypeError):
+        return True
+    if not (math.isfinite(ref) and math.isfinite(pert) and math.isfinite(delta_u)):
+        return True
+    return False
+
+
 def load_frame_results_csv(path: str) -> list[FrameResult]:
     """Read a frame-results CSV written by FELP, old or new format."""
 
@@ -163,6 +185,37 @@ def load_frame_results_csv(path: str) -> list[FrameResult]:
         reader = csv.DictReader(handle)
         for row_number, row in enumerate(reader, start=2):
             result = _frame_result_from_row(row, path=path, row_number=row_number)
+            if result.frame_index in seen_indices:
+                raise ValueError(
+                    f"Duplicate frame_index {result.frame_index} in {path} at row "
+                    f"{row_number}."
+                )
+            seen_indices.add(result.frame_index)
+            frame_results.append(result)
+    return frame_results
+
+
+def load_reweighting_eligible_frame_results_csv(path: str) -> list[FrameResult]:
+    """Like :func:`load_frame_results_csv` but keep only reweighting-eligible frames.
+
+    Skips parsing rows that are clearly failed or have invalid energies, which
+    speeds up large ``frame_results.csv`` files for block bootstrap and similar.
+    """
+
+    from felp.reweighting import is_reweighting_eligible_frame
+
+    if not os.path.isfile(path):
+        return []
+    frame_results: list[FrameResult] = []
+    seen_indices: set[int] = set()
+    with open(path, newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        for row_number, row in enumerate(reader, start=2):
+            if _csv_row_definitely_ineligible_for_reweighting(row):
+                continue
+            result = _frame_result_from_row(row, path=path, row_number=row_number)
+            if not is_reweighting_eligible_frame(result):
+                continue
             if result.frame_index in seen_indices:
                 raise ValueError(
                     f"Duplicate frame_index {result.frame_index} in {path} at row "
@@ -272,7 +325,7 @@ class ResultsWriter:
             error_message = metadata.pop("error_message", "")
             traceback_text = metadata.pop("traceback", "")
             traceback_path = ""
-            if traceback_text:
+            if traceback_text and self.output_config.debug_frame_outputs:
                 os.makedirs(self.frame_failure_dir, exist_ok=True)
                 traceback_filename = f"frame_{result.frame_index}.traceback.txt"
                 traceback_path = os.path.join("frame_failures", traceback_filename)

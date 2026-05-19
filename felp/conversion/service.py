@@ -308,6 +308,40 @@ def _repair_pose_derived_proline_ring_closure(structure) -> None:
         structure.bonds.append(parmed.Bond(nitrogen, delta_carbon))
 
 
+def _pose_with_sequential_pdb_info(pose):
+    """Return a pose clone whose PDBInfo cannot confuse ParmEd's Rosetta bridge."""
+
+    bridge_pose = pose.clone() if hasattr(pose, "clone") else pose
+    try:
+        pdb_info = bridge_pose.pdb_info()
+    except Exception:
+        return bridge_pose
+    if pdb_info is None:
+        return bridge_pose
+
+    total_residue = int(bridge_pose.total_residue())
+    for residue_number in range(1, total_residue + 1):
+        try:
+            chain_id = pdb_info.chain(residue_number)
+        except Exception:
+            chain_id = "A"
+        if not str(chain_id).strip():
+            chain_id = "A"
+        try:
+            pdb_info.chain(residue_number, str(chain_id).strip()[0])
+        except Exception:
+            pass
+        try:
+            pdb_info.number(residue_number, residue_number)
+        except Exception:
+            pass
+        try:
+            pdb_info.icode(residue_number, " ")
+        except Exception:
+            pass
+    return bridge_pose
+
+
 def _normalized_residue_name(name: object) -> str:
     text = str(name).strip().upper()
     if not text:
@@ -672,7 +706,7 @@ class StructureConversionService:
         """Convert a PyRosetta Pose to a ParmEd Structure via vendored ParmEd."""
         _, load_rosetta, _ = _import_parmed()
         try:
-            structure = load_rosetta(pose)
+            structure = load_rosetta(_pose_with_sequential_pdb_info(pose))
             _normalize_pose_derived_structure_names(structure)
             _repair_pose_derived_proline_ring_closure(structure)
             return structure

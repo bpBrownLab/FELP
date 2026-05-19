@@ -384,6 +384,37 @@ def test_reweighting_excludes_dominant_frame_with_explicit_policy() -> None:
     assert flagged_by_id["a"].target_probability > state_a.target_probability
 
 
+def test_parallel_reweighting_matches_serial_results() -> None:
+    atlas = MicrostateAtlas(
+        definitions=(
+            MicrostateDefinition("a", "a", (-180.0, 0.0), (-180.0, 180.0)),
+            MicrostateDefinition("b", "b", (0.0, 180.0), (-180.0, 180.0)),
+        ),
+        reference_probability_mode="raw_counts",
+    )
+    frames = [
+        *(_frame_result(index, "a", 0.0) for index in range(29)),
+        _frame_result(999, "a", -100.0),
+        *(_frame_result(index, "b", 0.0) for index in range(1000, 1030)),
+    ]
+    qc_config = ReweightingQCConfig(policy="exclude-frames")
+
+    serial = ReweightingAggregator(
+        temperature_kelvin=300.0,
+        qc_config=qc_config,
+        workers=1,
+    ).aggregate(frames, atlas)
+    parallel = ReweightingAggregator(
+        temperature_kelvin=300.0,
+        qc_config=qc_config,
+        workers=2,
+    ).aggregate(frames, atlas)
+
+    assert [result.to_row() for result in parallel] == [
+        result.to_row() for result in serial
+    ]
+
+
 def test_reweighting_threshold_method_remains_available() -> None:
     atlas = MicrostateAtlas(
         definitions=(

@@ -16,6 +16,7 @@ from felp.plotting.felp import (
     _filter_qc_excluded_frame_results,
     _gaussian_kernel_projected_surfaces,
     _normalize_cv_name,
+    _smooth_probability_surface,
     _resolve_cv_axes,
     _state_kernel_probability_grid,
     _symmetric_kl_imbalance_grid,
@@ -224,6 +225,7 @@ def test_generate_felp_plots(tmp_path: Path) -> None:
     assert "kl_reference_to_target" in summary
     assert summary["overlap_coefficient"] == pytest.approx(0.85)
     assert summary["fel_colormap"] == "nipy_spectral_r"
+    assert summary["fel_plot_style"] == "default"
     assert summary["probability_colormap"] == "nipy_spectral_r"
     assert summary["divergence_colormap"] == "felp_kl_twilight"
     assert summary["reference_probability_source"] == "loaded"
@@ -239,6 +241,23 @@ def test_generate_felp_plots(tmp_path: Path) -> None:
     assert (tmp_path / "felp_plots" / "kl_phi_psi_projected_fel_summary.json").is_file()
     assert (tmp_path / "felp_plots" / "discrete_microstate_free_energy_ramachandran.png").is_file()
     assert (tmp_path / "felp_plots" / "plot_summary.json").is_file()
+
+    contour_summary = generate_felp_plots(
+        FELPPlotConfig(
+            microstate_summary_csv=str(summary_csv),
+            raw_frame_results_csv=str(frame_csv),
+            output_dir=str(tmp_path / "felp_plots_contour"),
+            top_states=10,
+            fel_plot_style="contour",
+            fel_max_energy_kj_mol=25.0,
+        )
+    )
+    assert contour_summary["fel_plot_style"] == "contour"
+    assert (
+        tmp_path
+        / "felp_plots_contour"
+        / "reference_phi_psi_free_energy_landscape.png"
+    ).is_file()
 
 
 def test_generate_felp_plots_fel_energy_cap(tmp_path: Path) -> None:
@@ -779,6 +798,9 @@ def test_gaussian_kernel_projection_preserves_probability_mass() -> None:
         y_name="turn",
         bandwidth_spec="0.5,0.5",
         bandwidth_rule="scott",
+        bandwidth_scale=1.0,
+        bandwidth_min_bins=0.5,
+        bandwidth_max_bins=1.25,
     )
 
     assert result is not None
@@ -822,6 +844,9 @@ def test_gaussian_kernel_projection_spreads_sparse_weighted_surface() -> None:
         y_name="turn",
         bandwidth_spec="1.0",
         bandwidth_rule="scott",
+        bandwidth_scale=1.0,
+        bandwidth_min_bins=0.5,
+        bandwidth_max_bins=1.25,
     )
 
     assert result is not None
@@ -867,15 +892,74 @@ def test_state_adaptive_gaussian_bandwidth_is_local_and_mass_preserving() -> Non
         y_name="turn",
         bandwidth_spec="auto",
         bandwidth_rule="state-adaptive",
+        bandwidth_scale=1.0,
+        bandwidth_min_bins=0.5,
+        bandwidth_max_bins=1.25,
     )
 
     assert result is not None
-    reference_grid, target_grid, _, _, metadata = result
+    reference_grid, target_grid, x_edges, y_edges, metadata = result
     assert reference_grid.sum() == pytest.approx(1.0)
     assert target_grid.sum() == pytest.approx(1.0)
     assert metadata["cv_frame_projection_bandwidth_rule"] == "state-adaptive"
     summary = metadata["cv_frame_projection_bandwidth_summary"]
-    assert summary["max"][0] < 1.0
+    x_bin_width = float(np.median(np.diff(x_edges)))
+    assert summary["max"][0] <= 1.25 * x_bin_width + 1.0e-12
+
+
+def test_state_adaptive_bandwidth_ignores_full_state_spread() -> None:
+    """Wide intra-state CV support should not set an oversized kernel width."""
+
+    frame_results = [
+        FrameResult(
+            frame_index=index,
+            stride_number=index,
+            microstate_id="a",
+            microstate_label="a",
+            phi_degrees=None,
+            psi_degrees=None,
+            reference_energy_kj_mol=0.0,
+            perturbed_energy_kj_mol=0.0,
+            delta_u_kj_mol=0.0,
+            reference_relaxed_phi_degrees=None,
+            reference_relaxed_psi_degrees=None,
+            perturbed_relaxed_phi_degrees=None,
+            perturbed_relaxed_psi_degrees=None,
+            metadata={"assignment_measurements": {"ends": ends, "turn": turn}},
+        )
+        for index, (ends, turn) in enumerate(
+            ((float(value), 0.0) for value in np.linspace(0.0, 20.0, 200))
+        )
+    ]
+
+    _, _, x_edges, y_edges, metadata = _gaussian_kernel_projected_surfaces(
+        frame_results=frame_results,
+        reference_probability_by_state={"a": 1.0},
+        target_probability_by_state={"a": 1.0},
+        temperature_kelvin=300.0,
+        weight_treatment="raw",
+        bins=72,
+        max_points=500,
+        x_name="ends",
+        y_name="turn",
+        bandwidth_spec="auto",
+        bandwidth_rule="state-adaptive",
+        bandwidth_scale=1.0,
+        bandwidth_min_bins=0.5,
+        bandwidth_max_bins=1.25,
+    )
+    assert metadata is not None
+    x_bin_width = float(np.median(np.diff(x_edges)))
+    state_meta = metadata["cv_frame_projection_state_bandwidths"]["a"]
+    assert state_meta["bandwidth"][0] <= 1.25 * x_bin_width + 1.0e-12
+
+
+def test_projected_surface_display_smoothing_sigma() -> None:
+    grid = np.zeros((10, 10), dtype=float)
+    grid[4, 4] = 1.0
+    smoothed = _smooth_probability_surface(grid, sigma_bins=1.0)
+    assert smoothed.sum() == pytest.approx(1.0)
+    assert int(np.count_nonzero(smoothed > 1.0e-6)) > 1
 
 
 @pytest.mark.parametrize(

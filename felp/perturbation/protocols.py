@@ -12,6 +12,7 @@ from felp.core import (
     DihedralRestraintSpec,
     DistanceRestraintSpec,
     MobilityConfig,
+    MutationSpec,
     mutation_target_family,
     normalize_mutation_target_name,
 )
@@ -19,6 +20,18 @@ from felp.conversion import StructureConversionService
 from .validation import ensure_measurement_matches_restraints, target_cv_measurement_from_restraints
 
 _LOCKED_CV_TOLERANCE_DEGREES = 1.0e-3
+_MUTATION_PRESERVED_VARIANT_NAMES = frozenset(
+    {
+        "LOWER_TERMINUS_VARIANT",
+        "UPPER_TERMINUS_VARIANT",
+        "ACETYLATED_NTERMINUS_VARIANT",
+        "ACETYLATED_NTERMINUS_CONNECTION_VARIANT",
+        "METHYLATED_NTERM_VARIANT",
+        "METHYLATED_CTERMINUS_VARIANT",
+        "DIMETHYLATED_CTERMINUS_VARIANT",
+        "C_METHYLAMIDATION",
+    }
+)
 
 
 def _import_pyrosetta():
@@ -29,12 +42,23 @@ def _import_pyrosetta():
     return pyrosetta, AtomID, MutateResidue
 
 
+def _combine_or_residue_selectors(selectors: list, selectors_module) -> object:
+    if not selectors:
+        raise ValueError("At least one residue selector is required.")
+    if len(selectors) == 1:
+        return selectors[0]
+    combined = selectors_module.OrResidueSelector(selectors[0], selectors[1])
+    for selector in selectors[2:]:
+        combined = selectors_module.OrResidueSelector(combined, selector)
+    return combined
+
+
 @dataclass
 class PyRosettaPerturbationProtocol:
     """Prepare reference poses and apply residue perturbations."""
 
     conversion_service: StructureConversionService
-    target_residue_number: int
+    mutation_residue_numbers: tuple[int, ...]
     score_function_name: str = "ref2015"
     perturbation_mode: str = "relax"
     relax_iterations: int = 5
@@ -58,6 +82,50 @@ class PyRosettaPerturbationProtocol:
         return normalize_mutation_target_name(
             pose.residue(residue_number).name3().strip().upper()
         )
+
+    def _mutation_preserved_variant_names(self, pose, residue_number: int) -> tuple[str, ...]:
+        """Return terminal/cap-style Rosetta variants that mutation must preserve."""
+
+        try:
+            residue_type = pose.residue(residue_number).type()
+            variant_types = residue_type.variant_types()
+        except Exception:
+            return ()
+        preserved = []
+        for variant in variant_types:
+            variant_name = str(variant)
+            if variant_name in _MUTATION_PRESERVED_VARIANT_NAMES:
+                preserved.append(variant_name)
+        return tuple(preserved)
+
+    def _restore_mutation_preserved_variants(
+        self,
+        pyrosetta,
+        pose,
+        residue_number: int,
+        variant_names: tuple[str, ...],
+    ) -> None:
+        """Reapply terminal/cap variants dropped by Rosetta's MutateResidue mover."""
+
+        if not variant_names:
+            return
+        current_variants = set(
+            self._mutation_preserved_variant_names(pose, residue_number)
+        )
+        add_variant = pyrosetta.rosetta.core.pose.add_variant_type_to_pose_residue
+        variant_type = pyrosetta.rosetta.core.chemical.VariantType
+        for variant_name in variant_names:
+            if variant_name in current_variants:
+                continue
+            try:
+                variant = getattr(variant_type, variant_name)
+            except AttributeError as exc:
+                raise ConversionError(
+                    f"Cannot preserve Rosetta residue variant {variant_name!r} "
+                    f"while mutating residue {residue_number}: variant type is not "
+                    "available in this PyRosetta build."
+                ) from exc
+            add_variant(pose, variant, residue_number)
 
     def _cv_residue_number(self, spec: DihedralRestraintSpec) -> int:
         if spec.kind == "phi":
@@ -165,27 +233,33 @@ class PyRosettaPerturbationProtocol:
         )
         return dihedral_specs, distance_specs
 
-    def _build_mobile_selector(self, pyrosetta):
-        selectors = pyrosetta.rosetta.core.select.residue_selector
+    def _build_mobile_selector(self, pyrosetta, pose=None):
+        selectors_module = pyrosetta.rosetta.core.select.residue_selector
+        anchors = tuple(int(number) for number in self.mutation_residue_numbers)
         if self.mobility.mode == "target_only":
-            return selectors.ResidueIndexSelector(str(self.target_residue_number))
+            residue_text = ",".join(str(number) for number in sorted(set(anchors)))
+            return selectors_module.ResidueIndexSelector(residue_text)
         if self.mobility.mode == "sequence_window":
-            first_residue = max(
-                1,
-                self.target_residue_number - int(self.mobility.sequence_window),
-            )
-            last_residue = self.target_residue_number + int(
-                self.mobility.sequence_window
-            )
-            return selectors.ResidueIndexSelector(
-                ",".join(str(residue) for residue in range(first_residue, last_residue + 1))
-            )
-        target_selector = selectors.ResidueIndexSelector(str(self.target_residue_number))
-        mobile_selector = selectors.NeighborhoodResidueSelector()
-        mobile_selector.set_focus_selector(target_selector)
-        mobile_selector.set_distance(self.mobility.radius_angstrom)
-        mobile_selector.set_include_focus_in_subset(True)
-        return mobile_selector
+            mobile_numbers: set[int] = set()
+            window = int(self.mobility.sequence_window)
+            total_residue = int(pose.total_residue()) if pose is not None else None
+            for anchor in anchors:
+                first_residue = max(1, anchor - window)
+                last_residue = anchor + window
+                if total_residue is not None:
+                    last_residue = min(total_residue, last_residue)
+                mobile_numbers.update(range(first_residue, last_residue + 1))
+            residue_text = ",".join(str(number) for number in sorted(mobile_numbers))
+            return selectors_module.ResidueIndexSelector(residue_text)
+        neighborhood_selectors: list = []
+        for anchor in anchors:
+            target_selector = selectors_module.ResidueIndexSelector(str(anchor))
+            mobile_selector = selectors_module.NeighborhoodResidueSelector()
+            mobile_selector.set_focus_selector(target_selector)
+            mobile_selector.set_distance(self.mobility.radius_angstrom)
+            mobile_selector.set_include_focus_in_subset(True)
+            neighborhood_selectors.append(mobile_selector)
+        return _combine_or_residue_selectors(neighborhood_selectors, selectors_module)
 
     def _build_task_factory(self, pyrosetta, mobile_selector):
         operations = pyrosetta.rosetta.core.pack.task.operation
@@ -322,7 +396,7 @@ class PyRosettaPerturbationProtocol:
             context="Rosetta FastRelax",
         )
 
-        mobile_selector = self._build_mobile_selector(pyrosetta)
+        mobile_selector = self._build_mobile_selector(pyrosetta, working_pose)
         task_factory = self._build_task_factory(pyrosetta, mobile_selector)
         movemap = self._build_movemap(pyrosetta, working_pose, mobile_selector)
         score_function = self._score_function_with_constraints(
@@ -368,7 +442,7 @@ class PyRosettaPerturbationProtocol:
             context="Rosetta repack",
         )
 
-        mobile_selector = self._build_mobile_selector(pyrosetta)
+        mobile_selector = self._build_mobile_selector(pyrosetta, working_pose)
         task_factory = self._build_task_factory(pyrosetta, mobile_selector)
         packer_task = task_factory.create_task_and_apply_taskoperations(working_pose)
         score_function = self._score_function_with_constraints(
@@ -421,45 +495,58 @@ class PyRosettaPerturbationProtocol:
     def apply_perturbation(
         self,
         pose,
-        target_residue_number: int,
-        target_residue_name: str,
+        mutations: tuple[MutationSpec, ...],
         restraint_specs: Iterable[DihedralRestraintSpec | DistanceRestraintSpec],
         frame_index: int,
     ):
-        """Mutate the target residue and prepare the perturbed pose."""
+        """Mutate all requested residues and prepare the perturbed pose."""
         mutated_pose = self.mutate_pose(
             pose,
-            target_residue_number,
-            target_residue_name,
+            mutations,
             restraint_specs,
         )
+        suffix_parts = tuple(
+            f"res{spec.residue_number}_{spec.target_residue_name.lower()}" for spec in mutations
+        )
+        suffix_label = "_".join(suffix_parts)
         return self._run_perturbation_protocol(
             mutated_pose,
             restraint_specs,
             frame_index,
-            f"mutated_{target_residue_name.lower()}_{self.perturbation_mode}",
+            f"mutated_{suffix_label}_{self.perturbation_mode}",
         )
 
     def mutate_pose(
         self,
         pose,
-        target_residue_number: int,
-        target_residue_name: str,
+        mutations: tuple[MutationSpec, ...],
         restraint_specs: Iterable[DihedralRestraintSpec | DistanceRestraintSpec] = (),
     ):
-        """Mutate the target residue while preserving all configured CV targets."""
-        expected = normalize_mutation_target_name(target_residue_name)
-        observed = self._observed_residue_name(pose, target_residue_number)
+        """Mutate residues in deterministic configuration order."""
+
         mutated_pose = pose.clone()
-        if observed != expected:
-            self.conversion_service.ensure_pyrosetta_initialized()
-            _, _, MutateResidue = _import_pyrosetta()
-            rosetta_target_name = self.conversion_service.resolve_rosetta_residue_type_name(
-                target_residue_name,
-                context="mutation target",
-            )
-            mutate_mover = MutateResidue(target_residue_number, rosetta_target_name)
-            mutate_mover.apply(mutated_pose)
+        for spec in mutations:
+            expected = normalize_mutation_target_name(spec.target_residue_name)
+            observed = self._observed_residue_name(mutated_pose, spec.residue_number)
+            if observed != expected:
+                variant_names = self._mutation_preserved_variant_names(
+                    mutated_pose,
+                    spec.residue_number,
+                )
+                self.conversion_service.ensure_pyrosetta_initialized()
+                pyrosetta, _, MutateResidue = _import_pyrosetta()
+                rosetta_target_name = self.conversion_service.resolve_rosetta_residue_type_name(
+                    expected,
+                    context="mutation target",
+                )
+                mutate_mover = MutateResidue(spec.residue_number, rosetta_target_name)
+                mutate_mover.apply(mutated_pose)
+                self._restore_mutation_preserved_variants(
+                    pyrosetta,
+                    mutated_pose,
+                    spec.residue_number,
+                    variant_names,
+                )
         dihedral_specs, _ = self._split_restraint_specs(tuple(restraint_specs))
         self._enforce_target_backbone_cvs(mutated_pose, dihedral_specs)
         self._assert_locked_backbone_cvs(
@@ -472,28 +559,37 @@ class PyRosettaPerturbationProtocol:
     def enforce_residue_identity(
         self,
         pose,
-        target_residue_number: int,
-        target_residue_name: str | None,
-        restraint_specs: Iterable[DihedralRestraintSpec | DistanceRestraintSpec] = (),
+        mutations: tuple[MutationSpec, ...],
+        restraint_specs: Iterable[
+            DihedralRestraintSpec | DistanceRestraintSpec
+        ] = (),
     ):
-        """Return a pose whose target residue matches the requested chemistry."""
+        """Return a pose enforcing optional original identities at mutation sites."""
 
-        if target_residue_name is None:
-            return pose
-        expected = normalize_mutation_target_name(target_residue_name)
-        observed = self._observed_residue_name(pose, target_residue_number)
-        if observed == expected:
-            return pose
-        if mutation_target_family(observed) != mutation_target_family(expected):
-            raise ConversionError(
-                f"Cannot enforce residue {expected!r} at Rosetta residue index "
-                f"{target_residue_number}: found incompatible input residue {observed!r}. "
-                "FELP can normalize protonation/tautomer variants within one residue "
-                "family (for example HIS -> HIE/HID), but not replace a different amino acid."
+        current = pose
+        for spec in mutations:
+            if spec.original_residue_name is None:
+                continue
+            expected = normalize_mutation_target_name(spec.original_residue_name)
+            observed = self._observed_residue_name(current, spec.residue_number)
+            if observed == expected:
+                continue
+            if mutation_target_family(observed) != mutation_target_family(expected):
+                raise ConversionError(
+                    f"Cannot enforce residue {expected!r} at Rosetta residue index "
+                    f"{spec.residue_number}: found incompatible input residue {observed!r}. "
+                    "FELP can normalize protonation/tautomer variants within one residue "
+                    "family (for example HIS -> HIE/HID), but not replace a different amino acid."
+                )
+            current = self.mutate_pose(
+                current,
+                (
+                    MutationSpec(
+                        residue_number=spec.residue_number,
+                        target_residue_name=expected,
+                        original_residue_name=None,
+                    ),
+                ),
+                restraint_specs,
             )
-        return self.mutate_pose(
-            pose,
-            target_residue_number,
-            expected,
-            restraint_specs,
-        )
+        return current

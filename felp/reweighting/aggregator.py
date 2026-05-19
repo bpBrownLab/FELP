@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 import math
 from typing import Any, Iterable
@@ -475,12 +476,41 @@ def _apply_state_qc_policy(
     return remaining, original_report, final_report, tuple(excluded)
 
 
+def _qc_state_task(
+    task: tuple[str, list[FrameResult], float, ReweightingQCConfig],
+) -> tuple[str, list[FrameResult], dict[str, object]]:
+    """Apply by-state QC for one state; suitable for thread-pool execution."""
+
+    state_id, original_state_frames, beta, qc_config = task
+    (
+        filtered_state_frames,
+        original_qc_report,
+        final_qc_report,
+        excluded_frame_indices,
+    ) = _apply_state_qc_policy(
+        original_state_frames,
+        beta=beta,
+        config=qc_config,
+    )
+    return (
+        state_id,
+        filtered_state_frames,
+        {
+            "original_qc_report": original_qc_report,
+            "final_qc_report": final_qc_report,
+            "excluded_frame_indices": excluded_frame_indices,
+            "original_frame_count": len(original_state_frames),
+        },
+    )
+
+
 @dataclass
 class ReweightingAggregator:
     """Aggregate per-frame deltaU values into reweighted microstate populations."""
 
     temperature_kelvin: float
     qc_config: ReweightingQCConfig = field(default_factory=ReweightingQCConfig)
+    workers: int = 1
 
     @property
     def beta(self) -> float:
@@ -532,25 +562,24 @@ class ReweightingAggregator:
 
         qc_by_state: dict[str, dict[str, object]] = {}
         filtered_grouped: dict[str, list[FrameResult]] = {}
-        for definition in atlas.definitions:
-            original_state_frames = list(grouped.get(definition.state_id, []))
+        qc_tasks = [
             (
-                filtered_state_frames,
-                original_qc_report,
-                final_qc_report,
-                excluded_frame_indices,
-            ) = _apply_state_qc_policy(
-                original_state_frames,
-                beta=self.beta,
-                config=self.qc_config,
+                definition.state_id,
+                list(grouped.get(definition.state_id, [])),
+                self.beta,
+                self.qc_config,
             )
-            filtered_grouped[definition.state_id] = filtered_state_frames
-            qc_by_state[definition.state_id] = {
-                "original_qc_report": original_qc_report,
-                "final_qc_report": final_qc_report,
-                "excluded_frame_indices": excluded_frame_indices,
-                "original_frame_count": len(original_state_frames),
-            }
+            for definition in atlas.definitions
+        ]
+        worker_count = max(1, int(self.workers))
+        if worker_count > 1 and len(qc_tasks) > 1:
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                qc_results = list(executor.map(_qc_state_task, qc_tasks))
+        else:
+            qc_results = [_qc_state_task(task) for task in qc_tasks]
+        for state_id, filtered_state_frames, qc_state in qc_results:
+            filtered_grouped[state_id] = filtered_state_frames
+            qc_by_state[state_id] = qc_state
 
         filtered_eligible_frames = [
             frame

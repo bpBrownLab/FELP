@@ -393,6 +393,7 @@ def save_pcolormesh_landscape(
     fel_max_energy_kj_mol: float | None = None,
     colormap: str | None = None,
     symmetric_zero_center: bool = False,
+    plot_style: str = "default",
 ) -> str:
     """Render a 2D surface on a histogram grid (e.g. probability or free energy)."""
 
@@ -403,7 +404,52 @@ def save_pcolormesh_landscape(
     ax.set_facecolor(_FEL_BACKGROUND_COLOR)
     z_plot = np.ma.masked_invalid(np.asarray(z, dtype=float).T)
     colorbar_extend: str | None = None
-    if fel_max_energy_kj_mol is not None:
+    if plot_style == "contour":
+        x_centers = 0.5 * (np.asarray(x_edges[:-1]) + np.asarray(x_edges[1:]))
+        y_centers = 0.5 * (np.asarray(y_edges[:-1]) + np.asarray(y_edges[1:]))
+        x_grid, y_grid = np.meshgrid(x_centers, y_centers, indexing="xy")
+        if fel_max_energy_kj_mol is not None:
+            cap = float(fel_max_energy_kj_mol)
+            z_plot = np.ma.masked_where(z_plot > cap, z_plot)
+            levels = np.linspace(0.0, cap, 41)
+            norm = mcolors.Normalize(vmin=0.0, vmax=cap, clip=False)
+            cmap = _copy_colormap_for_fel_cap(cmap_name)
+            colorbar_extend = "max"
+        elif symmetric_zero_center:
+            flat = np.ma.filled(z_plot, np.nan)
+            absmax = float(np.nanmax(np.abs(flat)))
+            if not math.isfinite(absmax) or absmax == 0.0:
+                absmax = 1.0e-15
+            levels = np.linspace(-absmax, absmax, 41)
+            norm = mcolors.Normalize(vmin=-absmax, vmax=absmax, clip=False)
+            cmap = _copy_colormap_for_fel_cap(cmap_name)
+        else:
+            flat = np.ma.filled(z_plot, np.nan)
+            finite = flat[np.isfinite(flat)]
+            if finite.size:
+                vmin = float(np.min(finite))
+                vmax = float(np.max(finite))
+            else:
+                vmin, vmax = 0.0, 1.0
+            if vmin == vmax:
+                delta = max(abs(vmin) * 0.05, 1.0e-15)
+                vmin -= delta
+                vmax += delta
+            levels = np.linspace(vmin, vmax, 41)
+            norm = mcolors.Normalize(vmin=vmin, vmax=vmax, clip=False)
+            cmap = _copy_colormap_for_fel_cap(cmap_name)
+        image = ax.contourf(
+            x_grid,
+            y_grid,
+            z_plot,
+            levels=levels,
+            cmap=cmap,
+            norm=norm,
+            extend=colorbar_extend or "neither",
+        )
+    elif plot_style != "default":
+        raise ValueError(f"Unknown plot_style {plot_style!r}.")
+    elif fel_max_energy_kj_mol is not None:
         cap = float(fel_max_energy_kj_mol)
         z_plot = np.ma.masked_where(z_plot >= cap, z_plot)
         cmap = _copy_colormap_for_fel_cap(cmap_name)
@@ -411,7 +457,7 @@ def save_pcolormesh_landscape(
             x_edges,
             y_edges,
             z_plot,
-            shading="auto",
+            shading="flat",
             cmap=cmap,
             norm=mcolors.Normalize(vmin=0.0, vmax=cap, clip=False),
             antialiased=False,
@@ -427,7 +473,7 @@ def save_pcolormesh_landscape(
             x_edges,
             y_edges,
             z_plot,
-            shading="auto",
+            shading="flat",
             cmap=cmap_name,
             norm=norm,
         )
@@ -436,7 +482,7 @@ def save_pcolormesh_landscape(
             x_edges,
             y_edges,
             z_plot,
-            shading="auto",
+            shading="flat",
             cmap=cmap_name,
         )
     ax.set_xlabel(xlabel)

@@ -7,7 +7,7 @@ import pytest
 
 from felp.conversion import StructureConversionService
 from felp.conversion import service as conversion_service_module
-from felp.conversion.service import _import_parmed
+from felp.conversion.service import _import_parmed, _pose_with_sequential_pdb_info
 from felp.core import ConversionError
 from tests.fake_rosetta_bridge import (
     FakeAtomID,
@@ -132,6 +132,19 @@ def test_resolve_rosetta_residue_type_name_prefers_canonical_protonated_acid_var
         )
         == "ASP_P2"
     )
+
+
+def test_pose_with_sequential_pdb_info_rewrites_bridge_residue_numbers() -> None:
+    residue_types, pose = _build_roundtrip_pose()
+    del residue_types
+    pose.pdb_info().number(1, 0)
+    pose.pdb_info().number(2, 9)
+
+    bridge_pose = _pose_with_sequential_pdb_info(pose)
+
+    assert bridge_pose.pdb_info().number(1) == 1
+    assert bridge_pose.pdb_info().number(2) == 2
+    assert bridge_pose.pdb_info().chain(1) == "A"
 
 
 def test_validate_rosetta_structure_residue_types_passes_when_exact_type_is_loaded(

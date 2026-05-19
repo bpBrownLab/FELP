@@ -1245,6 +1245,93 @@ def test_build_plot_configs_from_cli(tmp_path: Path) -> None:
     assert md_kl_config.kl_energy_unit == "kj_mol"
 
 
+def test_build_run_config_repeatable_mutations_normalize_primary_cv_site(tmp_path: Path) -> None:
+    topology = tmp_path / "input.pdb"
+    trajectory = tmp_path / "input.xtc"
+    topology.write_text("placeholder\n", encoding="utf-8")
+    trajectory.write_text("placeholder\n", encoding="utf-8")
+    parser = build_parser()
+    namespace = parser.parse_args(
+        [
+            "run",
+            "--topology-file",
+            str(topology),
+            "--trajectory-file",
+            str(trajectory),
+            "--mutation",
+            "5:GLY:ALA",
+            "--mutation",
+            "8::SER",
+            "--output-dir",
+            str(tmp_path / "out"),
+            "--prior-probability-mode",
+            "raw_counts",
+        ]
+    )
+    config = build_run_config(namespace)
+    assert [
+        (m.residue_number, m.target_residue_name, m.original_residue_name)
+        for m in config.perturbation.mutations
+    ] == [
+        (5, "ALA", "GLY"),
+        (8, "SER", None),
+    ]
+    assert config.microstates.target_residue_number == 5
+    assert [spec.residue_number for spec in config.restraints.cv_specs] == [5, 5]
+
+
+def test_build_run_config_rejects_mutation_with_legacy_target_flags(tmp_path: Path) -> None:
+    topology = tmp_path / "input.pdb"
+    trajectory = tmp_path / "input.xtc"
+    topology.write_text("placeholder\n", encoding="utf-8")
+    trajectory.write_text("placeholder\n", encoding="utf-8")
+    parser = build_parser()
+    namespace = parser.parse_args(
+        [
+            "run",
+            "--topology-file",
+            str(topology),
+            "--trajectory-file",
+            str(trajectory),
+            "--mutation",
+            "2::ALA",
+            "--target-residue-number",
+            "2",
+            "--target-residue-name",
+            "ALA",
+            "--output-dir",
+            str(tmp_path / "out"),
+            "--prior-probability-mode",
+            "raw_counts",
+        ]
+    )
+    with pytest.raises(ConfigurationError, match="either repeatable"):
+        build_run_config(namespace)
+
+
+def test_build_run_config_requires_legacy_targets_without_mutations(tmp_path: Path) -> None:
+    topology = tmp_path / "input.pdb"
+    trajectory = tmp_path / "input.xtc"
+    topology.write_text("placeholder\n", encoding="utf-8")
+    trajectory.write_text("placeholder\n", encoding="utf-8")
+    parser = build_parser()
+    namespace = parser.parse_args(
+        [
+            "run",
+            "--topology-file",
+            str(topology),
+            "--trajectory-file",
+            str(trajectory),
+            "--output-dir",
+            str(tmp_path / "out"),
+            "--prior-probability-mode",
+            "raw_counts",
+        ]
+    )
+    with pytest.raises(ConfigurationError, match="--target-residue-number"):
+        build_run_config(namespace)
+
+
 def test_build_felp_plot_config_normalizes_cv_spec_strings(tmp_path: Path) -> None:
     summary_csv = tmp_path / "microstate_summary.csv"
     summary_csv.write_text("label,reference_probability,target_probability\n", encoding="utf-8")

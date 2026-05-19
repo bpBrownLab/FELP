@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from collections import Counter
 from dataclasses import replace
 import json
+import math
 import os
 import sys
 import time
 from typing import Any, Sequence
 
 from felp.cli import (
+    build_ess_compare_config,
     build_felp_plot_config,
     build_md_kl_plot_config,
     build_microstate_config,
@@ -25,7 +28,12 @@ from felp.core import ConfigurationError, OutputConfig
 from felp.io import ResultsWriter, TrajectoryLoader, load_frame_results_csv
 from felp.msm import PyEMMAPipeline, export_state_samples, load_bundle
 from felp.parallel import FrameExecutor
-from felp.plotting import generate_felp_plots, generate_md_kl_plot, generate_msm_plots
+from felp.plotting import (
+    generate_ess_comparison_plots,
+    generate_felp_plots,
+    generate_md_kl_plot,
+    generate_msm_plots,
+)
 from felp.protocol_summary import build_protocol_summary
 from felp.reweighting import (
     MicrostateAtlas,
@@ -472,6 +480,10 @@ def _repartition_frame_results(
         if fast is not None:
             return fast
 
+    fast = _repartition_frame_results_to_complete_2d_grid(frame_results, atlas)
+    if fast is not None:
+        return fast
+
     repartitioned: list = []
     unassigned_count = 0
     for result in frame_results:
@@ -512,6 +524,172 @@ def _repartition_frame_results(
             f"to the new atlas",
             file=sys.stderr,
         )
+    return repartitioned
+
+
+def _merge_edge_value(existing: float | None, value: float) -> float | None:
+    """Merge shared grid-edge values while tolerating tiny JSON roundoff."""
+
+    if existing is None:
+        return float(value)
+    if math.isclose(float(existing), float(value), rel_tol=0.0, abs_tol=1.0e-10):
+        return float(existing)
+    return None
+
+
+def _auto_complete_2d_grid_spec(
+    atlas: "MicrostateAtlas",
+) -> tuple[tuple[str, str], list[float], list[float], dict[tuple[int, int], Any]] | None:
+    """Return direct-binning metadata for complete 2D auto grids when available."""
+
+    definitions = tuple(atlas.definitions)
+    if not definitions:
+        return None
+
+    first_indices = definitions[0].metadata.get("bin_indices")
+    if not isinstance(first_indices, dict) or len(first_indices) != 2:
+        return None
+    cv_names = tuple(str(name) for name in first_indices)
+    if len(set(cv_names)) != 2:
+        return None
+    x_name, y_name = cv_names
+
+    by_index: dict[tuple[int, int], Any] = {}
+    x_edges_by_position: dict[int, float] = {}
+    y_edges_by_position: dict[int, float] = {}
+
+    for definition in definitions:
+        bin_indices = definition.metadata.get("bin_indices")
+        if not isinstance(bin_indices, dict) or set(bin_indices) != set(cv_names):
+            return None
+        if set(definition.cv_ranges) != set(cv_names):
+            return None
+        try:
+            x_index = int(bin_indices[x_name])
+            y_index = int(bin_indices[y_name])
+            x_lower, x_upper = (
+                float(value) for value in definition.cv_ranges[x_name]
+            )
+            y_lower, y_upper = (
+                float(value) for value in definition.cv_ranges[y_name]
+            )
+        except Exception:
+            return None
+        if x_index < 0 or y_index < 0 or x_upper < x_lower or y_upper < y_lower:
+            return None
+
+        key = (x_index, y_index)
+        if key in by_index:
+            return None
+        by_index[key] = definition
+
+        for position, value, edge_map in (
+            (x_index, x_lower, x_edges_by_position),
+            (x_index + 1, x_upper, x_edges_by_position),
+            (y_index, y_lower, y_edges_by_position),
+            (y_index + 1, y_upper, y_edges_by_position),
+        ):
+            merged = _merge_edge_value(edge_map.get(position), value)
+            if merged is None:
+                return None
+            edge_map[position] = merged
+
+    x_bin_count = max(index[0] for index in by_index) + 1
+    y_bin_count = max(index[1] for index in by_index) + 1
+    if len(by_index) != x_bin_count * y_bin_count:
+        return None
+    if set(x_edges_by_position) != set(range(x_bin_count + 1)):
+        return None
+    if set(y_edges_by_position) != set(range(y_bin_count + 1)):
+        return None
+    if set(by_index) != {
+        (x_index, y_index)
+        for x_index in range(x_bin_count)
+        for y_index in range(y_bin_count)
+    }:
+        return None
+
+    x_edges = [x_edges_by_position[index] for index in range(x_bin_count + 1)]
+    y_edges = [y_edges_by_position[index] for index in range(y_bin_count + 1)]
+    if any(
+        upper < lower
+        for lower, upper in zip(x_edges[:-1], x_edges[1:], strict=True)
+    ):
+        return None
+    if any(
+        upper < lower
+        for lower, upper in zip(y_edges[:-1], y_edges[1:], strict=True)
+    ):
+        return None
+
+    return (x_name, y_name), x_edges, y_edges, by_index
+
+
+def _edge_bin_index(edges: list[float], value: float) -> int | None:
+    """Return the atlas-compatible bin index for a value on monotonic edges."""
+
+    if not math.isfinite(value) or value < edges[0] or value > edges[-1]:
+        return None
+    return min(max(bisect_left(edges, value) - 1, 0), len(edges) - 2)
+
+
+def _repartition_frame_results_to_complete_2d_grid(
+    frame_results: list,
+    atlas: "MicrostateAtlas",
+) -> list | None:
+    """Fast path for materialized complete 2D auto microstate grids."""
+
+    grid_spec = _auto_complete_2d_grid_spec(atlas)
+    if grid_spec is None:
+        return None
+    (x_name, y_name), x_edges, y_edges, by_index = grid_spec
+
+    repartitioned: list = []
+    unassigned_count = 0
+    for result in frame_results:
+        metadata = getattr(result, "metadata", {}) or {}
+        measurements = _stored_assignment_measurements(result)
+        if measurements is None or x_name not in measurements or y_name not in measurements:
+            repartitioned.append(result)
+            continue
+
+        x_index = _edge_bin_index(x_edges, float(measurements[x_name]))
+        y_index = _edge_bin_index(y_edges, float(measurements[y_name]))
+        if x_index is None or y_index is None:
+            unassigned_count += 1
+            repartitioned.append(result)
+            continue
+        definition = by_index[(x_index, y_index)]
+
+        updated_metadata = dict(metadata)
+        updated_metadata["assignment_measurements"] = measurements
+        updated_metadata["cv_centers"] = definition.cv_centers
+        if definition.phi_center is not None:
+            updated_metadata["phi_center"] = definition.phi_center
+        if definition.psi_center is not None:
+            updated_metadata["psi_center"] = definition.psi_center
+        updated_metadata["plot_x"] = definition.plot_x
+        updated_metadata["plot_y"] = definition.plot_y
+        repartitioned.append(
+            replace(
+                result,
+                microstate_id=definition.state_id,
+                microstate_label=definition.label,
+                metadata=updated_metadata,
+            )
+        )
+
+    if unassigned_count > 0:
+        print(
+            f"[FELP] fast 2D-grid repartition: {unassigned_count} frame(s) could not "
+            "be assigned to the new grid",
+            file=sys.stderr,
+        )
+    print(
+        f"[FELP] fast 2D-grid repartition: assigned {len(repartitioned)} frame(s) "
+        f"using direct {len(x_edges) - 1}x{len(y_edges) - 1} binning",
+        file=sys.stderr,
+    )
     return repartitioned
 
 
@@ -728,6 +906,7 @@ def summarize_results(namespace) -> dict:
     microstate_results = ReweightingAggregator(
         namespace.temperature_kelvin,
         qc_config=build_reweighting_qc_config(namespace),
+        workers=getattr(namespace, "workers", 1),
     ).aggregate(
         frame_results,
         atlas,
@@ -806,6 +985,14 @@ def plot_md_kl(namespace) -> dict:
     return summary
 
 
+def compare_ess_outputs(namespace) -> dict:
+    """Generate ESS and overlap comparison plots across FELP runs."""
+
+    summary = generate_ess_comparison_plots(build_ess_compare_config(namespace))
+    _write_stdout(summary)
+    return summary
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """CLI entry point for the FELP application."""
     parser = build_parser()
@@ -837,6 +1024,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if namespace.command == "md-kl-plot":
         plot_md_kl(namespace)
+        return 0
+    if namespace.command == "ess-compare":
+        compare_ess_outputs(namespace)
         return 0
     parser.error(f"Unknown command: {namespace.command}")
     return 2

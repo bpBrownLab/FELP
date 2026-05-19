@@ -1,13 +1,16 @@
 """Plotting utilities for MSM preprocessing and FELP postprocessing."""
 
+from .ess import ESSCompareConfig, generate_ess_comparison_plots
 from .felp import FELPPlotConfig, generate_felp_plots
 from .md_kl import MDKLPlotConfig, generate_md_kl_plot
 from .msm import MSMPlotConfig, generate_msm_plots
 
 __all__ = [
+    "ESSCompareConfig",
     "FELPPlotConfig",
     "MDKLPlotConfig",
     "MSMPlotConfig",
+    "generate_ess_comparison_plots",
     "generate_felp_plots",
     "generate_md_kl_plot",
     "generate_msm_plots",

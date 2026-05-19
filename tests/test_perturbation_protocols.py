@@ -10,6 +10,7 @@ from felp.core import (
     DihedralRestraintSpec,
     DistanceRestraintSpec,
     MobilityConfig,
+    MutationSpec,
 )
 from felp.perturbation.protocols import PyRosettaPerturbationProtocol
 
@@ -185,7 +186,7 @@ def test_relax_pose_uses_locked_movemap_and_task_factory(monkeypatch) -> None:
 
     protocol = PyRosettaPerturbationProtocol(
         conversion_service=_DummyConversionService(),
-        target_residue_number=2,
+        mutation_residue_numbers=(2,),
         score_function_name="ref2015",
         perturbation_mode="relax",
         relax_iterations=3,
@@ -197,7 +198,7 @@ def test_relax_pose_uses_locked_movemap_and_task_factory(monkeypatch) -> None:
     monkeypatch.setattr(
         protocol,
         "_build_mobile_selector",
-        lambda pyrosetta: selector,
+        lambda pyrosetta, pose=None: selector,
     )
     monkeypatch.setattr(
         protocol,
@@ -275,7 +276,7 @@ def test_repack_pose_uses_packrotamers_trials(monkeypatch) -> None:
 
     protocol = PyRosettaPerturbationProtocol(
         conversion_service=_DummyConversionService(),
-        target_residue_number=2,
+        mutation_residue_numbers=(2,),
         perturbation_mode="repack",
         repack_trials=4,
     )
@@ -283,7 +284,11 @@ def test_repack_pose_uses_packrotamers_trials(monkeypatch) -> None:
     task_factory = SimpleNamespace(
         create_task_and_apply_taskoperations=lambda pose: "packer-task"
     )
-    monkeypatch.setattr(protocol, "_build_mobile_selector", lambda pyrosetta: selector)
+    monkeypatch.setattr(
+        protocol,
+        "_build_mobile_selector",
+        lambda pyrosetta, pose=None: selector,
+    )
     monkeypatch.setattr(
         protocol,
         "_build_task_factory",
@@ -319,13 +324,98 @@ def test_mutate_pose_skips_identity_mutation(monkeypatch) -> None:
 
     protocol = PyRosettaPerturbationProtocol(
         conversion_service=_DummyConversionService(),
-        target_residue_number=2,
+        mutation_residue_numbers=(2,),
     )
-    result_pose = protocol.mutate_pose(_DummyPose(residue_name="GLY"), 2, "GLY", _restraint_specs())
+    result_pose = protocol.mutate_pose(
+        _DummyPose(residue_name="GLY"),
+        (MutationSpec(residue_number=2, target_residue_name="GLY"),),
+        _restraint_specs(),
+    )
 
     assert mutate_calls == []
     assert result_pose.phi(2) == -60.0
     assert result_pose.psi(2) == 140.0
+
+
+def test_mutate_pose_preserves_terminal_variants(monkeypatch) -> None:
+    applied_variants: list[tuple[int, str]] = []
+
+    class _VariantType:
+        LOWER_TERMINUS_VARIANT = "LOWER_TERMINUS_VARIANT"
+
+    class _FakeResidueType:
+        def __init__(self, variants: tuple[str, ...]) -> None:
+            self._variants = tuple(variants)
+
+        def variant_types(self) -> tuple[str, ...]:
+            return self._variants
+
+    class _FakeResidue:
+        def __init__(self, pose) -> None:
+            self._pose = pose
+
+        def name3(self) -> str:
+            return self._pose.residue_name
+
+        def type(self) -> _FakeResidueType:
+            return _FakeResidueType(tuple(self._pose.variants))
+
+    class _VariantPose:
+        def __init__(
+            self,
+            residue_name: str = "GLY",
+            variants: tuple[str, ...] = ("LOWER_TERMINUS_VARIANT",),
+        ) -> None:
+            self.residue_name = residue_name
+            self.variants = list(variants)
+
+        def clone(self):
+            return _VariantPose(self.residue_name, tuple(self.variants))
+
+        def residue(self, residue_number: int) -> _FakeResidue:
+            assert residue_number == 1
+            return _FakeResidue(self)
+
+    class _FakeMutateResidue:
+        def __init__(self, residue_number: int, residue_name: str) -> None:
+            self.residue_number = residue_number
+            self.residue_name = residue_name
+
+        def apply(self, pose) -> None:
+            assert self.residue_number == 1
+            pose.residue_name = self.residue_name
+            pose.variants = []
+
+    def _add_variant(pose, variant, residue_number: int) -> None:
+        assert residue_number == 1
+        pose.variants.append(str(variant))
+        applied_variants.append((residue_number, str(variant)))
+
+    fake_pyrosetta = SimpleNamespace(
+        rosetta=SimpleNamespace(
+            core=SimpleNamespace(
+                chemical=SimpleNamespace(VariantType=_VariantType),
+                pose=SimpleNamespace(add_variant_type_to_pose_residue=_add_variant),
+            )
+        )
+    )
+    monkeypatch.setattr(
+        "felp.perturbation.protocols._import_pyrosetta",
+        lambda: (fake_pyrosetta, object(), _FakeMutateResidue),
+    )
+
+    protocol = PyRosettaPerturbationProtocol(
+        conversion_service=_DummyConversionService(),
+        mutation_residue_numbers=(1,),
+    )
+    result_pose = protocol.mutate_pose(
+        _VariantPose(),
+        (MutationSpec(residue_number=1, target_residue_name="TYR"),),
+    )
+
+    assert result_pose.residue_name == "TYR"
+    assert result_pose.variants == ["LOWER_TERMINUS_VARIANT"]
+    assert applied_variants == [(1, "LOWER_TERMINUS_VARIANT")]
 
 
 def test_enforce_residue_identity_mutates_within_same_family(monkeypatch) -> None:
@@ -347,9 +437,12 @@ def test_enforce_residue_identity_mutates_within_same_family(monkeypatch) -> Non
 
     protocol = PyRosettaPerturbationProtocol(
         conversion_service=_DummyConversionService(),
-        target_residue_number=2,
+        mutation_residue_numbers=(2,),
     )
-    result_pose = protocol.enforce_residue_identity(_DummyPose(residue_name="HIS"), 2, "HIE")
+    result_pose = protocol.enforce_residue_identity(
+        _DummyPose(residue_name="HIS"),
+        (MutationSpec(residue_number=2, target_residue_name="ALA", original_residue_name="HIE"),),
+    )
 
     assert mutate_calls == [(2, "HIS_E")]
     assert result_pose.residue(2).name3() == "HIS_E"
@@ -374,9 +467,18 @@ def test_enforce_residue_identity_uses_rosetta_protonated_acid_name(monkeypatch)
 
     protocol = PyRosettaPerturbationProtocol(
         conversion_service=_DummyConversionService(),
-        target_residue_number=2,
+        mutation_residue_numbers=(2,),
     )
-    result_pose = protocol.enforce_residue_identity(_DummyPose(residue_name="ASP"), 2, "ASH")
+    result_pose = protocol.enforce_residue_identity(
+        _DummyPose(residue_name="ASP"),
+        (
+            MutationSpec(
+                residue_number=2,
+                target_residue_name="ALA",
+                original_residue_name="ASH",
+            ),
+        ),
+    )
 
     assert mutate_calls == [(2, "ASP_P2")]
     assert result_pose.residue(2).name3() == "ASP_P2"
@@ -426,7 +528,7 @@ def test_add_distance_constraints_uses_rosetta_sd_not_distance_spec_force_consta
     )
     protocol = PyRosettaPerturbationProtocol(
         conversion_service=_DummyConversionService(),
-        target_residue_number=2,
+        mutation_residue_numbers=(2,),
         rosetta_distance_constraint_sd_angstrom=0.002,
     )
     pose = _DistPose()
@@ -439,14 +541,23 @@ def test_add_distance_constraints_uses_rosetta_sd_not_distance_spec_force_consta
 def test_enforce_residue_identity_rejects_incompatible_family(monkeypatch) -> None:
     protocol = PyRosettaPerturbationProtocol(
         conversion_service=_DummyConversionService(),
-        target_residue_number=2,
+        mutation_residue_numbers=(2,),
     )
 
     with pytest.raises(ConversionError, match="incompatible input residue"):
-        protocol.enforce_residue_identity(_DummyPose(residue_name="GLU"), 2, "HIE")
+        protocol.enforce_residue_identity(
+            _DummyPose(residue_name="GLU"),
+            (
+                MutationSpec(
+                    residue_number=2,
+                    target_residue_name="ALA",
+                    original_residue_name="HIE",
+                ),
+            ),
+        )
 
 
-def test_sequence_window_mobility_uses_residue_index_selector() -> None:
+def test_sequence_window_mobility_clamps_to_pose_length() -> None:
     captured_indices: list[str] = []
 
     class _FakeResidueIndexSelector:
@@ -466,10 +577,106 @@ def test_sequence_window_mobility_uses_residue_index_selector() -> None:
     )
     protocol = PyRosettaPerturbationProtocol(
         conversion_service=_DummyConversionService(),
-        target_residue_number=4,
+        mutation_residue_numbers=(4, 10),
         mobility=MobilityConfig(mode="sequence_window", sequence_window=1),
     )
 
-    protocol._build_mobile_selector(fake_pyrosetta)
+    pose = SimpleNamespace(total_residue=lambda: 10)
+    protocol._build_mobile_selector(fake_pyrosetta, pose)
 
-    assert captured_indices == ["3,4,5"]
+    assert captured_indices == ["3,4,5,9,10"]
+
+
+class _BareMultiResiduePose:
+    def __init__(self, names_by_residue: dict[int, str]) -> None:
+        self._names = dict(names_by_residue)
+
+    def clone(self) -> "_BareMultiResiduePose":
+        return _BareMultiResiduePose(dict(self._names))
+
+    def residue(self, residue_number: int):
+        name = self._names[residue_number]
+        return SimpleNamespace(name3=lambda: name.upper(), atom_index=lambda _name: 3)
+
+
+def test_mutate_pose_orders_mutations_by_configuration(monkeypatch) -> None:
+    applied_order: list[int] = []
+
+    class _FakeMutateResidue:
+        def __init__(self, residue_number: int, residue_name: str) -> None:
+            self.residue_number = residue_number
+            self.residue_name = residue_name
+
+        def apply(self, pose) -> None:
+            applied_order.append(self.residue_number)
+
+    monkeypatch.setattr(
+        "felp.perturbation.protocols._import_pyrosetta",
+        lambda: (SimpleNamespace(), object(), _FakeMutateResidue),
+    )
+
+    protocol = PyRosettaPerturbationProtocol(
+        conversion_service=_DummyConversionService(),
+        mutation_residue_numbers=(7, 2),
+    )
+    mutations = (
+        MutationSpec(residue_number=7, target_residue_name="ALA"),
+        MutationSpec(residue_number=2, target_residue_name="GLY"),
+    )
+    pose = _BareMultiResiduePose({7: "GLY", 2: "ALA"})
+    protocol.mutate_pose(pose, mutations, ())
+
+    assert applied_order == [7, 2]
+
+
+def test_radius_mobility_combines_neighborhood_selectors() -> None:
+    captured: dict[str, list] = {"neighborhoods": [], "combined": []}
+
+    class _FakeNeighborhood:
+        def __init__(self) -> None:
+            captured["neighborhoods"].append(self)
+            self.focus = None
+
+        def set_focus_selector(self, selector) -> None:
+            self.focus = selector
+
+        def set_distance(self, value: float) -> None:
+            self.distance = value
+
+        def set_include_focus_in_subset(self, enabled: bool) -> None:
+            self.include_focus = enabled
+
+    class _FakeOr:
+        def __init__(self, lhs, rhs) -> None:
+            captured["combined"].append((lhs, rhs))
+            self.lhs = lhs
+            self.rhs = rhs
+
+    residue_selector_ns = SimpleNamespace(
+        NeighborhoodResidueSelector=_FakeNeighborhood,
+        ResidueIndexSelector=lambda text: ("index", text),
+        OrResidueSelector=_FakeOr,
+    )
+    fake_pyrosetta = SimpleNamespace(
+        rosetta=SimpleNamespace(
+            core=SimpleNamespace(
+                select=SimpleNamespace(residue_selector=residue_selector_ns),
+            )
+        ),
+    )
+
+    protocol = PyRosettaPerturbationProtocol(
+        conversion_service=_DummyConversionService(),
+        mutation_residue_numbers=(2, 11),
+        mobility=MobilityConfig(mode="radius", radius_angstrom=9.5),
+    )
+    merged = protocol._build_mobile_selector(fake_pyrosetta)
+
+    assert len(captured["neighborhoods"]) == 2
+    assert captured["neighborhoods"][0].focus == ("index", "2")
+    assert captured["neighborhoods"][1].focus == ("index", "11")
+    assert len(captured["combined"]) == 1
+    outer = merged
+    assert isinstance(outer, _FakeOr)
+    assert captured["neighborhoods"][0] in {outer.lhs, outer.rhs}
+    assert captured["neighborhoods"][1] in {outer.lhs, outer.rhs}

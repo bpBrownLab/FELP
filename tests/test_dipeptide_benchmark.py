@@ -17,6 +17,7 @@ from felp.core import (
     RestraintConfig,
     RosettaConfig,
     RunConfig,
+    default_backbone_cv_specs,
 )
 
 
@@ -47,15 +48,23 @@ def test_gly_to_ala_benchmark_workflow(tmp_path: Path) -> None:
             trajectory_files=((str(pdb_path),),),
             stride=1,
         ),
-        perturbation=PerturbationConfig(
+        perturbation=PerturbationConfig.from_legacy(
             target_residue_number=2,
             target_residue_name="ALA",
             original_residue_name="GLY",
         ),
         rosetta=RosettaConfig(),
-        restraints=RestraintConfig(force_constant=10000.0),
+        restraints=RestraintConfig(
+            cv_specs=default_backbone_cv_specs(2),
+            force_constant=10000.0,
+        ),
         energy=EnergyConfig(backend="openmm"),
-        microstates=MicrostateConfig(source="grid", phi_bins=6, psi_bins=6),
+        microstates=MicrostateConfig(
+            source="grid",
+            phi_bins=6,
+            psi_bins=6,
+            reference_probability_mode="raw_counts",
+        ),
         parallel=ParallelConfig(workers=1),
         output=OutputConfig(output_dir=str(tmp_path / "out")),
     )
