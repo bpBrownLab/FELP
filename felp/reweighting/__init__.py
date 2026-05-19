@@ -11,6 +11,8 @@ from .aggregator import (
     is_reweighting_eligible_frame,
     psis_smooth_weights,
 )
+from .orchestrator import ReweightingOrchestrator
+from .engines import VALID_REWEIGHTING_METHODS, get_reweighting_engine
 from .atlas import MicrostateAtlas, generate_phi_psi_grid, load_microstate_definitions
 from .auto_microstates import (
     AutoMicrostateFile,
@@ -34,6 +36,9 @@ __all__ = [
     "PhiPsiAssignmentPolicy",
     "PrecomputedStateAssignmentPolicy",
     "ReweightingAggregator",
+    "ReweightingOrchestrator",
+    "VALID_REWEIGHTING_METHODS",
+    "get_reweighting_engine",
     "SamplingManifest",
     "build_auto_microstate_payload",
     "build_sampling_manifest",

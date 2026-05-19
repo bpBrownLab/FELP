@@ -21,6 +21,7 @@ from felp.cli import (
     build_msm_plot_config,
     build_msm_sample_export_config,
     build_parser,
+    build_reweighting_config,
     build_reweighting_qc_config,
     build_run_config,
 )
@@ -38,7 +39,7 @@ from felp.protocol_summary import build_protocol_summary
 from felp.reweighting import (
     MicrostateAtlas,
     PrecomputedStateAssignmentPolicy,
-    ReweightingAggregator,
+    ReweightingOrchestrator,
     SamplingManifest,
     ensure_existing_results_match_manifest,
     is_reweighting_eligible_frame,
@@ -234,6 +235,49 @@ def _assess_overlap_diagnostics(
     return "ok", []
 
 
+def _execute_reweighting(
+    *,
+    config,
+    frame_results,
+    atlas,
+    reference_counts,
+    sampling_metadata,
+    writer: ResultsWriter,
+):
+    """Run configured reweighting backend(s) and write method outputs."""
+
+    orchestrator = ReweightingOrchestrator(
+        temperature_kelvin=config.energy.temperature_kelvin,
+        config=config.reweighting,
+        qc_config=config.reweighting_qc,
+    )
+    methods = config.reweighting.methods
+    if len(methods) == 1:
+        outcome = orchestrator.run_single(
+            frame_results,
+            atlas,
+            reference_counts=reference_counts,
+            sampling_metadata=sampling_metadata,
+        )
+        writer.write_microstate_results(outcome.microstate_results)
+        frame_weights = outcome.auxiliary.get("frame_weights")
+        if frame_weights:
+            writer.write_frame_weights(frame_weights)
+        return outcome.microstate_results, outcome
+
+    outcomes = orchestrator.run(
+        frame_results,
+        atlas,
+        reference_counts=reference_counts,
+        sampling_metadata=sampling_metadata,
+        output_dir=config.output.output_dir,
+        writer=writer,
+    )
+    primary = outcomes[methods[0]]
+    writer.write_microstate_results(primary.microstate_results)
+    return primary.microstate_results, primary
+
+
 def _build_reweighting_summary(
     *,
     frame_count: int,
@@ -355,25 +399,22 @@ def run_pipeline(config) -> dict:
         key=lambda item: item.frame_index,
     )
 
-    aggregator = ReweightingAggregator(
-        config.energy.temperature_kelvin,
-        qc_config=config.reweighting_qc,
-    )
     sampling_metadata = sampling_manifest.metadata()
     reference_counts = (
         manifest_counts_for_atlas(sampling_manifest, atlas)
         if not config.sampling.is_noop
         else None
     )
-    microstate_results = aggregator.aggregate(
-        all_frame_results,
-        atlas,
+    microstate_results, reweighting_outcome = _execute_reweighting(
+        config=config,
+        frame_results=all_frame_results,
+        atlas=atlas,
         reference_counts=reference_counts,
         sampling_metadata=sampling_metadata,
+        writer=writer,
     )
 
     writer.write_frame_results(all_frame_results)
-    writer.write_microstate_results(microstate_results)
 
     failed_frame_count = sum(
         1 for result in all_frame_results if result.metadata.get("status") == "failed"
@@ -406,10 +447,9 @@ def run_pipeline(config) -> dict:
             "sampling": sampling_metadata,
             "microstate_assigned_histogram": dict(sampling_manifest.assigned_counts),
             "microstate_selected_histogram": dict(sampling_manifest.selected_counts),
-            "state_reweighting_estimator": (
-                "pi_target(i) proportional to "
-                "pi_reference(i) * <exp(-beta * delta_u)>_i"
-            ),
+            "reweighting_method": reweighting_outcome.method_id,
+            "reweighting_methods": list(config.reweighting.methods),
+            "state_reweighting_estimator": reweighting_outcome.state_reweighting_estimator,
             "microstate_source": config.microstates.source,
             "microstate_definition_state_level": config.microstates.state_level,
             "msm_bundle_dir": config.microstates.msm_bundle_dir,
@@ -903,19 +943,41 @@ def summarize_results(namespace) -> dict:
         sampling_manifest.metadata() if sampling_manifest is not None else None
     )
 
-    microstate_results = ReweightingAggregator(
-        namespace.temperature_kelvin,
+    reweighting_config = build_reweighting_config(namespace)
+    orchestrator = ReweightingOrchestrator(
+        temperature_kelvin=namespace.temperature_kelvin,
+        config=reweighting_config,
         qc_config=build_reweighting_qc_config(namespace),
         workers=getattr(namespace, "workers", 1),
-    ).aggregate(
-        frame_results,
-        atlas,
-        reference_counts=reference_counts,
-        sampling_metadata=sampling_metadata,
     )
+    methods = reweighting_config.methods
+    if len(methods) == 1:
+        reweighting_outcome = orchestrator.run_single(
+            frame_results,
+            atlas,
+            reference_counts=reference_counts,
+            sampling_metadata=sampling_metadata,
+        )
+        microstate_results = reweighting_outcome.microstate_results
+    else:
+        outcomes = orchestrator.run(
+            frame_results,
+            atlas,
+            reference_counts=reference_counts,
+            sampling_metadata=sampling_metadata,
+            output_dir=namespace.output_dir,
+            writer=writer,
+        )
+        reweighting_outcome = outcomes[methods[0]]
+        microstate_results = reweighting_outcome.microstate_results
+        writer.write_microstate_results(microstate_results)
     if repartition:
         writer.write_frame_results(frame_results)
-    writer.write_microstate_results(microstate_results)
+    if len(methods) == 1:
+        writer.write_microstate_results(microstate_results)
+        frame_weights = reweighting_outcome.auxiliary.get("frame_weights")
+        if frame_weights:
+            writer.write_frame_weights(frame_weights)
     summary = _build_reweighting_summary(
         frame_count=len(frame_results),
         reweighted_frame_count=sum(
@@ -923,6 +985,13 @@ def summarize_results(namespace) -> dict:
         ),
         microstate_results=microstate_results,
         output_dir=namespace.output_dir,
+    )
+    summary.update(
+        {
+            "reweighting_method": reweighting_outcome.method_id,
+            "reweighting_methods": list(methods),
+            "state_reweighting_estimator": reweighting_outcome.state_reweighting_estimator,
+        }
     )
     writer.write_summary(summary)
     _write_stdout(summary)

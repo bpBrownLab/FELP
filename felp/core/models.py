@@ -975,6 +975,116 @@ class ReweightingQCConfig:
 
 
 @dataclass(frozen=True)
+class NeighborPoolConfig:
+    """Configuration for neighbor-pooled Zwanzig reweighting."""
+
+    tau: float | None = None
+    tau_mode: str = "gcv"
+    min_local_weight: float = 0.0
+    max_neighbors: int = 4
+
+    def __post_init__(self) -> None:
+        mode = str(self.tau_mode).strip()
+        if mode not in {"mean_ess", "median_ess", "gcv"}:
+            raise ConfigurationError(
+                "neighbor_pool.tau_mode must be one of: mean_ess, median_ess, gcv."
+            )
+        object.__setattr__(self, "tau_mode", mode)
+        if self.tau is not None and float(self.tau) < 0.0:
+            raise ConfigurationError("neighbor_pool.tau must be non-negative.")
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "NeighborPoolConfig":
+        return cls(
+            tau=payload.get("tau"),
+            tau_mode=str(payload.get("tau_mode", "gcv")),
+            min_local_weight=float(payload.get("min_local_weight", 0.0)),
+            max_neighbors=int(payload.get("max_neighbors", 4)),
+        )
+
+
+@dataclass(frozen=True)
+class LaplacianConfig:
+    """Configuration for Laplacian-regularized DeltaG reweighting.
+
+    When ``lambda_scale_by_kbt`` is True (default), ``lambda_kj_mol2`` is a
+    dimensionless neighbor-smoothness strength and the penalty applied during
+    optimization is ``lambda_kj_mol2 * (k_B T)^2 * sum_edges (DeltaG_i - DeltaG_j)^2``
+    in (kJ/mol)^2. When False, ``lambda_kj_mol2`` is already in (kJ/mol)^2.
+    """
+
+    lambda_kj_mol2: float = 1.0
+    lambda_scale_by_kbt: bool = True
+    max_iterations: int = 500
+
+    def effective_lambda_kj_mol2(self, kbt_kj_mol: float) -> float:
+        """Return the Laplacian penalty scale in (kJ/mol)^2."""
+
+        strength = float(self.lambda_kj_mol2)
+        if self.lambda_scale_by_kbt:
+            return strength * float(kbt_kj_mol) ** 2
+        return strength
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "LaplacianConfig":
+        return cls(
+            lambda_kj_mol2=float(payload.get("lambda_kj_mol2", 1.0)),
+            lambda_scale_by_kbt=bool(payload.get("lambda_scale_by_kbt", True)),
+            max_iterations=int(payload.get("max_iterations", 500)),
+        )
+
+
+@dataclass(frozen=True)
+class FrameReweightingConfig:
+    """Configuration for frame-level SNIS reweighting."""
+
+    qc_policy: str = "inherit"
+    max_excluded_frames_global: int = 5
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "FrameReweightingConfig":
+        return cls(
+            qc_policy=str(payload.get("qc_policy", "inherit")),
+            max_excluded_frames_global=int(
+                payload.get("max_excluded_frames_global", 5)
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class ReweightingConfig:
+    """Configuration for modular reweighting backends."""
+
+    methods: tuple[str, ...] = ("independent",)
+    neighbor_pool: NeighborPoolConfig = field(default_factory=NeighborPoolConfig)
+    laplacian: LaplacianConfig = field(default_factory=LaplacianConfig)
+    frame: FrameReweightingConfig = field(default_factory=FrameReweightingConfig)
+
+    def __post_init__(self) -> None:
+        normalized_methods = tuple(
+            str(method).strip() for method in self.methods if str(method).strip()
+        )
+        if not normalized_methods:
+            raise ConfigurationError("At least one reweighting method is required.")
+        object.__setattr__(self, "methods", normalized_methods)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "ReweightingConfig":
+        methods = payload.get("methods")
+        if methods is None:
+            single = payload.get("method", "independent")
+            methods = (single,)
+        return cls(
+            methods=tuple(methods),
+            neighbor_pool=NeighborPoolConfig.from_dict(
+                payload.get("neighbor_pool", {})
+            ),
+            laplacian=LaplacianConfig.from_dict(payload.get("laplacian", {})),
+            frame=FrameReweightingConfig.from_dict(payload.get("frame", {})),
+        )
+
+
+@dataclass(frozen=True)
 class ParallelConfig:
     """Configuration for multiprocessing execution."""
 
@@ -1060,6 +1170,7 @@ class RunConfig:
     output: OutputConfig
     sampling: SamplingConfig = field(default_factory=SamplingConfig)
     reweighting_qc: ReweightingQCConfig = field(default_factory=ReweightingQCConfig)
+    reweighting: ReweightingConfig = field(default_factory=ReweightingConfig)
     mobility: MobilityConfig = field(default_factory=MobilityConfig)
 
     def validate(self) -> None:
@@ -1251,6 +1362,7 @@ class RunConfig:
             reweighting_qc=ReweightingQCConfig.from_dict(
                 payload.get("reweighting_qc", {})
             ),
+            reweighting=ReweightingConfig.from_dict(payload.get("reweighting", {})),
         )
 
 

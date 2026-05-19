@@ -637,11 +637,20 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
         "cv_frame_projection_excluded_frame_count": sum(
             len(indices) for indices in excluded_frame_indices_by_state.values()
         ),
-        "state_reweighting_estimator": (
-            "pi_target(i) proportional to "
-            f"pi_reference(i) * <{summary_weight_treatment} exp(-beta * delta_u)>_i"
+        "reweighting_method": summary_metadata.get("reweighting_method", "independent"),
+        "state_reweighting_estimator": summary_metadata.get(
+            "state_reweighting_estimator",
+            (
+                "pi_target(i) proportional to "
+                f"pi_reference(i) * <{summary_weight_treatment} exp(-beta * delta_u)>_i"
+            ),
         ),
         "state_reweighting_weight_treatment": summary_weight_treatment,
+        "frame_weights_path": (
+            os.path.join(config.output_dir, "frame_weights.csv")
+            if os.path.isfile(os.path.join(config.output_dir, "frame_weights.csv"))
+            else None
+        ),
         "fel_max_energy_kj_mol": config.fel_max_energy_kj_mol,
         "fel_colormap": config.fel_colormap,
         "fel_plot_style": config.fel_plot_style,

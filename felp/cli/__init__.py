@@ -10,6 +10,7 @@ from .parser import (
     build_msm_plot_config,
     build_msm_sample_export_config,
     build_parser,
+    build_reweighting_config,
     build_reweighting_qc_config,
     build_run_config,
 )
@@ -24,6 +25,7 @@ __all__ = [
     "build_msm_plot_config",
     "build_msm_sample_export_config",
     "build_parser",
+    "build_reweighting_config",
     "build_reweighting_qc_config",
     "build_run_config",
 ]

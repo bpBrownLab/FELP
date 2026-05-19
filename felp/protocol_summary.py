@@ -338,4 +338,25 @@ def build_protocol_summary(
                 "Rosetta/OpenMM preparation."
             ),
         },
+        "reweighting": {
+            "methods": list(config.reweighting.methods),
+            "default_method": config.reweighting.methods[0],
+            "available_methods": (
+                "independent",
+                "neighbor_pool",
+                "laplacian",
+                "frame",
+            ),
+            "neighbor_pool_tau": config.reweighting.neighbor_pool.tau,
+            "neighbor_pool_tau_mode": config.reweighting.neighbor_pool.tau_mode,
+            "laplacian_lambda_kj_mol2": config.reweighting.laplacian.lambda_kj_mol2,
+            "laplacian_lambda_scale_by_kbt": (
+                config.reweighting.laplacian.lambda_scale_by_kbt
+            ),
+            "frame_qc_max_excluded_frames_global": (
+                config.reweighting.frame.max_excluded_frames_global
+            ),
+            "qc_policy": config.reweighting_qc.policy,
+            "weight_treatment": config.reweighting_qc.weight_treatment,
+        },
     }

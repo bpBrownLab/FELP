@@ -410,3 +410,27 @@ class ResultsWriter:
         """Write a high-level JSON summary of the run."""
 
         _write_json_atomic(self.summary_dump_path, payload)
+
+    def write_frame_weights(self, frame_weights: Iterable[dict[str, object]]) -> None:
+        """Write per-frame SNIS weights for frame-level reweighting."""
+
+        rows = list(frame_weights)
+        if not rows:
+            return
+        fieldnames = [
+            "frame_index",
+            "microstate_id",
+            "delta_u_kj_mol",
+            "phi_degrees",
+            "psi_degrees",
+            "weight",
+        ]
+
+        def _write(handle) -> None:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({field: row.get(field) for field in fieldnames})
+
+        path = os.path.join(self.output_dir, "frame_weights.csv")
+        _write_text_atomic(path, _write, newline="")

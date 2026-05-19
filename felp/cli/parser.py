@@ -17,6 +17,10 @@ from felp.core import (
     ParallelConfig,
     PerturbationConfig,
     MobilityConfig,
+    FrameReweightingConfig,
+    LaplacianConfig,
+    NeighborPoolConfig,
+    ReweightingConfig,
     ReweightingQCConfig,
     RestraintConfig,
     RosettaConfig,
@@ -330,6 +334,86 @@ def _add_reweighting_qc_arguments(parser: argparse.ArgumentParser) -> None:
             "Maximum dominant frames to remove per state when "
             "--reweighting-qc-policy=exclude-frames."
         ),
+    )
+
+
+def _add_reweighting_method_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add modular reweighting backend selection and tuning options."""
+
+    group = parser.add_argument_group("Reweighting methods")
+    group.add_argument(
+        "--reweighting-method",
+        choices=("independent", "neighbor_pool", "laplacian", "frame"),
+        default="independent",
+        help="Reweighting backend used for microstate target populations.",
+    )
+    group.add_argument(
+        "--reweighting-methods",
+        nargs="+",
+        choices=("independent", "neighbor_pool", "laplacian", "frame"),
+        help=(
+            "Optional list of backends to run in one invocation. Writes each method "
+            "under output_dir/reweighting_<method>/ plus reweighting_comparison.json."
+        ),
+    )
+    group.add_argument(
+        "--neighbor-pool-tau",
+        type=float,
+        default=None,
+        help=(
+            "Neighbor-pool blending strength tau for ESS-weighted partial pooling. "
+            "When omitted, tau is chosen using --neighbor-pool-tau-mode."
+        ),
+    )
+    group.add_argument(
+        "--neighbor-pool-tau-mode",
+        choices=("gcv", "mean_ess", "median_ess"),
+        default="gcv",
+        help=(
+            "Automatic tau selection when --neighbor-pool-tau is omitted. "
+            "'gcv' minimizes ESS-weighted log-factor misfit plus a grid-smoothness "
+            "penalty (recommended). 'mean_ess' and 'median_ess' use summary ESS "
+            "statistics only."
+        ),
+    )
+    group.add_argument(
+        "--neighbor-pool-min-local-weight",
+        type=float,
+        default=0.0,
+        help="Minimum local weight retained in neighbor-pool blending.",
+    )
+    group.add_argument(
+        "--neighbor-pool-max-neighbors",
+        type=int,
+        default=4,
+        help="Maximum neighbors used when kNN topology fallback is required.",
+    )
+    group.add_argument(
+        "--laplacian-lambda",
+        type=float,
+        default=1.0,
+        dest="laplacian_lambda_kj_mol2",
+        help=(
+            "Laplacian neighbor smoothness strength on grid DeltaG. With the default "
+            "--laplacian-lambda-scale-by-kbt, this is dimensionless and the optimizer "
+            "uses lambda * (k_B T)^2 * sum_edges (DeltaG_i - DeltaG_j)^2 in (kJ/mol)^2."
+        ),
+    )
+    group.add_argument(
+        "--laplacian-lambda-scale-by-kbt",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Scale --laplacian-lambda by (k_B T)^2 so the coupling is energy-based "
+            "(default: enabled). Use --no-laplacian-lambda-scale-by-kbt to supply "
+            "lambda directly in (kJ/mol)^2."
+        ),
+    )
+    group.add_argument(
+        "--frame-qc-max-excluded-frames",
+        type=int,
+        default=5,
+        help="Maximum globally dominant frames excluded for frame-level SNIS.",
     )
 
 
@@ -741,6 +825,7 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
         help="Random seed for deterministic microstate-stratified frame sampling.",
     )
     _add_reweighting_qc_arguments(parser)
+    _add_reweighting_method_arguments(parser)
 
     energy_group = parser.add_argument_group("Energy")
     energy_group.add_argument(
@@ -1750,6 +1835,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_common_microstate_arguments(summarize_parser)
     _add_reweighting_qc_arguments(summarize_parser)
+    _add_reweighting_method_arguments(summarize_parser)
 
     msm_fit_parser = subparsers.add_parser(
         "msm-fit",
@@ -2006,6 +2092,7 @@ def build_run_config(namespace: argparse.Namespace) -> RunConfig:
             microstate_sampling_seed=namespace.microstate_sampling_seed,
         ),
         reweighting_qc=build_reweighting_qc_config(namespace),
+        reweighting=build_reweighting_config(namespace),
     )
     config.validate()
     return config
@@ -2038,6 +2125,37 @@ def build_microstate_config(
         auto_min_bins_per_axis=getattr(namespace, "auto_microstate_min_bins_per_axis", 3),
         auto_max_bins_per_axis=getattr(namespace, "auto_microstate_max_bins_per_axis", 64),
         auto_max_total_states=getattr(namespace, "auto_microstate_max_states", 2500),
+    )
+
+
+def build_reweighting_config(namespace: argparse.Namespace) -> ReweightingConfig:
+    """Construct a ReweightingConfig from the parsed CLI namespace."""
+
+    if getattr(namespace, "reweighting_methods", None):
+        methods = tuple(namespace.reweighting_methods)
+    else:
+        methods = (getattr(namespace, "reweighting_method", "independent"),)
+    return ReweightingConfig(
+        methods=methods,
+        neighbor_pool=NeighborPoolConfig(
+            tau=getattr(namespace, "neighbor_pool_tau", None),
+            tau_mode=getattr(namespace, "neighbor_pool_tau_mode", "gcv"),
+            min_local_weight=float(
+                getattr(namespace, "neighbor_pool_min_local_weight", 0.0)
+            ),
+            max_neighbors=int(getattr(namespace, "neighbor_pool_max_neighbors", 4)),
+        ),
+        laplacian=LaplacianConfig(
+            lambda_kj_mol2=float(getattr(namespace, "laplacian_lambda_kj_mol2", 1.0)),
+            lambda_scale_by_kbt=bool(
+                getattr(namespace, "laplacian_lambda_scale_by_kbt", True)
+            ),
+        ),
+        frame=FrameReweightingConfig(
+            max_excluded_frames_global=int(
+                getattr(namespace, "frame_qc_max_excluded_frames", 5)
+            ),
+        ),
     )
 
 
