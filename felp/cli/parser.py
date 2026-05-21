@@ -366,14 +366,27 @@ def _add_reweighting_method_arguments(parser: argparse.ArgumentParser) -> None:
         ),
     )
     group.add_argument(
+        "--neighbor-pool-solver",
+        choices=("blend", "variational"),
+        default="blend",
+        help=(
+            "Neighbor-pool backend. 'blend' (default) ESS-weighted partial pooling "
+            "toward ESS-weighted neighbor-local factors (recommended). "
+            "'variational' solves a coupled grid GMRF on log-factors; tau semantics "
+            "differ from blend and auto-tau often collapses to independent on sparse data."
+        ),
+    )
+    group.add_argument(
         "--neighbor-pool-tau-mode",
-        choices=("gcv", "mean_ess", "median_ess"),
-        default="gcv",
+        choices=("lcurve", "gcv", "variational", "mean_ess", "median_ess"),
+        default="lcurve",
         help=(
             "Automatic tau selection when --neighbor-pool-tau is omitted. "
-            "'gcv' minimizes ESS-weighted log-factor misfit plus a grid-smoothness "
-            "penalty (recommended). 'mean_ess' and 'median_ess' use summary ESS "
-            "statistics only."
+            "With solver=blend (default): 'lcurve' (recommended) picks the corner "
+            "of the log(misfit) vs log(roughness) tradeoff curve. 'gcv' uses the "
+            "legacy weighted sum with median frame count. With solver=variational: "
+            "use 'variational' (or 'gcv' as alias) for profile energy minimization. "
+            "'mean_ess' and 'median_ess' set tau from ESS summaries only."
         ),
     )
     group.add_argument(
@@ -2139,7 +2152,8 @@ def build_reweighting_config(namespace: argparse.Namespace) -> ReweightingConfig
         methods=methods,
         neighbor_pool=NeighborPoolConfig(
             tau=getattr(namespace, "neighbor_pool_tau", None),
-            tau_mode=getattr(namespace, "neighbor_pool_tau_mode", "gcv"),
+            tau_mode=getattr(namespace, "neighbor_pool_tau_mode", "lcurve"),
+            solver=getattr(namespace, "neighbor_pool_solver", "blend"),
             min_local_weight=float(
                 getattr(namespace, "neighbor_pool_min_local_weight", 0.0)
             ),

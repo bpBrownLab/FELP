@@ -979,16 +979,36 @@ class NeighborPoolConfig:
     """Configuration for neighbor-pooled Zwanzig reweighting."""
 
     tau: float | None = None
-    tau_mode: str = "gcv"
+    tau_mode: str = "lcurve"
+    solver: str = "blend"
     min_local_weight: float = 0.0
     max_neighbors: int = 4
 
     def __post_init__(self) -> None:
-        mode = str(self.tau_mode).strip()
-        if mode not in {"mean_ess", "median_ess", "gcv"}:
+        solver = str(self.solver).strip().lower()
+        if solver not in {"blend", "variational"}:
             raise ConfigurationError(
-                "neighbor_pool.tau_mode must be one of: mean_ess, median_ess, gcv."
+                "neighbor_pool.solver must be one of: blend, variational."
             )
+        object.__setattr__(self, "solver", solver)
+
+        mode = str(self.tau_mode).strip().lower()
+        if solver == "blend":
+            if mode == "variational":
+                mode = "gcv"
+            if mode not in {"mean_ess", "median_ess", "gcv", "lcurve"}:
+                raise ConfigurationError(
+                    "neighbor_pool.tau_mode with solver=blend must be one of: "
+                    "mean_ess, median_ess, gcv, lcurve."
+                )
+        else:
+            if mode == "gcv":
+                mode = "variational"
+            if mode not in {"mean_ess", "median_ess", "variational"}:
+                raise ConfigurationError(
+                    "neighbor_pool.tau_mode with solver=variational must be one of: "
+                    "mean_ess, median_ess, variational."
+                )
         object.__setattr__(self, "tau_mode", mode)
         if self.tau is not None and float(self.tau) < 0.0:
             raise ConfigurationError("neighbor_pool.tau must be non-negative.")
@@ -997,7 +1017,8 @@ class NeighborPoolConfig:
     def from_dict(cls, payload: dict[str, Any]) -> "NeighborPoolConfig":
         return cls(
             tau=payload.get("tau"),
-            tau_mode=str(payload.get("tau_mode", "gcv")),
+            tau_mode=str(payload.get("tau_mode", "lcurve")),
+            solver=str(payload.get("solver", payload.get("pool_solver", "blend"))),
             min_local_weight=float(payload.get("min_local_weight", 0.0)),
             max_neighbors=int(payload.get("max_neighbors", 4)),
         )

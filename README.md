@@ -215,6 +215,35 @@ ESS_i = (sum_j w_ij)^2 / sum_j (w_ij^2)
 
 Low ESS is a warning sign that a state is dominated by a small number of very favorable frames.
 
+### Spatially coupled reweighting backends
+
+Beyond independent Zwanzig, `felp run` and `felp summarize` support optional backends that share the same per-state local factors but apply **grid-based spatial regularization** before computing `pi_target`:
+
+| Backend | Purpose |
+|---------|---------|
+| `neighbor_pool` | ESS-weighted pooling of local Boltzmann factors toward CV-grid neighbors (recommended for noisy 2D bin maps) |
+| `laplacian` | MAP on state excess free energies with a Laplacian prior between neighbors |
+| `frame` | Global frame-level self-normalized importance sampling, then binning for summaries |
+
+Enable one or more methods:
+
+```bash
+python felp.py summarize \
+  --raw-frame-results path/to/frame_results.csv \
+  --reweighting-methods independent neighbor_pool laplacian frame \
+  --neighbor-pool-solver blend \
+  --neighbor-pool-tau-mode lcurve \
+  --laplacian-lambda 1.0 \
+  ...
+```
+
+Each method is written under `reweighting_<method>/` with a shared `reweighting_comparison.json`.
+
+**Neighbor-pool (default coupled method):** uses the **blend** solver and **L-curve** automatic τ selection unless `--neighbor-pool-tau` is set. τ is a pseudocount in ESS units (not frame count or grid size). See the dedicated references:
+
+- [docs/neighbor_pool_reweighting.md](docs/neighbor_pool_reweighting.md) — blend vs variational, τ modes, metadata, workflow
+- [docs/reweighting_methods.md](docs/reweighting_methods.md) — all backends and output layout
+
 ### Plotting semantics
 
 FELP writes discrete state summaries first, then derives plots from those summaries.

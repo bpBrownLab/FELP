@@ -347,6 +347,7 @@ def build_protocol_summary(
                 "laplacian",
                 "frame",
             ),
+            "neighbor_pool_solver": config.reweighting.neighbor_pool.solver,
             "neighbor_pool_tau": config.reweighting.neighbor_pool.tau,
             "neighbor_pool_tau_mode": config.reweighting.neighbor_pool.tau_mode,
             "laplacian_lambda_kj_mol2": config.reweighting.laplacian.lambda_kj_mol2,
