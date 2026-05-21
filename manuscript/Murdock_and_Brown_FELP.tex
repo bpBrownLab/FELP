@@ -43,96 +43,75 @@
 \maketitle
 
 \begin{abstract}
-\noindent Protein function is governed by an ensemble of conformational states, and mutations can alter function by redistributing probability across that ensemble even when structural changes are modest. Directly estimating a perturbed conformational free-energy landscape with molecular dynamics (MD) is expensive because each mutation normally requires a new converged simulation. Here, we introduce Free Energy Landscape Perturbation (FELP), a state-local reweighting framework that estimates mutation-induced population shifts from a reference MD ensemble. FELP partitions a reference trajectory into discrete microstates, evaluates restrained reference-to-perturbed energy differences for configurations sampled within each state, and combines state-local Zwanzig factors with the reference state probabilities to estimate the perturbed state distribution. FELP estimates how a perturbation changes the relative probabilities of conformational basins and reports effective-sample and overlap diagnostics that identify when the predicted shift lacks support in the sampled reference ensemble. We describe the FELP estimator, its implementation, and planned validation on glycine dipeptide, chignolin, and T4 lysozyme. FELP is intended for perturbations that reshape populations within a sufficiently sampled reference landscape, providing a practical bridge between local alchemical energy evaluation and ensemble-level mechanistic interpretation.
+\noindent Protein function is governed by an ensemble of conformational states, and mutations can alter function by redistributing probability across that ensemble even when structural changes are modest. Directly estimating a perturbed conformational free energy landscape with molecular dynamics (MD) is expensive because each mutation normally requires a new converged simulation. Here, we introduce Free Energy Landscape Perturbation (FELP), a state-local reweighting framework that estimates mutation-induced population shifts from a reference MD ensemble. FELP partitions a reference trajectory into discrete microstates, evaluates restrained reference-to-perturbed energy differences for configurations sampled within each state, and combines state-local Zwanzig factors with the reference state probabilities to estimate the perturbed state distribution. FELP estimates how a perturbation changes the relative probabilities of conformational basins and reports effective-sample and overlap diagnostics that identify when the predicted shift lacks support in the sampled reference ensemble. We describe the FELP estimator, its implementation, and planned validation on glycine dipeptide, chignolin, and T4 lysozyme. FELP is intended for perturbations that reshape populations within a sufficiently sampled reference landscape, providing a practical bridge between local alchemical energy evaluation and ensemble-level mechanistic interpretation.
 \end{abstract}
 
 \subsection*{Introduction}
 
-Protein function is determined by a free-energy landscape rather than by a single static structure. Folding, stability, enzyme catalysis, signal transduction, molecular recognition, and allosteric regulation all depend on how probability is distributed over conformational states and how readily the system moves between them. Many proteins therefore function through ensembles of native-like substates, with activity controlled by changes in basin depth, transition pathways, and relative occupancy. Quantitatively describing these landscapes is central to understanding how sequence, ligand binding, protonation, and chemical modification alter biological function \cite{husic2018msm}.
+Protein function is determined by a free energy landscape rather than by a single static structure. Folding, stability, enzyme catalysis, signal transduction, molecular recognition, and allosteric regulation all depend on how probability is distributed over conformational states and how readily the system moves between them. Many proteins therefore function through ensembles of native-like substates, with activity controlled by changes in basin depth, transition pathways, and relative occupancy. Quantitatively describing these landscapes is central to understanding how sequence, ligand binding, protonation, and chemical modification alter biological function \cite{husic2018msm}.
 
-Molecular dynamics (MD) simulations provide a direct route to estimating these conformational free-energy landscapes at atomistic resolution. In principle, sufficiently long trajectories recover both the relevant structural diversity and the thermodynamic probability of each state. In practice, sampling remains the central limitation. Transitions between functional conformations can be slow, rare, and system-specific, so converging a separate MD ensemble for every perturbation of interest is often prohibitively expensive. Parallel simulation strategies, enhanced sampling, and Markov state models (MSMs) have improved access to long-timescale behavior by combining many trajectories into kinetic and thermodynamic state models \cite{noe2011msm,husic2018msm}. Effective sample size and related convergence diagnostics provide complementary measures of whether a simulation has generated independent structural information, rather than simply accumulated correlated frames \cite{lyman2007ess,romo2011ess}. Even with these advances, each new mutation or chemical change can still demand substantial additional sampling.
+Molecular dynamics (MD) simulations provide a direct route to estimating these conformational free energy landscapes at atomistic resolution. In principle, sufficiently long trajectories recover both the relevant structural diversity and the thermodynamic probability of each state. In practice, sampling remains the central limitation. Transitions between functional conformations can be slow, rare, and system-specific, so converging a separate MD ensemble for every perturbation of interest is often prohibitively expensive. Parallel simulation strategies, enhanced sampling, and Markov state models (MSMs) have improved access to long-timescale behavior by combining many trajectories into kinetic and thermodynamic state models \cite{noe2011msm,husic2018msm}. However, even with these advances, each new mutation or chemical change can still demand substantial additional sampling to converge a new landscape.
 
-Alchemical free-energy methods make a different tradeoff. Free energy perturbation (FEP) and related estimators compute free-energy differences between Hamiltonians from equilibrium samples and are formally rigorous when phase-space overlap is sufficient \cite{zwanzig1954fep,lu2001fepaccuracy,shirts2005comparison,pohorille2010freeenergy,shirts2008mbar,klimovich2015guidelines}. Phase-space overlap controls both bias and reliability in exponential averaging, Bennett acceptance ratio, thermodynamic integration, and staged alchemical calculations \cite{wu2005overlap1,wu2005overlap2}. These approaches are powerful for a defined thermodynamic cycle, and practical calculations are often local: they are initialized from one or a small number of conformations and restrained to prevent structural drift. Such calculations can estimate the energetic effect of a mutation or ligand in a particular structural context. Additional ensemble analysis is required to describe how that perturbation redistributes probability across a conformational landscape. Because exponential estimators are sensitive to rare high-weight samples, inadequate overlap can also produce unstable estimates that look numerically complete while remaining physically unsupported.
+To avoid the cost of full ensemble resampling, computational methods often sacrifice conformational diversity for speed. Single-structure and local relaxation methods, such as Rosetta $\Delta\Delta G$ estimates for mutation stability calculations, can test whether a particular coordinate set becomes more or less favorable after mutation, but they typically evaluate a narrow structural hypothesis \cite{kellogg2011rosetta}. Minimal relaxation avoids the cost of full resampling, yet it can convert small coordinate differences into abrupt energy changes and noisy estimates. These calculations can be useful for local stability screening, but they generally do not directly answer whether a mutation stabilizes one conformational basin over another.
 
-Single-structure and local relaxation methods face the complementary limitation. Rosetta-style mutation stability calculations, for example, can test whether a particular coordinate set becomes more or less favorable after mutation, but they typically evaluate a narrow structural hypothesis \cite{kellogg2011rosetta}. Minimal relaxation avoids the cost of full resampling, yet it can convert small coordinate differences into abrupt energy changes and noisy estimates. These calculations are useful for local stability screening, but they do not directly answer whether a mutation stabilizes one conformational basin over another.
+Alchemical methods like free energy perturbation (FEP) provide a formally rigorous extension of this idea. By computing free energy differences between Hamiltonians from local equilibrium samples, FEP incorporates local flexibility and avoids the abrupt energy changes of single-structure minimization \cite{zwanzig1954fep,lu2001fepaccuracy,shirts2005comparison,pohorille2010freeenergy,shirts2008mbar,klimovich2015guidelines}. However, practical calculations remain structurally restricted because they are initialized from a small number of conformations and restrained to prevent structural drift. Both single-structure screening and local FEP calculations estimate the energetic effect of a perturbation in a specific structural context. Additional ensemble analysis is required to describe how that perturbation redistributes probability across a complex conformational landscape. Furthermore, exponential free energy estimators rely heavily on the assumption that the reference and target states share sufficient phase-space overlap \cite{wu2005overlap1,wu2005overlap2}. Because these estimators are highly sensitive to rare and high-weight samples, inadequate overlap can produce unstable estimates that appear numerically converged but remain physically unsupported.
 
-Recent population-shift strategies address the ensemble problem by separating conformational sampling from perturbation evaluation. Implicit-ligand theory and related alchemical-state formulations showed how binding or perturbation thermodynamics can be estimated from conformational ensembles by reweighting state probabilities or thermodynamic expectations \cite{minh2012implicit,nguyen2018implicit,schutte2015alchemy,he2018alchemical}. PopShift applies this idea to ligand binding by estimating how ligand interactions change the probabilities of conformational states sampled in a ligand-free MSM \cite{smith2024popshift}. The key insight is that expensive sampling can be performed once for a reference system, after which many perturbations can be evaluated against the same state model. This framework moves beyond single-conformation estimates by explicitly linking perturbation effects to the thermodynamic weight of each conformational state.
+Recent population-shift strategies address this ensemble problem by separating conformational sampling from perturbation evaluation. This approach originally emerged in the context of ligand binding to quantify conformational selection and induced-fit mechanisms. Implicit-ligand theory, for example, provides a rigorous analytical framework for estimating how a binding event reweights host conformations without requiring explicit simulation of the bound complex \cite{minh2012implicit,nguyen2018implicit,schutte2015alchemy,he2018alchemical}. While traditional implicit-ligand theory typically evaluates these shifts using exact volume integrals or analytical interaction potentials over a continuous ensemble, recent methods adapt this logic to discrete kinetic models and empirical scoring. PopShift, for instance, evaluates discrete ligand docking scores against the states of a ligand-free MSM to predict binding-induced population shifts \cite{smith2024popshift}. The unifying insight of these approaches is that expensive sampling can be performed once for a reference system. Once the reference state probabilities are established, the effects of many different ligands can be evaluated against the same conformational baseline. This framework moves beyond single-structure scoring by explicitly linking the energetic preference of a perturbation to the thermodynamic weight of each conformational state.
 
-Here, we introduce Free Energy Landscape Perturbation (FELP), a mutation-focused generalization of this idea that combines reference MD sampling, discrete state models, restrained local perturbation evaluation, and FEP-style reweighting. FELP starts from a reference ensemble, partitions sampled configurations into microstates in a chosen feature space, evaluates the energetic effect of a mutation within each microstate, and reweights the reference state probabilities to estimate the perturbed landscape. The method treats a global population shift as a collection of local, tractable reweighting problems. Critically, FELP also audits the shift using effective-sample-size, weight-concentration, and discrete-overlap diagnostics, making explicit when a proposed perturbation is outside the regime supported by the reference ensemble.
+Here, we introduce Free Energy Landscape Perturbation (FELP) to apply this population-shift framework to amino acid mutations. FELP combines reference MD sampling, discrete state models, restrained local perturbation evaluation, and FEP-style reweighting. The method partitions a reference ensemble into discrete microstates, evaluates the energetic effect of a mutation within each state, and reweights the reference probabilities to estimate the perturbed landscape. By treating a global population shift as a collection of tractable local reweighting problems, FELP bridges the gap between single-structure scoring and full-ensemble resampling. To address the inherent phase-space overlap limitations of exponential estimators, FELP explicitly audits its predictions using effective sample size and weight-concentration diagnostics \cite{lyman2007ess,romo2011ess}. This internal measure of physical credibility ensures that the method not only predicts how a mutation reshapes a landscape but also identifies when a proposed perturbation falls outside the regime supported by the reference ensemble.
 
 \subsection*{Theory}
 
-Consider a reference system with potential energy $U_0(x)$ and a perturbed system with potential energy $U_1(x)$, where $x$ denotes a molecular configuration and $\beta = (k_B T)^{-1}$. The Boltzmann distribution maps potential energy functions to probability densities over configurations. A reference trajectory samples configurations from the reference density
+Consider a reference system with potential energy $U_0(x)$ and a perturbed system with potential energy $U_1(x)$, where $x$ denotes a molecular configuration and $\beta = (k_B T)^{-1}$. The Boltzmann distribution maps these potential energy functions to continuous probability densities over configurations. A reference MD trajectory samples configurations from the reference density $p_0(x) \propto \exp[-\beta U_0(x)]$. FELP partitions this configuration space into discrete microstates $i \in \{1,\ldots,N\}$ using a chosen collective-variable or feature representation. Let $\chi_i(x)$ be the indicator function for state $i$. The restricted partition function for state $i$ under Hamiltonian $a$ is
 \begin{equation}
-	p_0(x) = \frac{\exp[-\beta U_0(x)]}{Z_0}.
+	Z_a(i) = \int \chi_i(x)\exp[-\beta U_a(x)]\,dx,
 \end{equation}
-The quantity $p_0(x)$ is the continuous probability density of configuration $x$ under the reference Hamiltonian. FELP partitions this configuration space into discrete microstates $i \in \{1,\ldots,N\}$ using a chosen collective-variable or feature representation. Let $\chi_i(x)$ be the indicator function for state $i$. The restricted partition function for state $i$ under Hamiltonian $a$ is
-\begin{equation}
-	Z_a(i) = \int \chi_i(x)\exp[-\beta U_a(x)]\,dx.
-\end{equation}
-The corresponding microstate probability is
-\begin{equation}
-	\pi_a(i) = \frac{Z_a(i)}{\sum_k Z_a(k)}.
-\end{equation}
-For the reference system, this is equivalent to integrating the continuous reference density over the microstate: $\pi_0(i)=\int \chi_i(x)p_0(x)\,dx$.
+and the corresponding thermodynamic probability of the microstate is $\pi_a(i) = Z_a(i)/\sum_k Z_a(k)$. For the reference system, this is equivalent to integrating the continuous reference density over the microstate to obtain the reference prior $\pi_0(i)$. FELP aims to estimate the perturbed microstate probabilities $\pi_1(i)$ using only samples drawn from the reference ensemble.
 
-The perturbed system has its own Boltzmann density,
-\begin{equation}
-	p_1(x) = \frac{\exp[-\beta U_1(x)]}{Z_1},
-\end{equation}
-and the desired perturbed probability of the same conformational microstate is $\pi_1(i)=Z_1(i)/\sum_k Z_1(k)$. FELP estimates this quantity from reference samples assigned to the same microstate.
-
-Within a microstate, the ratio of restricted partition functions follows the two-state Zwanzig identity,
+To bridge the reference and perturbed ensembles, FELP relies on the principle that global conformational shifts can be decomposed into local reweighting problems. Within a specific microstate, the ratio of restricted partition functions follows the two-state Zwanzig identity,
 \begin{equation}
 	\frac{Z_1(i)}{Z_0(i)}
 	=
 	\left\langle \exp[-\beta \Delta U(x)] \right\rangle_{0,i},
 	\label{eq:restricted_zwanzig}
 \end{equation}
-where $\Delta U(x)=U_1(x)-U_0(x)$ and $\left\langle \cdot \right\rangle_{0,i}$ denotes an average over reference configurations conditioned on membership in state $i$. Normalizing the restricted partition functions over all microstates gives
+where $\Delta U(x)=U_1(x)-U_0(x)$ and $\left\langle \cdot \right\rangle_{0,i}$ denotes an ensemble average over reference configurations conditioned on membership in state $i$. Normalizing the restricted partition functions over all microstates yields the central FELP estimator:
 \begin{equation}
 	\pi_1(i) =
 	\frac{\pi_0(i)\left\langle \exp[-\beta \Delta U(x)] \right\rangle_{0,i}}
-	{\sum_k \pi_0(k)\left\langle \exp[-\beta \Delta U(x)] \right\rangle_{0,k}},
+	{\sum_k \pi_0(k)\left\langle \exp[-\beta \Delta U(x)] \right\rangle_{0,k}}.
 	\label{eq:state_reweighting}
 \end{equation}
-Equation~\ref{eq:state_reweighting} is the central FELP estimator. It preserves the reference state decomposition and updates the probability of each state according to the perturbation's energetic effect on configurations sampled in that state.
+Equation~\ref{eq:state_reweighting} preserves the reference state decomposition and updates the probability of each state according to the perturbation's energetic effect on configurations sampled within that specific state.
 
-This is a two-state Zwanzig construction applied repeatedly across conformational microstates. The two thermodynamic states are the reference Hamiltonian $U_0$ and the perturbed Hamiltonian $U_1$. The microstates $i$ define conformational conditioning regions where local phase-space overlap is expected to be stronger than overlap across the full ensemble. Shared membership in a microstate is therefore the operational overlap assumption in FELP: reference configurations assigned to state $i$ must represent the configurations that carry meaningful perturbed probability within that same state. A multistate estimator such as MBAR would be appropriate if samples were available from multiple alchemical or thermodynamic states, such as intermediate $\lambda$ windows or a directly sampled perturbed ensemble. FELP addresses the reference-sampling regime, where expensive sampling is available primarily for the reference system and the key question is whether each microstate has enough local overlap to support the restricted Zwanzig estimate.
+The central hypothesis behind this formulation is that discretization creates domains of local phase-space overlap. By conditioning the exponential average on microstate membership, FELP assumes that reference configurations assigned to state $i$ adequately represent the structural ensemble of the perturbed system within that same state. This local two-state Zwanzig construction avoids the need for a multistate estimator like MBAR, which would be necessary if samples were drawn from multiple thermodynamic states or intermediate alchemical windows. Instead, FELP addresses the practical regime where expansive sampling is available only for the reference system. If a mutation is unfavorable in one conformational basin but favorable in another, the state-local reweighting factors will predict a population shift between those basins rather than yielding a single, uninformative global stability score.
 
-In a finite trajectory, state $i$ contains evaluated configurations $x_{ij}$, $j=1,\ldots,n_i$. FELP computes
+In a finite trajectory, state $i$ contains evaluated configurations $x_{ij}$ for $j=1,\ldots,n_i$. FELP estimates the local Zwanzig factor by computing a numerical average over these frames:
 \begin{equation}
 	f_i = \frac{1}{n_i}\sum_{j=1}^{n_i}\exp[-\beta(\Delta U_{ij}-s)],
 \end{equation}
-where $s=\min(\Delta U)$ over all eligible evaluated frames is a numerical stability shift. The shift cancels during normalization, so the implemented estimator remains
-\begin{equation}
-	\hat{\pi}_1(i)=\frac{\hat{\pi}_0(i)f_i}{\sum_k \hat{\pi}_0(k)f_k}.
-\end{equation}
-The corresponding relative free energy is
+where $s=\min(\Delta U)$ over all eligible frames is a uniform stability shift that prevents numerical overflow. Because this shift is applied globally, it cancels during normalization. The implemented reweighted probability is obtained by substituting the empirical reference prior $\hat{\pi}_0(i)$ and the finite-sample factor $f_i$ into Equation~\ref{eq:state_reweighting}. This step is the sample estimate of the theoretical expression above rather than a separate estimator. The corresponding relative free energy of each state is
 \begin{equation}
 	F_1(i) = -k_B T \ln \hat{\pi}_1(i) + C,
 \end{equation}
-where $C$ is chosen so that the lowest finite state free energy is zero.
+where $C$ is chosen so that the lowest finite state free energy is set to zero.
 
-The central hypothesis is that discretization creates local overlap domains: within each microstate, reference configurations and perturbed configurations share enough phase space for the two-state Zwanzig factor in Equation~\ref{eq:restricted_zwanzig} to estimate the change in that state's restricted partition function. Under this hypothesis, the global population shift can be decomposed into state-local two-Hamiltonian reweighting problems. If a mutation is unfavorable in one basin but favorable in another, FELP predicts a population shift between basins rather than a single global stability score. The estimate is conditional on the state decomposition, reference prior, restraint protocol, and energy model used for the local comparisons.
-
-This estimator is meaningful only when the perturbed ensemble is represented within the reference support of each state that contributes appreciably to $\pi_1$. If important perturbed configurations were not sampled within their assigned reference microstates, no reweighting procedure can recover them. FELP therefore treats phase-space support as part of the theory rather than as a post hoc plotting concern. Importance-sampling theory motivates the use of normalized weights and effective-sample diagnostics to measure weight degeneracy \cite{kong1992importance,elvira2022ess}. For state $i$, the effective sample size is
+Because Equation~\ref{eq:state_reweighting} is strictly valid only when the reference ensemble provides adequate support for the perturbed ensemble, FELP treats phase-space overlap as a fundamental component of the theory rather than a post hoc concern. If critical perturbed configurations are entirely missing from their assigned reference microstates, no reweighting scheme can recover them. FELP therefore audits support at two levels. First, within each state, importance-sampling theory motivates the use of effective sample size diagnostics to quantify frame-level weight degeneracy \cite{kong1992importance,elvira2022ess}. For state $i$, the local effective sample size is
 \begin{equation}
 	\mathrm{ESS}_i = \frac{\left(\sum_j w_{ij}\right)^2}{\sum_j w_{ij}^2},
 \end{equation}
-where $w_{ij}=\exp[-\beta(\Delta U_{ij}-s)]$. Low $\mathrm{ESS}_i$ indicates that the state-local perturbation factor is dominated by a small number of favorable frames rather than by broad support within the state.
+where $w_{ij}=\exp[-\beta(\Delta U_{ij}-s)]$. A low $\mathrm{ESS}_i$ is a within-state warning that the local perturbation factor is controlled by a small number of configurations rather than broad support across the sampled frames in that state. This can reflect poor local overlap, but it can also reflect noisy outlier frames. The implementation therefore records additional state-local quality-control metrics, including the dominant frame weight fraction, a leave-one-out free-energy shift, and an upper-tail Pareto shape estimate. These statistics identify states where one or a few frames control the local Zwanzig factor.
 
-FELP also computes global weight-concentration diagnostics from the normalized frame weights across all eligible frames. These include the global effective-sample fraction, the maximum normalized frame weight, and the probability mass carried by the top 1\%, 5\%, and 10\% of frame weights. To quantify support at the state-distribution level, FELP reports the target probability mass assigned to low-support states, such as states with $\mathrm{ESS}<10$ or $\mathrm{ESS}<50$, and a discrete overlap coefficient
+Second, FELP audits support at the state-distribution level. This audit asks whether poorly supported states carry enough perturbed probability to affect the inferred landscape. FELP reports the target probability mass assigned to states with low effective sample size or flagged state-local quality control, along with global weight-concentration metrics such as the global effective-sample fraction, the maximum normalized frame weight, and the probability mass carried by the top 1\%, 5\%, and 10\% of frame weights. The method also computes a discrete overlap coefficient
 \begin{equation}
 	\Omega = \sum_i \min[\hat{\pi}_0(i),\hat{\pi}_1(i)].
 \end{equation}
-The coefficient $\Omega$ measures overlap between the reference and reweighted discrete state distributions on the sampled state space. This diagnostic identifies large departures from the sampled reference prior, while leaving open the possibility of target-only basins outside the reference trajectory.
+The coefficient $\Omega$ measures the similarity between the reference and reweighted discrete state distributions. Together, the frame-level, state-local, and state-distribution diagnostics identify large departures from the sampled reference prior and define the regime in which FELP predictions are physically credible.
 
-The current implementation labels support as ``ok,'' ``caution,'' or ``poor'' using advisory thresholds. Poor support is flagged when the global effective-sample fraction is below 0.01 or when more than 25\% of target probability lies in states with $\mathrm{ESS}<10$. Caution is flagged when the global effective-sample fraction is below 0.05, when more than 10\% of target probability lies in states with $\mathrm{ESS}<10$, or when $\Omega<0.20$. These practical thresholds warn that the reweighted distribution may be dominated by limited reference support. These diagnostics define the regime in which the FELP estimate should be trusted.
+\subsection*{Results}
+\subsubsection*{FELP estimates perturbed landscapes through a four-stage local reweighting pipeline}
 
-\subsection*{Workflow}
-
-The FELP workflow has four stages \textbf{(Figure~\ref{fig:FELPWorkflow})}. First, a reference MD trajectory is generated for the system expected to contain the broader or more permissive conformational ensemble. The trajectory is summarized into microstates using a uniform $\phi/\psi$ grid, an explicit JSON/YAML state file, automatically generated two-dimensional bins, or an exported MSM bundle. These microstates define both the aggregation units for reweighting and the coordinates used for plotting.
+The FELP workflow has four stages \textbf{(Figure~\ref{fig:FELPWorkflow})}. First, a reference MD trajectory is generated for the system expected to contain the broader or more permissive conformational ensemble. The trajectory is summarized into microstates using a uniform $\phi/\psi$ grid, an explicit JSON/YAML state file, or an exported MSM bundle. Microstate construction for each benchmark is specified in Methods. These microstates define both the aggregation units for reweighting and the coordinates used for plotting.
 
 Second, each reference frame is assigned to a microstate. When raw-count priors are used, $\hat{\pi}_0(i)$ is the empirical fraction of assigned reference frames in state $i$. When a state file or MSM bundle contains trusted reference probabilities, FELP can instead normalize those loaded priors. The state identifiers used during assignment become the identifiers used throughout reweighting, summary tables, and plotting.
 
@@ -142,32 +121,18 @@ Fourth, FELP aggregates frame-level Boltzmann factors into state-level reweighti
 
 \begin{figure}[ht]
 	\centering
-	\setlength{\fboxrule}{0.5pt}\setlength{\fboxsep}{4pt}
+	\setlength{\fboxrule}{0.95pt}\setlength{\fboxsep}{4pt}
 	\fbox{%
 		\begin{minipage}{0.95\linewidth}
 			\centering
-			\vspace{0.5in}
-			\textbf{Placeholder for FELP workflow schematic.}
-			\vspace{0.5in}
-			\caption{\textbf{Free Energy Landscape Perturbation workflow.} A reference MD ensemble is partitioned into microstates in a chosen collective-variable space. Reference-to-perturbed energy differences are evaluated for sampled structures within each state. State-specific exponential averages reweight the reference probabilities to estimate the perturbed landscape. Overlap diagnostics audit whether the predicted population shift is supported by the reference ensemble.}
+			\includegraphics[width=0.95\linewidth]{figures/felp_schematic.png}
+			\caption{\textbf{Free Energy Landscape Perturbation workflow.} A reference MD ensemble (e.g., glycine dipeptide) is partitioned into microstates in a chosen collective-variable space. Reference-to-perturbed energy differences are evaluated for sampled structures within each state. State-specific exponential averages reweight the reference probabilities to estimate the perturbed landscape (e.g., proline). Overlap diagnostics audit whether the predicted population shift is supported by the reference ensemble.}
 			\label{fig:FELPWorkflow}
 		\end{minipage}
 	}
 \end{figure}
 
-\subsection*{Automatic microstate construction for custom collective variables}
-
-For simple Ramachandran analyses, a uniform $\phi/\psi$ grid is a natural microstate definition. For custom distance coordinates, fixed generic bins can be inefficient: overly fine bins produce unsupported states and noisy reweighting factors, while overly coarse bins obscure landscape features. FELP therefore supports automatic microstate generation for two-dimensional custom collective-variable spaces. When two collective variables are supplied without an explicit microstate file, FELP scans the reference trajectory, measures the configured variables, chooses conservative bins from the observed marginal and joint statistics, and writes a reusable microstate JSON file.
-
-The automatic binning procedure is designed for both reweighting and visualization. Marginal bin counts are initialized using the Freedman--Diaconis rule, which adapts to the spread and sample size of the observed distribution. The joint grid is then capped by an expected frames-per-state criterion so that the state decomposition remains statistically supported. The generated file contains a complete rectangular grid with explicit ``cv\_ranges,'' state identifiers, plot coordinates, observed ranges, quantiles, bin edges, and policy metadata. Subsequent runs can reuse this file directly, ensuring that comparisons across mutations use identical microstate definitions.
-
-\subsection*{Benchmark design}
-
-To evaluate FELP, we will compare reweighted perturbed landscapes against conventional MD simulations of the corresponding perturbed systems. The benchmark design is intentionally asymmetric: the reference simulation should cover the larger or more permissive conformational space, while the perturbation should redistribute probability within that sampled space. This design tests the intended use case of FELP. It does not ask reweighting to discover conformations absent from the reference ensemble.
-
-For each system, we construct a reference landscape, introduce a perturbation, compute the FELP-reweighted landscape, and compare the result to an independently sampled perturbed landscape. Agreement will be assessed at multiple levels: qualitative landscape topology, state population shifts, free-energy differences between dominant basins, and overlap diagnostics. Cases with poor overlap will be treated as informative failures rather than hidden errors.
-
-\subsection*{Glycine dipeptide}
+\subsubsection*{Glycine dipeptide}
 
 Glycine dipeptide provides a minimal test of FELP in a well-understood two-dimensional conformational landscape. The reference ensemble is projected into backbone Ramachandran space and partitioned into $\phi/\psi$ microstates. The current benchmark compares a glycine reference ensemble to an alanine-like perturbed ensemble, a useful first case because glycine samples a broader Ramachandran landscape than alanine. The expected result is recovery of the dominant population redistribution rather than every high-energy contour: alanine should down-weight regions that are favorable only for glycine and retain probability in the subset of Ramachandran space compatible with the perturbed side chain.
 
@@ -175,7 +140,7 @@ This benchmark is also the clearest setting for diagnosing the distinction betwe
 
 \begin{figure}[ht]
 	\centering
-	\setlength{\fboxrule}{0.5pt}\setlength{\fboxsep}{4pt}
+	\setlength{\fboxrule}{0.95pt}\setlength{\fboxsep}{4pt}
 	\fbox{%
 		\begin{minipage}{0.95\linewidth}
 			\centering
@@ -188,7 +153,7 @@ This benchmark is also the clearest setting for diagnosing the distinction betwe
 	}
 \end{figure}
 
-\subsection*{Chignolin}
+\subsubsection*{Chignolin}
 
 Chignolin tests FELP on a small protein whose conformational preferences depend on coordinated intramolecular contacts. Rather than projecting only the target residue's backbone angles, we define collective variables based on intramolecular distances that report on global compaction and turn geometry. This benchmark is intended to test whether FELP can predict mutation-induced shifts in a more protein-like landscape while retaining a compact and interpretable state representation.
 
@@ -198,7 +163,7 @@ The expected chignolin result is a mutation-dependent redistribution between com
 
 \begin{figure}[ht]
 	\centering
-	\setlength{\fboxrule}{0.5pt}\setlength{\fboxsep}{4pt}
+	\setlength{\fboxrule}{0.95pt}\setlength{\fboxsep}{4pt}
 	\fbox{%
 		\begin{minipage}{0.95\linewidth}
 			\centering
@@ -211,13 +176,13 @@ The expected chignolin result is a mutation-dependent redistribution between com
 	}
 \end{figure}
 
-\subsection*{T4 lysozyme}
+\subsubsection*{T4 lysozyme}
 
 T4 lysozyme provides a natural larger benchmark because it has been used extensively to study ligand binding, cavity mutants, and population-shift methods, including the PopShift validation on L99A \cite{morton1995t4,smith2024popshift}. For FELP, the T4 lysozyme benchmark should be framed around mutations or chemical perturbations that redistribute probability among pre-existing conformational substates rather than requiring discovery of an entirely new fold or pocket geometry.
 
 In this setting, the state definition should be chosen to reflect the mechanistic question. Possible collective variables include cavity-opening distances, helix or loop distances surrounding the engineered binding pocket, side-chain rotameric states of pocket residues, or MSM states derived from reference simulations. The expected result is a more stringent test than glycine or chignolin: FELP should identify mutation-induced shifts among protein substates when the reference trajectory samples those substates, while the diagnostics should flag cases in which the mutation stabilizes configurations absent from the reference simulation. This benchmark will therefore test both the scalability of FELP and the practical value of its overlap audit.
 
-\subsection*{Overlap diagnostics and failure modes}
+\subsubsection*{Overlap diagnostics and failure modes}
 
 FELP is not intended to replace perturbed MD when the perturbation creates a new basin absent from the reference simulation. Its value lies in rapidly estimating population shifts within a sampled landscape and in identifying when that estimate is unsupported. The most important failure mode is poor phase-space overlap. In practice, this appears as a small effective sample size, target probability concentrated in low-support states, one or a few frames dominating the reweighted distribution, or positive-prior states with no evaluated support.
 
@@ -237,7 +202,7 @@ The planned benchmarks are designed to expose these strengths and limitations. G
 
 \subsection*{Conclusion}
 
-Free Energy Landscape Perturbation provides a framework for estimating how mutations and other chemical perturbations reshape conformational free-energy landscapes without requiring a new converged MD simulation for every perturbed system. By combining reference ensemble sampling, microstate-based reweighting, local energy-difference evaluation, and overlap diagnostics, FELP connects the efficiency of perturbative calculations with the ensemble perspective required for protein function. The resulting approach is most powerful when the reference simulation captures the relevant conformational space and when diagnostics confirm that the predicted population shift is supported. Under these conditions, expansive sampling performed once for a reference model can be reused to test a family of perturbations while preserving a direct connection to thermodynamic state populations.
+Free Energy Landscape Perturbation provides a framework for estimating how mutations and other chemical perturbations reshape conformational free energy landscapes without requiring a new converged MD simulation for every perturbed system. By combining reference ensemble sampling, microstate-based reweighting, local energy-difference evaluation, and overlap diagnostics, FELP connects the efficiency of perturbative calculations with the ensemble perspective required for protein function. The resulting approach is most powerful when the reference simulation captures the relevant conformational space and when diagnostics confirm that the predicted population shift is supported. Under these conditions, expansive sampling performed once for a reference model can be reused to test a family of perturbations while preserving a direct connection to thermodynamic state populations.
 
 \subsection*{Methods}
 
@@ -249,9 +214,11 @@ Trajectory frames are loaded with a user-specified topology, optional frame star
 
 \subsubsection*{Microstate construction}
 
-For Ramachandran analyses, microstates are defined on a uniform $\phi/\psi$ grid over $[-180^\circ,180^\circ)$ for each axis. For custom collective-variable analyses, microstates are defined by explicit JSON or YAML files containing state identifiers and ``cv\_ranges.'' State definitions may include plotting coordinates and loaded reference probabilities. If no probabilities are provided, FELP can compute raw-count priors from the assigned reference trajectory. Angular intervals are treated circularly so that states crossing the $-180^\circ/180^\circ$ boundary are handled correctly.
+For Ramachandran analyses, microstates are defined on a uniform $\phi/\psi$ grid over $[-180^\circ,180^\circ)$ for each axis. For glycine dipeptide and other $\phi/\psi$ benchmarks, this grid supplies both assignment and plotting coordinates.
 
-For two-dimensional custom collective variables, FELP can automatically construct a reusable microstate file. The trajectory is scanned, configured backbone dihedrals and/or distance CVs are measured, marginal bin counts are initialized using the Freedman--Diaconis rule, and the joint grid is capped by a support criterion targeting approximately 25 frames per state with a maximum of 144 total states. The generated file records bin edges, observed ranges, quantiles, state centers, and policy metadata. All subsequent reference and perturbed analyses for a benchmark should use the same microstate definitions.
+For custom collective-variable analyses, microstates are usually defined by explicit JSON or YAML files containing state identifiers and ``cv\_ranges.'' State definitions may include plotting coordinates and loaded reference probabilities. If no probabilities are provided, FELP can compute raw-count priors from the assigned reference trajectory. Angular intervals are treated circularly so that states crossing the $-180^\circ/180^\circ$ boundary are handled correctly.
+
+For the chignolin benchmark, we use two intramolecular distance coordinates without a pre-specified grid. FELP's automatic microstate generator scans the reference trajectory, measures the configured variables, initializes marginal bin widths using the Freedman--Diaconis rule, and caps the joint grid with a support criterion targeting approximately 25 assigned frames per state and at most 144 total states. The run writes a reusable microstate JSON file recording bin edges, observed ranges, quantiles, state centers, and policy metadata; all chignolin reference and mutant analyses reuse that file so mutations are compared on an identical state decomposition.
 
 MSM-backed analyses use a previously exported PyEMMA bundle. The bundle supplies precomputed assignments, cluster or metastable state definitions, and optionally loaded stationary probabilities. The FELP reweighting equation is unchanged; the MSM provides the state space and reference prior.
 
@@ -277,7 +244,7 @@ Diagnostics include global and state-level effective sample size, maximum normal
 
 \subsubsection*{Visualization and comparison to perturbed MD}
 
-FELP writes frame-level results, microstate summaries, reweighted surfaces, run configuration, sampling manifests, and JSON summaries. Discrete microstate plots use the state probabilities and relative free energies from the microstate summary. Projected free-energy plots use state-consistent frame weights to construct weighted histograms in the plotted collective-variable coordinates. Free energies are shifted so that the lowest finite value is zero; only differences between states or plotted bins are meaningful.
+FELP writes frame-level results, microstate summaries, reweighted surfaces, run configuration, sampling manifests, and JSON summaries. Discrete microstate plots use the state probabilities and relative free energies from the microstate summary. Projected free energy plots use state-consistent frame weights to construct weighted histograms in the plotted collective-variable coordinates. Free energies are shifted so that the lowest finite value is zero; only differences between states or plotted bins are meaningful.
 
 For each benchmark, the FELP-reweighted landscape will be compared to an independently sampled perturbed MD landscape. Planned comparisons include the identity and location of dominant basins, relative free energies between basins, per-state occupancy changes, target-versus-reference probability scatter plots, KL-divergence or occupancy-shift summaries, and whether states with the largest predicted changes are supported by adequate effective sample sizes.
 
