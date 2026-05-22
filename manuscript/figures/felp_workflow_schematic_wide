@@ -1,0 +1,55 @@
+digraph FELP_workflow_wide {
+	graph [bgcolor=white fontname=Helvetica fontsize=14 nodesep=0.35 pad=0.3 rankdir=LR ranksep=0.48 splines=true]
+	node [fontname=Helvetica fontsize=14 margin="0.20,0.10" shape=box style="rounded,filled"]
+	edge [arrowsize=0.65 color="#4a5568" fontname=Helvetica fontsize=11]
+	subgraph cluster_s1 {
+		color="#2c5282" fontcolor="#2c5282" fontname="Helvetica-Bold" fontsize=15 label="1 · Reference" style=rounded
+		md [label="Reference MD
+(topology + coords)" color="#2b6cb0" fillcolor="#ebf8ff"]
+		ms [label="Microstate atlas
+grid · file · MSM" color="#4a5568" fillcolor="#f7fafc"]
+		md -> ms
+	}
+	subgraph cluster_s2 {
+		color="#2c5282" fontcolor="#2c5282" fontname="Helvetica-Bold" fontsize=15 label="2 · Assign" style=rounded
+		cv [label="CVs · assign i
+π₀(i)" fillcolor="#f7fafc"]
+		prior [label="π₀(i)" color="#2d3748" fillcolor="#edf2f7"]
+		cv -> prior
+	}
+	subgraph cluster_s3 {
+		color="#2c5282" fontcolor="#2c5282" fontname="Helvetica-Bold" fontsize=15 label="3 · Symmetric perturbation (per frame)" style=rounded
+		conv [label="ParmEd →
+PyRosetta" fillcolor="#f7fafc"]
+		rest [label="Reference-frame
+restraints" color="#c05621" fillcolor="#fffaf0"]
+		ref_mut [label="Ref: mutate /
+enforce original" color="#c05621" fillcolor="#fffaf0"]
+		pert_mut [label="Pert: mutate
+target" color="#c05621" fillcolor="#fffaf0"]
+		openmm [label="OpenMM (ff14SBonlysc + GBNeck2)
+restrained min → U₀, U₁
+ΔU = U₁ − U₀" color="#276749" fillcolor="#f0fff4"]
+		conv -> rest
+		rest -> ref_mut
+		rest -> pert_mut
+		ref_mut -> openmm
+		pert_mut -> openmm
+	}
+	subgraph cluster_s4 {
+		color="#2c5282" fontcolor="#2c5282" fontname="Helvetica-Bold" fontsize=15 label="4 · Reweight" style=rounded
+		fi [label="fᵢ = ⟨e^{−βΔU}⟩
+ESS · QC · 𝒰" color="#6b46c1" fillcolor="#faf5ff"]
+		pool [label="Optional:
+neighbor pool · L-curve" color="#9f7aea" fillcolor="#faf5ff" style="rounded,filled,dashed"]
+		pi [label="π₁(i) ∝ π₀(i) · fᵢ
+F₁(i)" color="#2d3748" fillcolor="#e2e8f0"]
+		fi -> pool
+		pool -> pi
+		fi -> pi [label=default style=dashed]
+	}
+	ms -> cv
+	prior -> conv
+	openmm -> fi
+	prior -> pi [color="#718096" constraint=false style=dashed]
+}
