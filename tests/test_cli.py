@@ -1353,3 +1353,47 @@ def test_build_felp_plot_config_normalizes_cv_spec_strings(tmp_path: Path) -> No
     config = build_felp_plot_config(namespace)
     assert config.cv_x == "ends"
     assert config.cv_y == "turn"
+
+
+def test_build_felp_plot_config_fel_max_energy_kcal_mol(tmp_path: Path) -> None:
+    summary_csv = tmp_path / "microstate_summary.csv"
+    summary_csv.write_text("label,reference_probability,target_probability\n", encoding="utf-8")
+
+    parser = build_parser()
+    namespace = parser.parse_args(
+        [
+            "felp-plot",
+            "--microstate-summary",
+            str(summary_csv),
+            "--output-dir",
+            str(tmp_path / "felp_plots"),
+            "--fel-max-energy-kcal-mol",
+            "3.0",
+            "--plot-energy-unit",
+            "kcal_mol",
+        ]
+    )
+    config = build_felp_plot_config(namespace)
+    assert config.fel_max_energy_kj_mol == pytest.approx(3.0 * 4.184)
+
+
+def test_build_felp_plot_config_rejects_both_fel_max_energy_flags(tmp_path: Path) -> None:
+    summary_csv = tmp_path / "microstate_summary.csv"
+    summary_csv.write_text("label,reference_probability,target_probability\n", encoding="utf-8")
+
+    parser = build_parser()
+    namespace = parser.parse_args(
+        [
+            "felp-plot",
+            "--microstate-summary",
+            str(summary_csv),
+            "--output-dir",
+            str(tmp_path / "felp_plots"),
+            "--fel-max-energy-kj-mol",
+            "12",
+            "--fel-max-energy-kcal-mol",
+            "3",
+        ]
+    )
+    with pytest.raises(ConfigurationError, match="only one of"):
+        build_felp_plot_config(namespace)

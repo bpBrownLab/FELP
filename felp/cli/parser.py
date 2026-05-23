@@ -39,6 +39,27 @@ from felp.plotting import (
 )
 from felp.plotting.common import DEFAULT_FEL_COLORMAP, FELP_KL_DIVERGENCE_COLORMAP
 
+_KJ_PER_KCAL = 4.184
+
+
+def _resolve_fel_max_energy_kj_mol(
+    fel_max_energy_kj_mol: float | None,
+    fel_max_energy_kcal_mol: float | None,
+) -> float | None:
+    """Return the free-energy display cap in kJ/mol from CLI energy-cap flags."""
+
+    if fel_max_energy_kj_mol is not None and fel_max_energy_kcal_mol is not None:
+        raise ConfigurationError(
+            "Specify only one of --fel-max-energy-kj-mol and --fel-max-energy-kcal-mol."
+        )
+    if fel_max_energy_kcal_mol is not None:
+        if fel_max_energy_kcal_mol <= 0.0:
+            raise ConfigurationError(
+                "fel_max_energy_kcal_mol must be positive when set."
+            )
+        return float(fel_max_energy_kcal_mol) * _KJ_PER_KCAL
+    return fel_max_energy_kj_mol
+
 
 def _default_cv_name(kind: str, residue_number: int, target_residue_number: int) -> str:
     """Return the legacy-friendly output name for a parsed CV spec."""
@@ -1529,7 +1550,18 @@ def _add_felp_plot_arguments(parser: argparse.ArgumentParser) -> None:
         help=(
             "Cap relative free-energy color scales at this value (kJ/mol). "
             "Bins or points above the cap are drawn in a flat background color; "
-            "delta free-energy projections use a symmetric cap (± this value)."
+            "delta free-energy projections use a symmetric cap (± this value). "
+            "Mutually exclusive with --fel-max-energy-kcal-mol."
+        ),
+    )
+    parser.add_argument(
+        "--fel-max-energy-kcal-mol",
+        type=float,
+        default=None,
+        help=(
+            "Same as --fel-max-energy-kj-mol, but the cap is given in kcal/mol "
+            "(converted internally to kJ/mol). Convenient with --plot-energy-unit "
+            "kcal_mol. Mutually exclusive with --fel-max-energy-kj-mol."
         ),
     )
     parser.add_argument(
@@ -1537,9 +1569,10 @@ def _add_felp_plot_arguments(parser: argparse.ArgumentParser) -> None:
         choices=("kj_mol", "kcal_mol"),
         default="kj_mol",
         help=(
-            "Energy unit for plot axes and colorbars. CSV inputs and "
-            "--fel-max-energy-kj-mol remain in kJ/mol; values are converted for display "
-            "when set to kcal_mol (1 kcal/mol = 4.184 kJ/mol)."
+            "Energy unit for plot axes and colorbars. CSV inputs remain in kJ/mol; "
+            "values are converted for display when set to kcal_mol "
+            "(1 kcal/mol = 4.184 kJ/mol). Use --fel-max-energy-kcal-mol to cap the "
+            "color scale directly in kcal/mol."
         ),
     )
 
@@ -1669,7 +1702,17 @@ def _add_md_kl_plot_arguments(parser: argparse.ArgumentParser) -> None:
         default=None,
         help=(
             "Cap the MD reference free-energy color scale at this value (kJ/mol). "
-            "Bins above the cap are drawn in the flat background color."
+            "Bins above the cap are drawn in the flat background color. "
+            "Mutually exclusive with --fel-max-energy-kcal-mol."
+        ),
+    )
+    plot_group.add_argument(
+        "--fel-max-energy-kcal-mol",
+        type=float,
+        default=None,
+        help=(
+            "Same as --fel-max-energy-kj-mol, but the cap is given in kcal/mol. "
+            "Mutually exclusive with --fel-max-energy-kj-mol."
         ),
     )
     plot_group.add_argument(
@@ -1678,7 +1721,7 @@ def _add_md_kl_plot_arguments(parser: argparse.ArgumentParser) -> None:
         default="kj_mol",
         help=(
             "Energy unit for the MD reference free-energy plot. "
-            "--fel-max-energy-kj-mol remains in kJ/mol and is converted for display."
+            "Use --fel-max-energy-kcal-mol to cap the color scale in kcal/mol."
         ),
     )
     plot_group.add_argument(
@@ -2312,7 +2355,10 @@ def build_felp_plot_config(namespace: argparse.Namespace) -> FELPPlotConfig:
         probability_colormap=getattr(namespace, "probability_cmap", None),
         divergence_colormap=getattr(namespace, "divergence_cmap", None),
         kl_scale_by_kbt=namespace.kl_scale_by_kbt,
-        fel_max_energy_kj_mol=namespace.fel_max_energy_kj_mol,
+        fel_max_energy_kj_mol=_resolve_fel_max_energy_kj_mol(
+            namespace.fel_max_energy_kj_mol,
+            namespace.fel_max_energy_kcal_mol,
+        ),
         plot_energy_unit=namespace.plot_energy_unit,
         weight_treatment=namespace.reweighting_weight_treatment,
         cv_x=namespace.plot_cv_x,
@@ -2343,7 +2389,10 @@ def build_md_kl_plot_config(namespace: argparse.Namespace) -> MDKLPlotConfig:
         chunk_size=namespace.chunk_size,
         fel_bins=namespace.fel_bins,
         fel_max_points=namespace.fel_max_points,
-        fel_max_energy_kj_mol=namespace.fel_max_energy_kj_mol,
+        fel_max_energy_kj_mol=_resolve_fel_max_energy_kj_mol(
+            namespace.fel_max_energy_kj_mol,
+            namespace.fel_max_energy_kcal_mol,
+        ),
         plot_energy_unit=namespace.plot_energy_unit,
         fel_colormap=namespace.fel_cmap,
         weight_treatment=namespace.reweighting_weight_treatment,

@@ -465,6 +465,56 @@ def test_generate_felp_plots_plot_energy_unit_kcal_mol(tmp_path: Path) -> None:
     assert (tmp_path / "felp_plots" / "delta_free_energy_projection.png").is_file()
 
 
+def test_generate_felp_plots_fel_max_energy_kcal_mol_display_cap(tmp_path: Path) -> None:
+    summary_csv = tmp_path / "microstate_summary.csv"
+
+    with open(summary_csv, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "state_id",
+                "label",
+                "frame_count",
+                "reference_probability",
+                "target_probability",
+                "free_energy_kj_mol",
+                "plot_x",
+                "plot_y",
+                "phi_center",
+                "psi_center",
+                "metadata",
+            ],
+        )
+        writer.writeheader()
+        writer.writerow(
+            {
+                "state_id": "cluster_0",
+                "label": "cluster_0",
+                "frame_count": 1,
+                "reference_probability": 0.5,
+                "target_probability": 0.5,
+                "free_energy_kj_mol": "50.0",
+                "plot_x": "0.0",
+                "plot_y": "0.0",
+                "phi_center": "0.0",
+                "psi_center": "0.0",
+                "metadata": "{}",
+            }
+        )
+
+    summary = generate_felp_plots(
+        FELPPlotConfig(
+            microstate_summary_csv=str(summary_csv),
+            output_dir=str(tmp_path / "felp_plots"),
+            fel_max_energy_kj_mol=3.0 * 4.184,
+            plot_energy_unit="kcal_mol",
+        )
+    )
+
+    assert summary["fel_max_energy_kj_mol"] == pytest.approx(3.0 * 4.184)
+    assert summary["plot_energy_unit"] == "kcal_mol"
+
+
 def test_generate_felp_plots_builds_state_grid_landscapes(tmp_path: Path) -> None:
     summary_csv = tmp_path / "microstate_summary.csv"
 

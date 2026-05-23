@@ -303,7 +303,7 @@ Those weighted histograms are normalized to probability surfaces and converted t
 
 ### Capped free-energy plots
 
-`felp-plot` supports `--fel-max-energy-kj-mol` to cap the displayed color scale of free-energy plots. This is a plotting option only; it does not change the underlying probabilities or free energies.
+`felp-plot` supports `--fel-max-energy-kj-mol` or `--fel-max-energy-kcal-mol` to cap the displayed color scale of free-energy plots. This is a plotting option only; it does not change the underlying probabilities or free energies.
 
 When the cap is set:
 
