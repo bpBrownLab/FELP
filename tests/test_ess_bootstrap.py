@@ -13,7 +13,13 @@ from felp.core import (
     MicrostateConfig,
     MicrostateDefinition,
 )
-from felp.plotting.ess import ESSCompareConfig
+from felp.plotting.ess import (
+    ESSCompareConfig,
+    _comparison_row,
+    _group_indices_by_reference,
+    _reference_from_label,
+    _target_from_label,
+)
 from felp.plotting.ess_bootstrap import (
     _atlas_empirical_priors_for_bootstrap,
     _frame_state_atlas_for_bootstrap,
@@ -22,6 +28,39 @@ from felp.plotting.ess_bootstrap import (
     percentile_summary,
 )
 from felp.reweighting import MicrostateAtlas
+
+
+def test_reference_and_target_from_label() -> None:
+    assert _reference_from_label("GLY→ALA") == "GLY"
+    assert _target_from_label("GLY→ALA") == "ALA"
+    assert _reference_from_label("PRO->TRP") == "PRO"
+    assert _target_from_label("felp_ALA_to_VAL_reweight_lcurve") == "VAL"
+
+
+def test_group_indices_by_reference_sorts_targets() -> None:
+    labels = ["PRO→TRP", "GLY→ALA", "GLY→TRP", "PRO→ALA"]
+    grouped = _group_indices_by_reference(labels)
+    assert grouped["GLY"] == [labels.index("GLY→ALA"), labels.index("GLY→TRP")]
+    assert grouped["PRO"] == [labels.index("PRO→ALA"), labels.index("PRO→TRP")]
+
+
+def test_comparison_row_reads_flat_per_method_summary(tmp_path) -> None:
+    summary_path = tmp_path / "run_summary.json"
+    summary_path.write_text(
+        json.dumps(
+            {
+                "global_effective_sample_fraction": 0.25,
+                "overlap_coefficient": 0.4,
+                "max_normalized_weight": 0.9,
+                "target_probability_unreliable_local_support": 0.15,
+            }
+        ),
+        encoding="utf-8",
+    )
+    row = _comparison_row(str(summary_path), "GLY-->ALA")
+    assert row["global_effective_sample_fraction"] == pytest.approx(0.25)
+    assert row["overlap_coefficient"] == pytest.approx(0.4)
+    assert row["target_probability_unreliable_local_support"] == pytest.approx(0.15)
 
 
 def test_ess_compare_config_bootstrap_requires_both(tmp_path) -> None:

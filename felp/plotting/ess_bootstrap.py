@@ -27,8 +27,7 @@ _ANCESTOR_RUN_CONFIG_MAX_STEPS = 32
 METADATA_KEYS: tuple[str, ...] = (
     "global_effective_sample_fraction",
     "overlap_coefficient",
-    "target_probability_low_ess_mass_ess_lt_10",
-    "target_probability_low_ess_mass_ess_lt_50",
+    "target_probability_unreliable_local_support",
     "max_normalized_weight",
 )
 

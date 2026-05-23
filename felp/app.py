@@ -150,6 +150,12 @@ def _build_overlap_diagnostics(metadata: dict[str, Any]) -> dict[str, Any]:
                 metadata.get("target_probability_low_ess_mass_ess_lt_50", 0.0)
             ),
         },
+        "target_probability_unreliable_local_support": float(
+            metadata.get("target_probability_unreliable_local_support", 0.0)
+        ),
+        "unreliable_local_support_criterion": metadata.get(
+            "unreliable_local_support_criterion", ""
+        ),
         "assessment_thresholds": _OVERLAP_ASSESSMENT_THRESHOLDS,
         "scope": _OVERLAP_SCOPE_NOTE,
         "limitations": _OVERLAP_LIMITATIONS_NOTE,

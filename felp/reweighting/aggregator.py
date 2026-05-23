@@ -19,8 +19,9 @@ from felp.core import (
     ReweightingError,
 )
 from .atlas import MicrostateAtlas
+from .overlap_support import LOW_ESS_ABSOLUTE_THRESHOLDS
 
-_LOW_ESS_THRESHOLDS = (10, 50)
+_LOW_ESS_THRESHOLDS = LOW_ESS_ABSOLUTE_THRESHOLDS
 _PSIS_MIN_TAIL_SAMPLES = 3
 _PSIS_CONSERVATIVE_K_THRESHOLD = 0.7
 

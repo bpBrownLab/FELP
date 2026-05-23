@@ -19,6 +19,10 @@ from felp.reweighting.aggregator import (
     _state_qc_thresholds,
     _top_weight_mass,
 )
+from felp.reweighting.overlap_support import (
+    LOW_ESS_RELATIVE_FRACTION,
+    state_has_unreliable_local_support,
+)
 from felp.reweighting.outcome import ReweightingOutcome
 from felp.reweighting.prep import ReweightingPrep, StatePrepData
 
@@ -138,6 +142,21 @@ def finalize_microstate_outcome(
         )
         for threshold in _LOW_ESS_THRESHOLDS
     }
+    target_probability_unreliable_local_support = float(
+        sum(
+            target_probability
+            for item, target_probability in zip(
+                preliminary_results,
+                target_probabilities,
+                strict=True,
+            )
+            if state_has_unreliable_local_support(
+                float(item["effective_sample_size"]),
+                int(item["frame_count"]),
+                min_state_ess=prep.qc_config.min_state_ess,
+            )
+        )
+    )
     qc_top_items = [
         (item, target_probability)
         for item, target_probability in zip(
@@ -231,6 +250,14 @@ def finalize_microstate_outcome(
         "target_probability_low_ess_mass_ess_lt_50": target_probability_low_ess_mass[
             50
         ],
+        "target_probability_unreliable_local_support": (
+            target_probability_unreliable_local_support
+        ),
+        "unreliable_local_support_criterion": (
+            "ESS_i < max(min_state_ess, "
+            f"{LOW_ESS_RELATIVE_FRACTION:g} * n_i); "
+            f"min_state_ess={prep.qc_config.min_state_ess:g}"
+        ),
         "reweighting_qc_policy": qc_config.policy,
         "reweighting_weight_treatment": qc_config.weight_treatment,
         "reweighting_qc_thresholds": _state_qc_thresholds(qc_config),

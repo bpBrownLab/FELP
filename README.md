@@ -18,6 +18,8 @@ This repository also supports MSM-backed FELP workflows. In that mode, a pre-fit
 
 ## Theory
 
+For overlap metrics, asymmetric support (GLY→ALA vs ALA→GLY), and which diagnostics detect pathology on sampled support, see [docs/overlap_diagnostics.md](docs/overlap_diagnostics.md).
+
 ### What FELP estimates
 
 FELP is designed to answer a state-resolved question:
@@ -215,6 +217,46 @@ ESS_i = (sum_j w_ij)^2 / sum_j (w_ij^2)
 
 Low ESS is a warning sign that a state is dominated by a small number of very favorable frames.
 
+### Phase-space support and overlap diagnostics
+
+FELP estimates `pi_target` only on the **reference-sampled support** (bins or MSM states where the reference trajectory was assigned and evaluated). Target-only conformations outside that support are **not** assigned low overlap — they are **absent** (`pi_target = 0` with `raw_counts` priors on empty grid cells). See [docs/overlap_diagnostics.md](docs/overlap_diagnostics.md) for the full metric guide.
+
+#### Hopeful vs pathological directions
+
+For mutation scans such as GLY/PRO/ALA → X, the intended regime is **broad reference → narrower target** (e.g. **GLY → ALA**): the reference visits many φ/ψ bins; the target landscape concentrates on a subset. That can make **symmetric** metrics look poor even when the run is fine:
+
+- **Low overlap coefficient Ω** — target distribution is a subset of the reference distribution.
+- **Low global ESS fraction** — target weights are concentrated globally, not spread across all frames.
+
+The **pathology** to detect is the opposite direction (e.g. **ALA → GLY**): a **narrow** reference cannot represent much of the target ensemble. Missing GLY basins are silent in FELP; the failure mode on sampled support is **unreliable local reweighting** where `pi_target` is large.
+
+Ask: *On the states we actually occupy, is local reweighting trustworthy?* — not *Is the target as wide as the reference?*
+
+#### Why ESS cutoffs 10 and 50?
+
+`target_probability_low_ess_mass_ess_lt_10` and `_ess_lt_50` report the fraction of `pi_target` in states with **absolute** Kish ESS below 10 or 50. These are **nominal advisory flags** (common IS rules of thumb), not derived optima. They are comparable across runs but harsh on small-`n` states and lenient on large-`n` states.
+
+A more scale-aware summary is **`target_probability_unreliable_local_support`**: sum of `pi_target` over states with
+
+```text
+ESS_i < max(min_state_ess, 0.1 * n_i)
+```
+
+using `min_state_ess` from reweighting QC (default 5). Prefer this when interpreting pathology.
+
+#### Best metrics for ALA → GLY-style failure
+
+| Priority | Metric | Interpretation |
+|----------|--------|----------------|
+| 1 | `target_probability_low_ess_mass_ess_lt_10` or `target_probability_unreliable_local_support` | **Lower is better.** High = most of the claimed target landscape sits in states with degenerate local weights. |
+| 2 | `overlap_assessment` + `overlap_assessment_reasons` | Trust **low-ESS mass** reasons; treat **global ESS fraction** alone as often benign subset effect. |
+| 3 | Per-state `effective_sample_size` and `target_probability` in `microstate_summary.csv` | Inspect states that matter. |
+| 4 | `max_normalized_weight` | **Lower is better** — global weight degeneracy. |
+| — | `overlap_coefficient` | **Higher is better** but ambiguous for subset targets; weak ALA→GLY detector. |
+| — | Global ESS fraction | **Higher is better** but **misleading** for GLY→ALA-like subset cases. |
+
+Use **bidirectional runs** (broad reference forward, narrow reference reverse) and **reference occupancy** of the state partition when coverage gaps matter.
+
 ### Spatially coupled reweighting backends
 
 Beyond independent Zwanzig, `felp run` and `felp summarize` support optional backends that share the same per-state local factors but apply **grid-based spatial regularization** before computing `pi_target`:
@@ -288,13 +330,13 @@ When using an MSM bundle, keep in mind that any loaded prior inherits the usual 
 
 FELP is not a guarantee of globally converged free energies. The method can fail or become misleading when:
 
-- the reference ensemble does not sample important perturbed conformations;
-- a state has very poor overlap between reference and perturbed restrained ensembles;
+- the reference ensemble does not sample important perturbed conformations (target-only basins are **missing**, not flagged by Ω);
+- a state has very poor overlap between reference and perturbed restrained ensembles on **sampled** support (see overlap diagnostics above);
 - the chosen microstates are too coarse or mix multiple distinct basins;
 - the restraints meaningfully distort the physics of the comparison;
 - the energy model is not appropriate for the chemistry of interest.
 
-Always inspect `frame_count`, `effective_sample_size`, `mean_delta_u_kj_mol`, and the plotted landscapes before drawing mechanistic conclusions.
+Always inspect `overlap_assessment`, low-ESS / unreliable-support masses, `frame_count`, per-state `effective_sample_size`, and the plotted landscapes before drawing mechanistic conclusions.
 
 ## Implementation Overview
 

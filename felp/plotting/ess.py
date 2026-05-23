@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import json
 import math
 import os
+import re
 from concurrent.futures import ProcessPoolExecutor
 from typing import Any
 
@@ -86,9 +87,20 @@ def _collect_ess_compare_bootstrap_stats(
         )
     return stats
 
-_BAR_FACE_COLOR = "#d4d4d4"
-_BAR_EDGE_COLOR = "black"
+_REFERENCE_ORDER = ("GLY", "PRO", "ALA")
+_REFERENCE_COLORS = {
+    "GLY": "#2d6a4f",  # dark green
+    "PRO": "#52b788",  # medium green
+    "ALA": "#b7e4c7",  # light green
+}
+_REFERENCE_EDGE_COLORS = {
+    "GLY": "black",
+    "PRO": "black",
+    "ALA": "black",
+}
+_DEFAULT_REFERENCE_COLOR = "#666666"
 _BAR_EDGE_WIDTH = 0.8
+_LOW_ESS_COLORS = ("#40916c", "#95d5b2")  # foresty low ess colors
 
 
 @dataclass(frozen=True)
@@ -159,7 +171,7 @@ def generate_ess_comparison_plots(config: ESSCompareConfig) -> dict[str, object]
     config.validate()
     prepare_output_dir(config.output_dir, overwrite=config.overwrite)
     plt = import_matplotlib()
-    apply_publication_style()
+    _apply_ess_compare_style(plt)
 
     rows = [
         _comparison_row(path, label)
@@ -220,18 +232,25 @@ def generate_ess_comparison_plots(config: ESSCompareConfig) -> dict[str, object]
                 title="Discrete overlap coefficient (bootstrap)",
                 filename="overlap_coefficient.png",
             ),
-            _plot_low_ess_mass_bootstrap(
+            _plot_single_metric_bootstrap(
                 plt=plt,
                 output_dir=config.output_dir,
                 labels=list(config.labels or ()),
                 stats=bootstrap_stats,
+                key_index=2,
+                ylabel="Target probability mass",
+                title=(
+                    "Target probability in states with unreliable local support "
+                    "(bootstrap)"
+                ),
+                filename="unreliable_local_support_mass.png",
             ),
             _plot_single_metric_bootstrap(
                 plt=plt,
                 output_dir=config.output_dir,
                 labels=list(config.labels or ()),
                 stats=bootstrap_stats,
-                key_index=4,
+                key_index=3,
                 ylabel="Max normalized frame weight",
                 title="Maximum normalized importance weight (bootstrap)",
                 filename="max_normalized_weight.png",
@@ -258,10 +277,17 @@ def generate_ess_comparison_plots(config: ESSCompareConfig) -> dict[str, object]
                 title="Discrete overlap coefficient",
                 filename="overlap_coefficient.png",
             ),
-            _plot_low_ess_mass(
+            _plot_single_metric(
                 plt=plt,
                 output_dir=config.output_dir,
                 rows=rows,
+                key="target_probability_unreliable_local_support",
+                ylabel="Target probability mass",
+                title=(
+                    "Target probability in states with unreliable local support "
+                    r"($\mathrm{ESS}_i < \max(\mathrm{ESS}_{\min}, 0.1\,n_i)$)"
+                ),
+                filename="unreliable_local_support_mass.png",
             ),
             _plot_single_metric(
                 plt=plt,
@@ -285,14 +311,43 @@ def generate_ess_comparison_plots(config: ESSCompareConfig) -> dict[str, object]
     return result
 
 
+def _overlap_diagnostics_for_comparison(summary: dict[str, Any]) -> dict[str, Any]:
+    """Return overlap diagnostics from nested or flat per-method run summaries."""
+
+    nested = _mapping(summary.get("overlap_diagnostics"))
+    if nested.get("global_effective_sample_fraction") is not None or nested.get(
+        "overlap_coefficient"
+    ) is not None:
+        return nested
+    if summary.get("global_effective_sample_fraction") is None and summary.get(
+        "overlap_coefficient"
+    ) is None:
+        return nested
+    return {
+        "global_effective_sample_size": summary.get("global_effective_sample_size"),
+        "global_effective_sample_fraction": summary.get(
+            "global_effective_sample_fraction"
+        ),
+        "overlap_coefficient": summary.get("overlap_coefficient"),
+        "max_normalized_weight": summary.get("max_normalized_weight"),
+        "top_weight_mass_by_fraction": {
+            "top_1_percent": summary.get("top_1_percent_weight_mass"),
+            "top_5_percent": summary.get("top_5_percent_weight_mass"),
+            "top_10_percent": summary.get("top_10_percent_weight_mass"),
+        },
+        "target_probability_unreliable_local_support": summary.get(
+            "target_probability_unreliable_local_support"
+        ),
+    }
+
+
 def _comparison_row(path: str, label: str) -> dict[str, object]:
     with open(path, encoding="utf-8") as handle:
         summary = json.load(handle)
     if not isinstance(summary, dict):
         raise ConfigurationError(f"Run summary must be a JSON object: {path}")
 
-    diagnostics = _mapping(summary.get("overlap_diagnostics"))
-    low_ess = _mapping(diagnostics.get("target_probability_low_ess_mass_by_threshold"))
+    diagnostics = _overlap_diagnostics_for_comparison(summary)
     top_weight_mass = _mapping(diagnostics.get("top_weight_mass_by_fraction"))
     return {
         "label": label,
@@ -316,11 +371,8 @@ def _comparison_row(path: str, label: str) -> dict[str, object]:
         "top_10_percent_weight_mass": _float_or_nan(
             top_weight_mass.get("top_10_percent")
         ),
-        "target_probability_low_ess_mass_ess_lt_10": _float_or_nan(
-            low_ess.get("ess_lt_10")
-        ),
-        "target_probability_low_ess_mass_ess_lt_50": _float_or_nan(
-            low_ess.get("ess_lt_50")
+        "target_probability_unreliable_local_support": _float_or_nan(
+            diagnostics.get("target_probability_unreliable_local_support")
         ),
     }
 
@@ -338,8 +390,7 @@ def _write_comparison_csv(path: str, rows: list[dict[str, object]]) -> None:
         "top_1_percent_weight_mass",
         "top_5_percent_weight_mass",
         "top_10_percent_weight_mass",
-        "target_probability_low_ess_mass_ess_lt_10",
-        "target_probability_low_ess_mass_ess_lt_50",
+        "target_probability_unreliable_local_support",
     ]
     with open(path, "w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
@@ -396,6 +447,123 @@ def _asymmetric_yerr(med: float, lo: float, hi: float) -> tuple[float, float]:
     return max(0.0, med - lo), max(0.0, hi - med)
 
 
+def _reference_from_label(label: str) -> str:
+    """Extract the reference residue from labels like ``GLY→ALA`` or run dir names."""
+
+    text = str(label).strip()
+    for separator in ("→", "->", "—", "-->"):
+        if separator in text:
+            return text.split(separator, 1)[0].strip().upper()
+    match = re.search(r"felp_([A-Za-z]+)_to_", text, flags=re.IGNORECASE)
+    if match:
+        return match.group(1).upper()
+    return "UNKNOWN"
+
+
+def _target_from_label(label: str) -> str:
+    """Extract the mutation target from a comparison label."""
+
+    text = str(label).strip()
+    for separator in ("→", "->", "—", "-->"):
+        if separator in text:
+            return text.split(separator, 1)[1].strip().upper()
+    match = re.search(r"felp_[A-Za-z]+_to_([A-Za-z]+)", text, flags=re.IGNORECASE)
+    if match:
+        return match.group(1).upper()
+    return text
+
+
+def _reference_color(reference: str) -> tuple[str, str]:
+    """Return face and edge colors for a reference residue."""
+
+    ref = reference.upper()
+    return (
+        _REFERENCE_COLORS.get(ref, _DEFAULT_REFERENCE_COLOR),
+        _REFERENCE_EDGE_COLORS.get(ref, "#333333"),
+    )
+
+
+def _group_indices_by_reference(labels: list[str]) -> dict[str, list[int]]:
+    """Group comparison indices by reference residue, targets sorted alphabetically."""
+
+    buckets: dict[str, list[tuple[str, int]]] = {}
+    for index, label in enumerate(labels):
+        reference = _reference_from_label(label)
+        target = _target_from_label(label)
+        buckets.setdefault(reference, []).append((target, index))
+    grouped: dict[str, list[int]] = {}
+    for reference, items in buckets.items():
+        grouped[reference] = [index for _, index in sorted(items, key=lambda pair: pair[0])]
+    return grouped
+
+
+def _ordered_references(grouped: dict[str, list[int]]) -> list[str]:
+    """Stable panel order: GLY, PRO, ALA, then any others alphabetically."""
+
+    extras = sorted(reference for reference in grouped if reference not in _REFERENCE_ORDER)
+    return [reference for reference in (*_REFERENCE_ORDER, *extras) if reference in grouped]
+
+
+def _tick_fontsize(n_bars: int) -> float:
+    """Scale x tick labels so long mutation lists remain readable."""
+
+    if n_bars <= 12:
+        return 12.0
+    if n_bars <= 20:
+        return 11.0
+    return max(8.0, 11.0 - 0.1 * (n_bars - 20))
+
+
+def _apply_ess_compare_style(plt) -> None:
+    """Matplotlib rcParams tuned for multi-panel ESS comparison figures."""
+
+    apply_publication_style()
+    plt.rcParams.update(
+        {
+            "figure.dpi": 150,
+            "savefig.dpi": 300,
+            "savefig.bbox": "tight",
+            "savefig.pad_inches": 0.08,
+            "axes.labelsize": 14,
+            "axes.titlesize": 14,
+            "xtick.labelsize": 12,
+            "ytick.labelsize": 12,
+            "legend.fontsize": 11,
+            "font.family": "sans-serif",
+            "font.sans-serif": ["DejaVu Sans", "Arial", "Helvetica", "Liberation Sans"],
+        }
+    )
+
+
+def _save_figure(fig, path: str) -> str:
+    """Write PNG and vector PDF for publication."""
+
+    fig.savefig(path, bbox_inches="tight", pad_inches=0.08)
+    pdf_path = os.path.splitext(path)[0] + ".pdf"
+    fig.savefig(pdf_path, bbox_inches="tight", pad_inches=0.08)
+    return path
+
+
+def _build_grouped_bar_layout(
+    labels: list[str],
+) -> tuple[list[str], list[str], dict[str, dict[str, int]]]:
+    """Build a target-grouped layout mapping.
+
+    Returns (sorted_targets, ordered_references, mapping) where
+    ``mapping[target][reference] = original_index``.
+    """
+
+    grouped = _group_indices_by_reference(labels)
+    references = _ordered_references(grouped)
+    target_map: dict[str, dict[str, int]] = {}
+    for reference in references:
+        for index in grouped[reference]:
+            target = _target_from_label(labels[index])
+            target_map.setdefault(target, {})[reference] = index
+    sorted_targets = sorted(target_map)
+    return sorted_targets, references, target_map
+
+
 def _plot_single_metric_bootstrap(
     *,
     plt,
@@ -407,110 +575,59 @@ def _plot_single_metric_bootstrap(
     title: str,
     filename: str,
 ) -> str:
-    x = np.arange(len(stats))
-    medians: list[float] = []
-    yerr_lo: list[float] = []
-    yerr_hi: list[float] = []
-    for item in stats:
-        metrics: np.ndarray = item["metrics"]
-        med, lo, hi = percentile_summary(metrics[:, key_index])
-        medians.append(med)
-        el, eh = _asymmetric_yerr(med, lo, hi)
-        yerr_lo.append(el)
-        yerr_hi.append(eh)
+    targets, references, target_map = _build_grouped_bar_layout(labels)
+    n_targets = len(targets)
+    n_refs = len(references)
+    bar_width = 0.8 / max(n_refs, 1)
+    x = np.arange(n_targets)
+    fig_width = max(8.0, 0.6 * n_targets * n_refs + 2.0)
+    fig, ax = plt.subplots(1, 1, figsize=(fig_width, 5.5))
+    y_highs: list[float] = []
 
-    fig, ax = plt.subplots(1, 1)
-    ax.bar(
-        x,
-        medians,
-        color=_BAR_FACE_COLOR,
-        edgecolor=_BAR_EDGE_COLOR,
-        linewidth=_BAR_EDGE_WIDTH,
-        yerr=[yerr_lo, yerr_hi],
-        capsize=3,
-        ecolor="black",
-    )
-    ax.set_title(title)
+    for ref_idx, reference in enumerate(references):
+        face, edge = _reference_color(reference)
+        offset = (ref_idx - (n_refs - 1) / 2.0) * bar_width
+        medians: list[float] = []
+        yerr_lo: list[float] = []
+        yerr_hi: list[float] = []
+        for target in targets:
+            index = target_map.get(target, {}).get(reference)
+            if index is not None:
+                metrics: np.ndarray = stats[index]["metrics"]
+                med, lo, hi = percentile_summary(metrics[:, key_index])
+            else:
+                med, lo, hi = float("nan"), float("nan"), float("nan")
+            medians.append(med)
+            el, eh = _asymmetric_yerr(med, lo, hi)
+            yerr_lo.append(el)
+            yerr_hi.append(eh)
+            if math.isfinite(med):
+                y_highs.append(med + eh)
+
+        ax.bar(
+            x + offset,
+            medians,
+            bar_width * 0.92,
+            label=reference,
+            color=face,
+            edgecolor=edge,
+            linewidth=_BAR_EDGE_WIDTH,
+            yerr=[yerr_lo, yerr_hi],
+            capsize=2,
+            ecolor=edge,
+            error_kw={"linewidth": 0.8},
+        )
+
+    ax.set_title(title, fontsize=16, pad=12)
     ax.set_ylabel(ylabel)
     ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=35, ha="right")
-    highs = [medians[i] + yerr_hi[i] for i in range(len(medians))]
-    _set_metric_ylim(ax, [*medians, *highs])
+    ax.set_xticklabels(targets, fontsize=_tick_fontsize(n_targets))
+    ax.tick_params(axis="x", length=0, pad=4)
+    ax.legend(frameon=False, fontsize=12)
+    _set_metric_ylim(ax, y_highs)
     fig.tight_layout()
     path = os.path.join(output_dir, filename)
-    fig.savefig(path)
-    plt.close(fig)
-    return path
-
-
-def _plot_low_ess_mass_bootstrap(
-    *,
-    plt,
-    output_dir: str,
-    labels: list[str],
-    stats: list[dict[str, object]],
-) -> str:
-    n = len(stats)
-    x = np.arange(n)
-    width = 0.36
-    med10: list[float] = []
-    lo10: list[float] = []
-    hi10: list[float] = []
-    med50: list[float] = []
-    lo50: list[float] = []
-    hi50: list[float] = []
-    for item in stats:
-        metrics: np.ndarray = item["metrics"]
-        a10, b10, c10 = percentile_summary(metrics[:, 2])
-        a50, b50, c50 = percentile_summary(metrics[:, 3])
-        med10.append(a10)
-        lo10.append(b10)
-        hi10.append(c10)
-        med50.append(a50)
-        lo50.append(b50)
-        hi50.append(c50)
-
-    y10_lo = [_asymmetric_yerr(med10[i], lo10[i], hi10[i])[0] for i in range(n)]
-    y10_hi = [_asymmetric_yerr(med10[i], lo10[i], hi10[i])[1] for i in range(n)]
-    y50_lo = [_asymmetric_yerr(med50[i], lo50[i], hi50[i])[0] for i in range(n)]
-    y50_hi = [_asymmetric_yerr(med50[i], lo50[i], hi50[i])[1] for i in range(n)]
-
-    fig, ax = plt.subplots(1, 1)
-    ax.bar(
-        x - width / 2.0,
-        med10,
-        width,
-        label="ESS < 10",
-        color=_BAR_FACE_COLOR,
-        edgecolor=_BAR_EDGE_COLOR,
-        linewidth=_BAR_EDGE_WIDTH,
-        yerr=[y10_lo, y10_hi],
-        capsize=3,
-        ecolor="black",
-    )
-    ax.bar(
-        x + width / 2.0,
-        med50,
-        width,
-        label="ESS < 50",
-        color=_BAR_FACE_COLOR,
-        edgecolor=_BAR_EDGE_COLOR,
-        linewidth=_BAR_EDGE_WIDTH,
-        yerr=[y50_lo, y50_hi],
-        capsize=3,
-        ecolor="black",
-    )
-    ax.set_title("Target probability mass in low-ESS states (bootstrap)")
-    ax.set_ylabel("Target probability mass")
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=35, ha="right")
-    ax.legend()
-    finite_hi = [v for v in hi10 + hi50 if math.isfinite(v)]
-    ymax = max(finite_hi) if finite_hi else 1.0e-12
-    ax.set_ylim(0.0, ymax * 1.15)
-    fig.tight_layout()
-    path = os.path.join(output_dir, "low_ess_mass.png")
-    fig.savefig(path)
+    _save_figure(fig, path)
     plt.close(fig)
     return path
 
@@ -525,74 +642,45 @@ def _plot_single_metric(
     title: str,
     filename: str,
 ) -> str:
-    values = [_float_or_nan(row.get(key)) for row in rows]
     labels = [str(row["label"]) for row in rows]
-    x = np.arange(len(rows))
-    fig, ax = plt.subplots(1, 1)
-    ax.bar(
-        x,
-        values,
-        color=_BAR_FACE_COLOR,
-        edgecolor=_BAR_EDGE_COLOR,
-        linewidth=_BAR_EDGE_WIDTH,
-    )
-    ax.set_title(title)
+    values = [_float_or_nan(row.get(key)) for row in rows]
+    targets, references, target_map = _build_grouped_bar_layout(labels)
+    n_targets = len(targets)
+    n_refs = len(references)
+    bar_width = 0.8 / max(n_refs, 1)
+    x = np.arange(n_targets)
+    fig_width = max(8.0, 0.6 * n_targets * n_refs + 2.0)
+    fig, ax = plt.subplots(1, 1, figsize=(fig_width, 5.5))
+
+    for ref_idx, reference in enumerate(references):
+        face, edge = _reference_color(reference)
+        offset = (ref_idx - (n_refs - 1) / 2.0) * bar_width
+        bar_values = [
+            values[target_map[t][reference]]
+            if reference in target_map.get(t, {})
+            else float("nan")
+            for t in targets
+        ]
+        ax.bar(
+            x + offset,
+            bar_values,
+            bar_width * 0.92,
+            label=reference,
+            color=face,
+            edgecolor=edge,
+            linewidth=_BAR_EDGE_WIDTH,
+        )
+
+    ax.set_title(title, fontsize=16, pad=12)
     ax.set_ylabel(ylabel)
     ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=35, ha="right")
+    ax.set_xticklabels(targets, fontsize=_tick_fontsize(n_targets))
+    ax.tick_params(axis="x", length=0, pad=4)
+    ax.legend(frameon=False, fontsize=12)
     _set_metric_ylim(ax, values)
     fig.tight_layout()
     path = os.path.join(output_dir, filename)
-    fig.savefig(path)
-    plt.close(fig)
-    return path
-
-
-def _plot_low_ess_mass(
-    *,
-    plt,
-    output_dir: str,
-    rows: list[dict[str, object]],
-) -> str:
-    labels = [str(row["label"]) for row in rows]
-    x = np.arange(len(rows))
-    width = 0.38
-    ess_lt_10 = [
-        _float_or_nan(row.get("target_probability_low_ess_mass_ess_lt_10"))
-        for row in rows
-    ]
-    ess_lt_50 = [
-        _float_or_nan(row.get("target_probability_low_ess_mass_ess_lt_50"))
-        for row in rows
-    ]
-    fig, ax = plt.subplots(1, 1)
-    ax.bar(
-        x - width / 2.0,
-        ess_lt_10,
-        width,
-        label="ESS < 10",
-        color=_BAR_FACE_COLOR,
-        edgecolor=_BAR_EDGE_COLOR,
-        linewidth=_BAR_EDGE_WIDTH,
-    )
-    ax.bar(
-        x + width / 2.0,
-        ess_lt_50,
-        width,
-        label="ESS < 50",
-        color=_BAR_FACE_COLOR,
-        edgecolor=_BAR_EDGE_COLOR,
-        linewidth=_BAR_EDGE_WIDTH,
-    )
-    ax.set_title("Target probability mass in low-ESS states")
-    ax.set_ylabel("Target probability mass")
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=35, ha="right")
-    ax.legend()
-    _set_metric_ylim(ax, [*ess_lt_10, *ess_lt_50])
-    fig.tight_layout()
-    path = os.path.join(output_dir, "low_ess_mass.png")
-    fig.savefig(path)
+    _save_figure(fig, path)
     plt.close(fig)
     return path
 
