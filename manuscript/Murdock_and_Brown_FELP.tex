@@ -84,7 +84,7 @@ where $\Delta U(x)=U_1(x)-U_0(x)$ and $\left\langle \cdot \right\rangle_{0,i}$ d
 \end{equation}
 Equation~\ref{eq:state_reweighting} preserves the reference state decomposition and updates the probability of each state according to the perturbation's energetic effect on configurations sampled within that specific state.
 
-The central hypothesis behind this formulation is that discretization creates domains of local phase-space overlap. By conditioning the exponential average on microstate membership, FELP assumes that reference configurations assigned to state $i$ adequately represent the structural ensemble of the perturbed system within that same state. This local two-state Zwanzig construction avoids the need for a multistate estimator like MBAR, which would be necessary if samples were drawn from multiple thermodynamic states or intermediate alchemical windows. Instead, FELP addresses the practical regime where expansive sampling is available only for the reference system. If a mutation is unfavorable in one conformational basin but favorable in another, the state-local reweighting factors will predict a population shift between those basins rather than yielding a single global stability score.
+The central hypothesis behind this formulation is that discretization creates domains of local phase-space overlap. By conditioning the exponential average on microstate membership, FELP assumes that reference configurations assigned to state $i$ adequately represent the structural ensemble of the perturbed system within that same state. FELP evaluates the perturbation directly from the reference ensemble without simulating the target state or intermediate alchemical windows. If a mutation is unfavorable in one conformational basin but favorable in another, the state-local reweighting factors will predict a population shift between those basins.
 
 In a finite trajectory, state $i$ contains evaluated configurations $x_{ij}$ for $j=1,\ldots,n_i$. FELP estimates the local Zwanzig factor by computing
 \begin{equation}
@@ -92,7 +92,14 @@ In a finite trajectory, state $i$ contains evaluated configurations $x_{ij}$ for
 	\qquad
 	w_{ij}=\exp[-\beta(\Delta U_{ij}-s)],
 \end{equation}
-where $s=\min(\Delta U)$ over all eligible frames is a uniform stability shift that prevents numerical overflow. Because this shift is applied globally, it cancels during normalization. The implemented reweighted probability is obtained by substituting the empirical reference prior $\hat{\pi}_0(i)$ and the finite-sample factor $f_i$ into Equation~\ref{eq:state_reweighting}. This step is the sample estimate of the theoretical expression above rather than a separate estimator. The corresponding relative free energy of each state is
+where $s=\min(\Delta U)$ over all eligible frames is a uniform stability shift that prevents numerical overflow. Because this shift is applied globally, it cancels during normalization. The sample estimator of Equation~\ref{eq:state_reweighting} substitutes the empirical reference prior $\hat{\pi}_0(i)$ and the finite-sample factor $f_i$ for their theoretical counterparts:
+\begin{equation}
+	\hat{\pi}_1(i) =
+	\frac{\hat{\pi}_0(i) f_i}
+	{\sum_k \hat{\pi}_0(k) f_k}.
+	\label{eq:sample_reweighting}
+\end{equation}
+The corresponding relative free energy of each state is
 \begin{equation}
 	F_1(i) = -k_B T \ln \hat{\pi}_1(i) + C,
 \end{equation}
@@ -102,15 +109,16 @@ For finite samples, $f_i$ can be dominated by a small number of high-weight fram
 \begin{equation}
 	\mathrm{ESS}_i = \frac{\left(\sum_j w_{ij}\right)^2}{\sum_j w_{ij}^2},
 \end{equation}
-quantifies this weight degeneracy \cite{kong1992importance,elvira2022ess}. Low $\mathrm{ESS}_i$ indicates that the local Zwanzig factor depends on too few configurations to be reliable. Additional frame-level diagnostics---dominant frame weight fraction, leave-one-out free-energy shift, and upper-tail Pareto shape estimate---flag states where single frames control the average.
+quantifies this weight degeneracy \cite{kong1992importance,elvira2022ess}. Low $\mathrm{ESS}_i$ indicates that the local Zwanzig factor depends on too few configurations to be reliable.
 
-In the intended use case the reference ensemble is chosen to be broader than the target, so many reference states may receive little perturbed probability. Global measures of distributional similarity between $\hat{\pi}_0$ and $\hat{\pi}_1$ can be low without indicating a problem; what matters is whether the states that carry significant $\hat{\pi}_1$ have adequate local support. FELP reports the perturbed probability mass in unreliable states,
+Configuration space overlap requirements in unidirectional reweighting are fundamentally asymmetric. The reference ensemble must encompass the relevant configurations of the target ensemble, but the reverse is not true. It is expected that a broad reference trajectory will explore conformational states that become energetically forbidden or highly unfavorable upon perturbation. In these states, the local perturbation factor may have poor statistical support (low $\mathrm{ESS}_i$), but this lack of support is inconsequential if the target probability $\hat{\pi}_1(i)$ in those states is vanishingly small. The reweighted landscape remains credible as long as the states that actually carry significant target probability are well-supported by the reference samples. Because it is rarely known \textit{a priori} whether the reference trajectory is sufficiently broad to cover all energetically relevant regions of the target ensemble, it is critical to explicitly quantify when the estimate relies on unsupported configurations. FELP therefore summarizes the validity of the reweighting operation by measuring the target probability mass assigned to unreliable states,
 \begin{equation}
 	\mathcal{U} =
 	\sum_i \hat{\pi}_1(i)\,
-	\mathbf{1}\{\mathrm{ESS}_i < \epsilon_i \; \mathrm{or}\; q_i = 1\},
+	\mathbf{1}\{\mathrm{ESS}_i < \epsilon_i\},
+	\label{eq:unreliable_mass}
 \end{equation}
-where $q_i$ is a state-local quality-control flag and $\epsilon_i$ is a chosen effective-sample floor. The implementation uses advisory floors of $\mathrm{ESS}_i<10$ and $\mathrm{ESS}_i<50$ as well as a scale-aware floor $\epsilon_i=\max(\mathrm{ESS}_{\min},0.1\,n_i)$ with default $\mathrm{ESS}_{\min}=5$. Small $\mathcal{U}$ indicates that the predicted landscape rests on well-supported local factors; large $\mathcal{U}$ indicates that the prediction depends on states where the local Zwanzig average is unreliable.
+where $\epsilon_i$ is an effective-sample floor for state $i$. Small $\mathcal{U}$ means the predicted landscape rests on states with adequate local support; large $\mathcal{U}$ is a direct reason for caution.
 
 A separate practical issue arises from discretization. The potential energy functions $U_0$ and $U_1$ are continuous, so the true restricted partition functions of neighboring microstates should vary smoothly within a basin. Treating every microstate independently forces states with low $\mathrm{ESS}_i$ to produce local factors that fluctuate sharply relative to their neighbors. FELP regularizes these estimates by pooling information across adjacent states in the feature-space topology. For state $i$ with neighbors $\mathcal{N}(i)$ having positive support, the pooled factor is
 \begin{equation}
@@ -126,7 +134,7 @@ and the blended factor used for reweighting is
 	\alpha_i = \frac{\mathrm{ESS}_i}{\mathrm{ESS}_i + \tau}.
 	\label{eq:neighbor_blend}
 \end{equation}
-States with high $\mathrm{ESS}_i$ retain their local factors ($\alpha_i \approx 1$); states with low $\mathrm{ESS}_i$ borrow strength from well-supported neighbors. Equation~\ref{eq:state_reweighting} is then evaluated with $f_i^{\mathrm{blend}}$ in place of the raw $f_i$.
+States with high $\mathrm{ESS}_i$ retain their local factors ($\alpha_i \approx 1$); states with low $\mathrm{ESS}_i$ borrow strength from well-supported neighbors. Equation~\ref{eq:sample_reweighting} can be evaluated with $f_i^{\mathrm{blend}}$ in place of the raw $f_i$.
 
 FELP selects $\tau$ by an L-curve criterion \cite{hansen1993lcurve}, balancing a misfit term,
 \begin{equation}
@@ -144,9 +152,9 @@ against a roughness term over neighboring states,
 The selected $\tau$ is the corner of the $\mathcal{M}$--$\mathcal{R}$ curve in log--log space, defined as the point farthest from the chord connecting the two extremes. This regularization stabilizes noisy local factors on a discretized landscape but does not compensate for missing reference support; $\mathcal{U}$ remains the primary validity criterion.
 
 \subsection*{Results}
-\subsubsection*{FELP estimates perturbed landscapes through a four-stage local reweighting pipeline}
+\subsubsection*{FELP estimates perturbed landscapes through a four-stage computational pipeline}
 
-The FELP workflow has four stages \textbf{(Figure~\ref{fig:FELPWorkflow})}. First, a reference MD trajectory is generated for the system expected to contain the broader or more permissive conformational ensemble. The trajectory is summarized into microstates using a uniform $\phi/\psi$ grid, an explicit JSON/YAML state file, or an exported MSM bundle. Microstate construction for each benchmark is specified in Methods. These microstates define both the aggregation units for reweighting and the coordinates used for plotting.
+The FELP workflow has four stages \textbf{(Figure~\ref{fig:FELPWorkflow})}. First, a reference MD trajectory is generated for the system expected to contain the relevant conformational ensemble. The trajectory is summarized into microstates defined in a chosen collective-variable space, such as a uniform $\phi/\psi$ grid, distances or other user-specified coordinates in an explicit JSON/YAML state file, or states imported from an exported MSM bundle. Microstate construction for each benchmark is specified in Methods. These microstates define both the aggregation units for reweighting and the coordinates used for plotting.
 
 Second, each reference frame is assigned to a microstate. When raw-count priors are used, $\hat{\pi}_0(i)$ is the empirical fraction of assigned reference frames in state $i$. When a state file or MSM bundle contains trusted reference probabilities, FELP can instead normalize those loaded priors. The state identifiers used during assignment become the identifiers used throughout reweighting, summary tables, and plotting.
 
@@ -160,8 +168,8 @@ Fourth, FELP aggregates frame-level Boltzmann factors into state-level reweighti
 	\fbox{%
 		\begin{minipage}{0.95\linewidth}
 			\centering
-			\includegraphics[width=0.95\linewidth]{figures/felp_schematic.png}
-			\caption{\textbf{Free Energy Landscape Perturbation workflow.} A reference MD ensemble (e.g., glycine dipeptide) is partitioned into microstates in a chosen collective-variable space. Reference-to-perturbed energy differences are evaluated for sampled structures within each state. State-specific exponential averages reweight the reference probabilities to estimate the perturbed landscape (e.g., proline). Overlap diagnostics audit whether the predicted population shift is supported by the reference ensemble.}
+			\includegraphics[width=0.98\linewidth]{figures/felp_workflow_schematic_wide.png}
+			\caption{\textbf{Free Energy Landscape Perturbation workflow.} FELP begins from a reference MD ensemble and a microstate atlas, assigns frames to obtain the reference prior $\hat{\pi}_0(i)$, and evaluates symmetric reference and perturbed branches under reference-frame restraints. The default OpenMM reweighting Hamiltonian uses ff14SB-only side-chain parameters with GBNeck2 implicit solvent to compute $\Delta U=U_1-U_0$ for each evaluated frame. State-local Zwanzig factors are combined with $\hat{\pi}_0(i)$ to estimate $\hat{\pi}_1(i)$ and $F_1(i)$; optional neighbor pooling with an L-curve-selected blending strength can regularize noisy local factors before normalization.}
 			\label{fig:FELPWorkflow}
 		\end{minipage}
 	}
@@ -269,11 +277,23 @@ Energy evaluation can be performed with OpenMM or Rosetta. The default OpenMM ba
 \end{equation}
 for each evaluated frame and excludes failed or non-finite frames from reweighting.
 
-\subsubsection*{Reweighting and diagnostics}
+\subsubsection*{Reweighting, summarization, and diagnostics}
 
-State probabilities are reweighted according to Equation~\ref{eq:state_reweighting}. By default, the independent per-state factors $f_i$ are used directly; optional neighbor-pooled blend factors $f_i^{\mathrm{blend}}$ with L-curve-selected $\tau$ are described in Theory. Both estimators are retained in the output for comparison and for overlap diagnostics. The reference prior is either loaded from the microstate definitions or estimated from raw assigned frame counts. When microstate-stratified sampling is used to reduce expensive energy evaluations, FELP assigns all frames cheaply, stores a deterministic sampling manifest, computes raw-count priors from the full assigned support, and estimates state-local Boltzmann averages from uniformly selected frames within each state. The default evaluates all assigned frames.
+After frame-level energies are computed, reweighting proceeds state by state. The reference prior $\hat{\pi}_0(i)$ is either normalized from probabilities embedded in the microstate definitions or estimated as the fraction of eligible assigned frames in state $i$ (\texttt{raw\_counts} mode). Perturbed probabilities follow Equation~\ref{eq:sample_reweighting}, with $f_i$ computed from the in-state average of $w_{ij}=\exp[-\beta(\Delta U_{ij}-s)]$ over eligible frames. The default reweighting backend uses independent per-state factors ($f_i$). Production analyses in this work additionally use neighbor-pooled blend factors $f_i^{\mathrm{blend}}$ with $\tau$ selected by the L-curve criterion described in Theory (\texttt{neighbor\_pool}, \texttt{blend} solver). Both estimators are written to the output tables for comparison.
 
-Diagnostics emphasize the perturbed probability carried by low-effective-sample-size or quality-control-flagged states. FELP also reports state-level effective sample sizes, maximum normalized frame weights, top-weight mass fractions, global weight-concentration summaries, and unsupported positive-prior states. The current advisory thresholds are described above and written to the run summary. Final analyses should report these diagnostics alongside each reweighted landscape rather than presenting the landscape as an unconditional prediction.
+When microstate-stratified evaluation sampling is used during the initial run, FELP assigns every frame to a microstate before selecting evaluated frames, stores a deterministic sampling manifest, computes \texttt{raw\_counts} priors from the full assigned support, and estimates state-local Boltzmann averages only from the selected frames within each state. The default pipeline evaluates all assigned frames.
+
+The \texttt{summarize} command recomputes microstate summaries and reweighted landscapes from an existing \texttt{frame\_results.csv} without repeating mutation or energy evaluation. This is used to test alternate microstate definitions, reweighting backends, or QC policies on a fixed set of $\Delta U_{ij}$ values. With \texttt{--repartition}, each frame is reassigned to the microstate atlas specified by the current microstate file or grid using the collective variables stored in the CSV; reference priors and state-local averages are then recomputed on the new partition. Chignolin reruns in this work repartitioned frames onto a shared automatic microstate JSON before reweighting.
+
+Before $f_i$ is computed, FELP applies by-state quality control to the in-state Boltzmann weights. Three policies are available. \texttt{none} disables QC. \texttt{flag} records unreliable states in the run summary but leaves all frames in the average. \texttt{exclude-frames} removes outlier frames from the average: for each flagged state, the highest-weight frame is dropped iteratively (up to five frames per state by default) until the state passes QC or the exclusion limit is reached. The QC detector can operate in \texttt{auto} mode, which flags states whose upper-tail Pareto shape exceeds a sample-size-dependent reliability threshold derived from PSIS diagnostics, or in \texttt{threshold} mode, which flags states when the dominant frame weight fraction, local $\mathrm{ESS}_i$, or leave-one-out free-energy shift exceeds user-specified cutoffs. Chignolin production summaries used \texttt{exclude-frames} with \texttt{auto} detection and raw in-state weights.
+
+Validity is summarized using Equation~\ref{eq:unreliable_mass} and its implementation extension,
+\begin{equation}
+	\mathcal{U} =
+	\sum_i \hat{\pi}_1(i)\,
+	\mathbf{1}\{\mathrm{ESS}_i < \epsilon_i \; \mathrm{or}\; q_i = 1\},
+\end{equation}
+where $q_i$ is a state-local quality-control flag set when by-state diagnostics identify outlier control of the local average. The run summary also records per-state $\mathrm{ESS}_i$, maximum normalized frame weights, top-weight mass fractions, states with positive reference prior but no evaluated frames, and the target probability carried by QC-flagged states. These quantities should be reported alongside each reweighted landscape.
 
 \subsubsection*{Visualization and comparison to perturbed MD}
 
