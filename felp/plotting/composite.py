@@ -726,7 +726,7 @@ def _draw_panel(
         "colormap": colormap,
         "show_colorbar": show_colorbar,
         "marker_size": style.marker_size,
-        "ramachandran_equal_aspect": False,
+        "ramachandran_equal_aspect": True,
         "colorbar_fraction": 0.04,
         "colorbar_pad": 0.01,
         "colorbar_labelsize": style.colorbar_label_size,
@@ -741,6 +741,7 @@ def _draw_panel(
     scatter_state_projection(**scatter_kwargs)
     ax.set_xlim(-180.0, 180.0)
     ax.set_ylim(-180.0, 180.0)
+    ax.set_aspect("equal", adjustable="box")
     ax.tick_params(
         labelsize=style.tick_size,
         labelbottom=show_xticklabels,
@@ -917,18 +918,24 @@ def _draw_reference_arrows(
     else:
         colorbar_right = ref_pos.x1
 
-    # We add 0.045 to clear the vertically-oriented colorbar label text!
-    x_start = colorbar_right + 0.045
-
     target_0 = target_axes_by_row.get(0)
     if target_0 is None:
         return
     t_pos_0 = target_0.get_position()
     
     # Since Column 1 has no y-labels or tickmarks, the target_left is just its x0 minus a tiny gap
-    target_left = t_pos_0.x0 - 0.015
+    target_left = t_pos_0.x0 - 0.005
     
-    x_split = x_start + 0.15 * (target_left - x_start)
+    # We want the start of the arrow to clear the Reference colorbar text.
+    # We add 0.048 to completely clear the vertically-oriented colorbar axes and ticks/label text!
+    # But we also make sure x_start is strictly to the left of target_left.
+    # We guarantee a positive gap of at least 0.020 between x_start and target_left!
+    x_start = min(colorbar_right + 0.048, target_left - 0.020)
+    
+    # To give the branching horizontal arrows (which have the arrowheads) plenty of length
+    # so they never get inverted/confused by FancyArrowPatch, we place x_split (the vertical backbone)
+    # close to x_start.
+    x_split = x_start + 0.20 * (target_left - x_start)
 
     ref_y = (ref_pos.y0 + ref_pos.y1) * 0.5
 
@@ -941,6 +948,8 @@ def _draw_reference_arrows(
         linewidth=1.5,
         color="0.2",
         clip_on=False,
+        shrinkA=0,
+        shrinkB=0,
         zorder=10,
     )
     fig.patches.append(line_start)
@@ -970,6 +979,8 @@ def _draw_reference_arrows(
         linewidth=1.5,
         color="0.2",
         clip_on=False,
+        shrinkA=0,
+        shrinkB=0,
         zorder=10,
     )
     fig.patches.append(line_vertical)
@@ -983,14 +994,16 @@ def _draw_reference_arrows(
         target_y = (t_pos.y0 + t_pos.y1) * 0.5
         
         arrow = FancyArrowPatch(
-            (x_split + 0.006, target_y),
+            (x_split, target_y),
             (target_left, target_y),
             transform=fig.transFigure,
             arrowstyle="-|>",
-            mutation_scale=16,
+            mutation_scale=14,
             linewidth=1.5,
             color="0.2",
             clip_on=False,
+            shrinkA=0,
+            shrinkB=0,
             zorder=10,
         )
         fig.patches.append(arrow)
