@@ -10,6 +10,7 @@ import numpy as np
 from felp.core import K_BOLTZMANN_KJ_PER_MOL_K, LaplacianConfig, ReweightingConfig, ReweightingError
 from felp.reweighting.aggregator import _state_local_weights
 from felp.reweighting.engines._finalize import finalize_microstate_outcome
+from felp.reweighting.frame_weights import frame_weights_from_prep
 from felp.reweighting.outcome import ReweightingOutcome
 from felp.reweighting.prep import ReweightingPrep
 
@@ -277,7 +278,7 @@ class LaplacianRegularizedEngine:
             }
         }
 
-        return finalize_microstate_outcome(
+        outcome = finalize_microstate_outcome(
             prep,
             method_id=self.method_id,
             state_reweighting_estimator=_ESTIMATOR,
@@ -286,3 +287,7 @@ class LaplacianRegularizedEngine:
             sampling_metadata=sampling_metadata,
             method_metadata=method_metadata,
         )
+        frame_weights = frame_weights_from_prep(prep, reweight_factors)
+        if frame_weights:
+            outcome.auxiliary = {"frame_weights": frame_weights}
+        return outcome

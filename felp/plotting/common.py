@@ -169,7 +169,164 @@ DEFAULT_FEL_COLORMAP = "nipy_spectral_r"
 # Diverging map for symmetric KL heatmaps: twilight_shifted arms + white center.
 FELP_KL_DIVERGENCE_COLORMAP = "felp_kl_twilight"
 
+# Per-cell signed KL values with |display| below this are plotted as zero (white center).
+DEFAULT_KL_DISPLAY_THRESHOLD = 1.0e-5
+
 _FELP_BUILTIN_CMAPS_REGISTERED = False
+
+
+def _latex_probability_symbol(name: str) -> str:
+    """Return a mathtext probability symbol for colorbar labels."""
+
+    raw = str(name).strip()
+    if raw.startswith("p_") and len(raw) > 2:
+        subscript = raw[2:]
+        return rf"p_{{\mathrm{{{subscript}}}}}"
+    return rf"p_{{\mathrm{{{raw}}}}}"
+
+
+def symmetric_kl_imbalance_mathtext_label(
+    left: str,
+    right: str,
+    *,
+    unit_label: str | None = None,
+) -> str:
+    """Matplotlib mathtext label for the signed per-cell KL imbalance."""
+
+    p_left = _latex_probability_symbol(left)
+    p_right = _latex_probability_symbol(right)
+    math_label = (
+        rf"$\frac{{1}}{{2}}\left[{p_left}\ln\frac{{{p_left}}}{{{p_right}}} "
+        rf"- {p_right}\ln\frac{{{p_right}}}{{{p_left}}}\right]$"
+    )
+    if unit_label:
+        return f"{math_label} ({unit_label})"
+    return math_label
+
+
+def resolve_kl_colorbar_limits(
+    vmin: float | None,
+    vmax: float | None,
+) -> tuple[float, float] | None:
+    """Resolve optional symmetric KL colorbar limits for diverging heatmaps.
+
+    If only ``vmax`` is given, use ``[-vmax, vmax]``. If only ``vmin`` is given,
+    use ``[vmin, -vmin]`` (``vmin`` must be negative).
+    """
+
+    if vmin is None and vmax is None:
+        return None
+    if vmin is not None and vmax is not None:
+        vmin_value = float(vmin)
+        vmax_value = float(vmax)
+        if not math.isfinite(vmin_value) or not math.isfinite(vmax_value):
+            raise ConfigurationError("kl colorbar limits must be finite floats.")
+        if vmin_value >= vmax_value:
+            raise ConfigurationError("kl-vmin must be less than kl-vmax.")
+        return vmin_value, vmax_value
+    if vmax is not None:
+        vmax_value = float(vmax)
+        if not math.isfinite(vmax_value) or vmax_value <= 0.0:
+            raise ConfigurationError(
+                "kl-vmax must be a positive finite float when kl-vmin is omitted."
+            )
+        return -vmax_value, vmax_value
+    vmin_value = float(vmin)  # type: ignore[arg-type]
+    if not math.isfinite(vmin_value) or vmin_value >= 0.0:
+        raise ConfigurationError(
+            "kl-vmin must be a negative finite float when kl-vmax is omitted."
+        )
+    return vmin_value, -vmin_value
+
+
+def symmetric_kl_imbalance_plain_label(left: str, right: str) -> str:
+    """Plain-text counterpart to :func:`symmetric_kl_imbalance_mathtext_label`."""
+
+    return (
+        f"0.5 * [{left} * log({left}/{right}) - "
+        f"{right} * log({right}/{left})]"
+    )
+
+
+def apply_kl_display_threshold(
+    grid: np.ndarray,
+    *,
+    threshold: float,
+) -> tuple[np.ndarray, dict[str, object]]:
+    """Zero out tiny per-cell KL display values to avoid misleading color stretch.
+
+    Matplotlib symmetric diverging maps otherwise set ``vmax`` to ``max(|grid|)``,
+    which can be ~1e-6 kcal/mol when surfaces nearly match and makes noise look
+    like strong imbalance.
+    """
+
+    if threshold <= 0.0:
+        return np.asarray(grid, dtype=float), {
+            "kl_display_threshold": 0.0,
+            "kl_display_cells_zeroed": 0,
+            "kl_display_max_abs_before_threshold": float(
+                np.nanmax(np.abs(np.asarray(grid, dtype=float)))
+            ),
+        }
+    array = np.asarray(grid, dtype=float)
+    finite = np.isfinite(array)
+    max_abs_before = float(np.nanmax(np.abs(array[finite]))) if finite.any() else 0.0
+    small = finite & (np.abs(array) < threshold)
+    masked = np.where(small, 0.0, array)
+    return masked, {
+        "kl_display_threshold": float(threshold),
+        "kl_display_cells_zeroed": int(np.count_nonzero(small)),
+        "kl_display_max_abs_before_threshold": max_abs_before,
+        "kl_display_max_abs_after_threshold": float(
+            np.nanmax(np.abs(masked[finite])) if finite.any() else 0.0
+        ),
+    }
+
+
+def prepare_kl_display_grid(
+    kl_grid: np.ndarray,
+    *,
+    temperature_kelvin: float,
+    scale_by_kbt: bool,
+    kbt_energy_scale: float = 1.0,
+    kbt_energy_unit_label: str = "kJ/mol",
+    display_threshold: float | None = DEFAULT_KL_DISPLAY_THRESHOLD,
+    probability_labels: tuple[str, str] = ("p_pre", "p_rw"),
+) -> tuple[np.ndarray, str, dict[str, object]]:
+    """Scale optional kBT, apply display threshold, and return colorbar metadata."""
+
+    array = np.asarray(kl_grid, dtype=float)
+    p_left, p_right = probability_labels
+    metadata: dict[str, object] = {
+        "kl_display_units": "dimensionless",
+        "kl_display_scale_factor": 1.0,
+        "kl_display_equation": symmetric_kl_imbalance_plain_label(p_left, p_right),
+    }
+    if scale_by_kbt:
+        scale = (
+            K_BOLTZMANN_KJ_PER_MOL_K
+            * float(temperature_kelvin)
+            * float(kbt_energy_scale)
+        )
+        array = array * scale
+        metadata["kl_display_units"] = str(kbt_energy_unit_label)
+        metadata["kl_display_scale_factor"] = float(scale)
+        colorbar_label = symmetric_kl_imbalance_mathtext_label(
+            p_left,
+            p_right,
+            unit_label=str(kbt_energy_unit_label),
+        )
+    else:
+        colorbar_label = symmetric_kl_imbalance_mathtext_label(p_left, p_right)
+
+    threshold = (
+        DEFAULT_KL_DISPLAY_THRESHOLD
+        if display_threshold is None
+        else float(display_threshold)
+    )
+    array, threshold_metadata = apply_kl_display_threshold(array, threshold=threshold)
+    metadata.update(threshold_metadata)
+    return array, colorbar_label, metadata
 
 
 def _ensure_felp_builtin_colormaps_registered() -> None:
@@ -315,6 +472,8 @@ def scatter_state_projection(
     fel_max_energy_kj_mol: float | None = None,
     symmetric_energy_cap: bool = False,
     symmetric_zero_center: bool = False,
+    colorbar_vmin: float | None = None,
+    colorbar_vmax: float | None = None,
     colormap: str | None = None,
 ) -> None:
     """Draw a colored scatter plot for state-wise projected values."""
@@ -343,10 +502,18 @@ def scatter_state_projection(
             norm = mcolors.Normalize(vmin=0.0, vmax=cap, clip=False)
             colorbar_extend = "max"
     elif symmetric_zero_center and finite_value_mask.any():
-        absmax = float(np.nanmax(np.abs(point_values[finite_value_mask])))
-        if not math.isfinite(absmax) or absmax == 0.0:
-            absmax = 1.0e-15
-        norm = mcolors.Normalize(vmin=-absmax, vmax=absmax, clip=False)
+        if colorbar_vmin is not None and colorbar_vmax is not None:
+            norm = mcolors.Normalize(
+                vmin=float(colorbar_vmin),
+                vmax=float(colorbar_vmax),
+                clip=True,
+            )
+            colorbar_extend = "both"
+        else:
+            absmax = float(np.nanmax(np.abs(point_values[finite_value_mask])))
+            if not math.isfinite(absmax) or absmax == 0.0:
+                absmax = 1.0e-15
+            norm = mcolors.Normalize(vmin=-absmax, vmax=absmax, clip=False)
     elif finite_value_mask.any():
         norm.autoscale(point_values[finite_value_mask])
 
@@ -393,6 +560,8 @@ def save_pcolormesh_landscape(
     fel_max_energy_kj_mol: float | None = None,
     colormap: str | None = None,
     symmetric_zero_center: bool = False,
+    colorbar_vmin: float | None = None,
+    colorbar_vmax: float | None = None,
     plot_style: str = "default",
 ) -> str:
     """Render a 2D surface on a histogram grid (e.g. probability or free energy)."""
@@ -416,12 +585,18 @@ def save_pcolormesh_landscape(
             cmap = _copy_colormap_for_fel_cap(cmap_name)
             colorbar_extend = "max"
         elif symmetric_zero_center:
-            flat = np.ma.filled(z_plot, np.nan)
-            absmax = float(np.nanmax(np.abs(flat)))
-            if not math.isfinite(absmax) or absmax == 0.0:
-                absmax = 1.0e-15
-            levels = np.linspace(-absmax, absmax, 41)
-            norm = mcolors.Normalize(vmin=-absmax, vmax=absmax, clip=False)
+            if colorbar_vmin is not None and colorbar_vmax is not None:
+                vmin = float(colorbar_vmin)
+                vmax = float(colorbar_vmax)
+                colorbar_extend = "both"
+            else:
+                flat = np.ma.filled(z_plot, np.nan)
+                absmax = float(np.nanmax(np.abs(flat)))
+                if not math.isfinite(absmax) or absmax == 0.0:
+                    absmax = 1.0e-15
+                vmin, vmax = -absmax, absmax
+            levels = np.linspace(vmin, vmax, 41)
+            norm = mcolors.Normalize(vmin=vmin, vmax=vmax, clip=colorbar_extend == "both")
             cmap = _copy_colormap_for_fel_cap(cmap_name)
         else:
             flat = np.ma.filled(z_plot, np.nan)
@@ -464,11 +639,19 @@ def save_pcolormesh_landscape(
         )
         colorbar_extend = "max"
     elif symmetric_zero_center:
-        flat = np.ma.filled(z_plot, np.nan)
-        absmax = float(np.nanmax(np.abs(flat)))
-        if not math.isfinite(absmax) or absmax == 0.0:
-            absmax = 1.0e-15
-        norm = mcolors.Normalize(vmin=-absmax, vmax=absmax, clip=False)
+        if colorbar_vmin is not None and colorbar_vmax is not None:
+            vmin = float(colorbar_vmin)
+            vmax = float(colorbar_vmax)
+            colorbar_extend = "both"
+            clip = True
+        else:
+            flat = np.ma.filled(z_plot, np.nan)
+            absmax = float(np.nanmax(np.abs(flat)))
+            if not math.isfinite(absmax) or absmax == 0.0:
+                absmax = 1.0e-15
+            vmin, vmax = -absmax, absmax
+            clip = False
+        norm = mcolors.Normalize(vmin=vmin, vmax=vmax, clip=clip)
         image = ax.pcolormesh(
             x_edges,
             y_edges,

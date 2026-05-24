@@ -1513,6 +1513,35 @@ def _add_felp_plot_arguments(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
+        "--kl-display-threshold",
+        type=float,
+        default=1.0e-5,
+        help=(
+            "Plot per-cell signed KL values with magnitude below this threshold "
+            "as zero (white at the diverging colormap center). Units match the KL "
+            "colorbar (kcal/mol or kJ/mol when --kl-scale-by-kbt is set, otherwise "
+            "dimensionless). Default: 1e-5. Use 0 to disable masking."
+        ),
+    )
+    parser.add_argument(
+        "--kl-vmin",
+        type=float,
+        default=None,
+        help=(
+            "Fixed minimum for KL imbalance colorbars (display units). For "
+            "symmetric maps, omit and set only --kl-vmax to use [-vmax, vmax]."
+        ),
+    )
+    parser.add_argument(
+        "--kl-vmax",
+        type=float,
+        default=None,
+        help=(
+            "Fixed maximum for KL imbalance colorbars (display units). For "
+            "symmetric maps, omit --kl-vmin to use [-vmax, vmax]."
+        ),
+    )
+    parser.add_argument(
         "--reweighting-weight-treatment",
         choices=("raw", "psis", "psis-smoothed"),
         default=None,
@@ -1763,6 +1792,35 @@ def _add_md_kl_plot_arguments(parser: argparse.ArgumentParser) -> None:
         choices=("kj_mol", "kcal_mol"),
         default="kcal_mol",
         help="Energy unit used when --kl-scale-by-kbt is enabled.",
+    )
+    plot_group.add_argument(
+        "--kl-display-threshold",
+        type=float,
+        default=1.0e-5,
+        help=(
+            "Plot per-cell signed KL values with magnitude below this threshold "
+            "as zero (white at the diverging colormap center). Units match the KL "
+            "colorbar (see --kl-energy-unit when --kl-scale-by-kbt is set). "
+            "Default: 1e-5. Use 0 to disable masking."
+        ),
+    )
+    plot_group.add_argument(
+        "--kl-vmin",
+        type=float,
+        default=None,
+        help=(
+            "Fixed minimum for KL imbalance colorbars (display units). For "
+            "symmetric maps, omit and set only --kl-vmax to use [-vmax, vmax]."
+        ),
+    )
+    plot_group.add_argument(
+        "--kl-vmax",
+        type=float,
+        default=None,
+        help=(
+            "Fixed maximum for KL imbalance colorbars (display units). For "
+            "symmetric maps, omit --kl-vmin to use [-vmax, vmax]."
+        ),
     )
     plot_group.add_argument(
         "--output-dir",
@@ -2355,6 +2413,9 @@ def build_felp_plot_config(namespace: argparse.Namespace) -> FELPPlotConfig:
         probability_colormap=getattr(namespace, "probability_cmap", None),
         divergence_colormap=getattr(namespace, "divergence_cmap", None),
         kl_scale_by_kbt=namespace.kl_scale_by_kbt,
+        kl_display_threshold=namespace.kl_display_threshold,
+        kl_colorbar_vmin=namespace.kl_vmin,
+        kl_colorbar_vmax=namespace.kl_vmax,
         fel_max_energy_kj_mol=_resolve_fel_max_energy_kj_mol(
             namespace.fel_max_energy_kj_mol,
             namespace.fel_max_energy_kcal_mol,
@@ -2398,6 +2459,9 @@ def build_md_kl_plot_config(namespace: argparse.Namespace) -> MDKLPlotConfig:
         weight_treatment=namespace.reweighting_weight_treatment,
         kl_scale_by_kbt=namespace.kl_scale_by_kbt,
         kl_energy_unit=namespace.kl_energy_unit,
+        kl_display_threshold=namespace.kl_display_threshold,
+        kl_colorbar_vmin=namespace.kl_vmin,
+        kl_colorbar_vmax=namespace.kl_vmax,
         probability_colormap=namespace.probability_cmap,
         divergence_colormap=namespace.divergence_cmap,
         overwrite=namespace.overwrite,

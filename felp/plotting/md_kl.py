@@ -20,8 +20,12 @@ from felp.msm.phi_psi_spec import _target_phi_psi_indices
 
 from .common import (
     DEFAULT_FEL_COLORMAP,
+    DEFAULT_KL_DISPLAY_THRESHOLD,
     FELP_KL_DIVERGENCE_COLORMAP,
     apply_publication_style,
+    free_energy_from_probabilities,
+    prepare_kl_display_grid,
+    resolve_kl_colorbar_limits,
     import_matplotlib,
     prepare_output_dir,
     probability_surface_to_free_energy,
@@ -30,6 +34,12 @@ from .common import (
     scatter_state_projection,
     validate_registered_colormap,
     write_json,
+)
+from .frame_projection_weights import (
+    frame_projection_weight_detail,
+    load_frame_weights_csv,
+    resolve_frame_weights_csv_path,
+    state_reweight_factors_from_summary_rows,
 )
 from .felp import (
     _axis_range,
@@ -53,6 +63,9 @@ class MDKLPlotConfig:
     trajectory_files: tuple[tuple[str, ...], ...]
     reweighted_surface_csv: str | None = None
     raw_frame_results_csv: str | None = None
+    frame_weights_csv: str | None = None
+    """Optional frame_weights.csv beside the microstate summary / reweight output."""
+
     felp_output_dir: str | None = None
     temperature_kelvin: float = 300.0
     phi_psi_residue_number: int | None = None
@@ -70,6 +83,11 @@ class MDKLPlotConfig:
     weight_treatment: str | None = None
     kl_scale_by_kbt: bool = False
     kl_energy_unit: str = "kcal_mol"
+    kl_display_threshold: float | None = DEFAULT_KL_DISPLAY_THRESHOLD
+    """Plot |KL cell| below this (in display units) as zero; use 0 to disable."""
+    kl_colorbar_vmin: float | None = None
+    kl_colorbar_vmax: float | None = None
+    """Optional fixed KL heatmap limits (display units; symmetric if only one is set)."""
     probability_colormap: str | None = None
     divergence_colormap: str | None = None
     overwrite: bool = False
@@ -148,6 +166,14 @@ class MDKLPlotConfig:
             "divergence_colormap",
             validate_registered_colormap(div_src),
         )
+        if self.kl_display_threshold is not None:
+            threshold = float(self.kl_display_threshold)
+            if threshold < 0.0 or not math.isfinite(threshold):
+                raise ConfigurationError(
+                    "kl_display_threshold must be a non-negative finite float."
+                )
+            object.__setattr__(self, "kl_display_threshold", threshold)
+        resolve_kl_colorbar_limits(self.kl_colorbar_vmin, self.kl_colorbar_vmax)
 
     def resolved_reweighted_surface_csv(self) -> str:
         """Return the CSV path containing reweighted target probabilities."""
@@ -173,22 +199,49 @@ def generate_md_kl_plot(config: MDKLPlotConfig) -> dict[str, object]:
     plt = import_matplotlib()
     apply_publication_style()
 
+    summary_csv = config.resolved_reweighted_surface_csv()
+    state_discrete_fe_available = _state_summary_supports_discrete_fe_plot(summary_csv)
     if config.raw_frame_results_csv:
-        (
-            reweighted_surface,
-            x_edges,
-            y_edges,
-            surface_metadata,
-        ) = _load_frame_projected_reweighted_surface(config)
+        try:
+            (
+                reweighted_surface,
+                x_edges,
+                y_edges,
+                surface_metadata,
+            ) = _load_regular_reweighted_probability_surface(summary_csv)
+        except ConfigurationError:
+            (
+                reweighted_surface,
+                x_edges,
+                y_edges,
+                surface_metadata,
+            ) = _load_frame_projected_reweighted_surface(config)
+            surface_metadata = {
+                **surface_metadata,
+                "reweighted_kl_probability_surface_source": "frame_results",
+                "reweighted_display_probability_surface_source": "frame_results",
+                "raw_frame_results_used_for_kl": True,
+            }
+        else:
+            surface_metadata = {
+                **surface_metadata,
+                "reweighted_kl_probability_surface_source": "regular_surface_csv",
+                "reweighted_display_probability_surface_source": "regular_surface_csv",
+                "raw_frame_results_used_for_kl": False,
+            }
     else:
         (
             reweighted_surface,
             x_edges,
             y_edges,
             surface_metadata,
-        ) = _load_regular_reweighted_probability_surface(
-            config.resolved_reweighted_surface_csv()
-        )
+        ) = _load_regular_reweighted_probability_surface(summary_csv)
+        surface_metadata = {
+            **surface_metadata,
+            "reweighted_kl_probability_surface_source": "regular_surface_csv",
+            "reweighted_display_probability_surface_source": "regular_surface_csv",
+            "raw_frame_results_used_for_kl": False,
+        }
     phi_degrees, psi_degrees = _load_md_phi_psi_degrees(config)
     md_surface, _, _ = np.histogram2d(
         phi_degrees,
@@ -220,11 +273,21 @@ def generate_md_kl_plot(config: MDKLPlotConfig) -> dict[str, object]:
         md_surface,
         reweighted_surface,
     )
-    kl_display_grid, kl_colorbar_label, kl_display_metadata = _kl_display_grid(
+    kbt_energy_scale, kbt_energy_unit_label = _kl_energy_display_scale_and_label(
+        config.kl_energy_unit
+    )
+    kl_display_grid, kl_colorbar_label, kl_display_metadata = prepare_kl_display_grid(
         kl_grid,
         temperature_kelvin=config.temperature_kelvin,
         scale_by_kbt=config.kl_scale_by_kbt,
-        energy_unit=config.kl_energy_unit,
+        kbt_energy_scale=kbt_energy_scale,
+        kbt_energy_unit_label=kbt_energy_unit_label,
+        display_threshold=config.kl_display_threshold,
+        probability_labels=("p_MD", "p_rw"),
+    )
+    kl_limits = resolve_kl_colorbar_limits(
+        config.kl_colorbar_vmin,
+        config.kl_colorbar_vmax,
     )
     summary_metadata = {
         "md_frame_count": int(phi_degrees.size),
@@ -251,6 +314,14 @@ def generate_md_kl_plot(config: MDKLPlotConfig) -> dict[str, object]:
         "y_edges": y_edges.tolist(),
         **surface_metadata,
         **kl_display_metadata,
+        **(
+            {
+                "kl_colorbar_vmin": float(kl_limits[0]),
+                "kl_colorbar_vmax": float(kl_limits[1]),
+            }
+            if kl_limits is not None
+            else {}
+        ),
         "kl_md_to_reweighted": divergence_metadata[
             "kl_pre_reweighted_to_reweighted_projected_fel"
         ],
@@ -300,7 +371,7 @@ def generate_md_kl_plot(config: MDKLPlotConfig) -> dict[str, object]:
             md_surface,
             x_edges,
             y_edges,
-            title="MD phi/psi probability",
+            title="MD probability",
             colorbar_label="Probability",
             xlabel="phi (deg)",
             ylabel="psi (deg)",
@@ -314,7 +385,7 @@ def generate_md_kl_plot(config: MDKLPlotConfig) -> dict[str, object]:
             md_free_energy,
             x_edges,
             y_edges,
-            title="MD reference free energy (phi, psi)",
+            title="MD reference free energy",
             colorbar_label=f"Relative free energy ({energy_unit_label})",
             xlabel="phi (deg)",
             ylabel="psi (deg)",
@@ -332,7 +403,7 @@ def generate_md_kl_plot(config: MDKLPlotConfig) -> dict[str, object]:
             md_free_energy,
             x_edges,
             y_edges,
-            title="MD discrete free energy (phi, psi)",
+            title="MD discrete free energy",
             colorbar_label=f"Relative free energy ({energy_unit_label})",
             colormap=config.fel_colormap,
             fel_max_energy_display=fel_max_energy_display,
@@ -345,7 +416,7 @@ def generate_md_kl_plot(config: MDKLPlotConfig) -> dict[str, object]:
             reweighted_surface,
             x_edges,
             y_edges,
-            title="Reweighted phi/psi probability",
+            title="Reweighted probability",
             colorbar_label="Probability",
             xlabel="phi (deg)",
             ylabel="psi (deg)",
@@ -362,7 +433,7 @@ def generate_md_kl_plot(config: MDKLPlotConfig) -> dict[str, object]:
             reweighted_free_energy,
             x_edges,
             y_edges,
-            title="Reweighted free energy (phi, psi)",
+            title="Reweighted free energy",
             colorbar_label=f"Relative free energy ({energy_unit_label})",
             xlabel="phi (deg)",
             ylabel="psi (deg)",
@@ -370,22 +441,39 @@ def generate_md_kl_plot(config: MDKLPlotConfig) -> dict[str, object]:
             colormap=config.fel_colormap,
         )
     )
-    outputs.append(
-        _plot_discrete_phi_psi_values(
-            plt,
-            os.path.join(
-                config.output_dir,
-                "reweighted_discrete_microstate_free_energy_ramachandran.png",
-            ),
-            reweighted_free_energy,
-            x_edges,
-            y_edges,
-            title="Reweighted discrete free energy (phi, psi)",
-            colorbar_label=f"Relative free energy ({energy_unit_label})",
-            colormap=config.fel_colormap,
-            fel_max_energy_display=fel_max_energy_display,
+    if state_discrete_fe_available:
+        outputs.append(
+            _plot_reweighted_discrete_from_state_summary(
+                plt,
+                os.path.join(
+                    config.output_dir,
+                    "reweighted_discrete_microstate_free_energy_ramachandran.png",
+                ),
+                summary_csv=summary_csv,
+                temperature_kelvin=config.temperature_kelvin,
+                energy_scale=energy_scale,
+                energy_unit_label=energy_unit_label,
+                fel_max_energy_display=fel_max_energy_display,
+                colormap=config.fel_colormap,
+            )
         )
-    )
+    else:
+        outputs.append(
+            _plot_discrete_phi_psi_values(
+                plt,
+                os.path.join(
+                    config.output_dir,
+                    "reweighted_discrete_microstate_free_energy_ramachandran.png",
+                ),
+                reweighted_free_energy,
+                x_edges,
+                y_edges,
+                title="Reweighted discrete free energy",
+                colorbar_label=f"Relative free energy ({energy_unit_label})",
+                colormap=config.fel_colormap,
+                fel_max_energy_display=fel_max_energy_display,
+            )
+        )
     outputs.append(
         save_pcolormesh_landscape(
             plt,
@@ -393,12 +481,14 @@ def generate_md_kl_plot(config: MDKLPlotConfig) -> dict[str, object]:
             kl_display_grid,
             x_edges,
             y_edges,
-            title="MD vs reweighted KL imbalance (phi, psi)",
+            title="MD vs reweighted KL imbalance",
             colorbar_label=kl_colorbar_label,
             xlabel="phi (deg)",
             ylabel="psi (deg)",
             colormap=config.divergence_colormap,
             symmetric_zero_center=True,
+            colorbar_vmin=kl_limits[0] if kl_limits is not None else None,
+            colorbar_vmax=kl_limits[1] if kl_limits is not None else None,
         )
     )
     outputs.append(
@@ -411,10 +501,12 @@ def generate_md_kl_plot(config: MDKLPlotConfig) -> dict[str, object]:
             kl_display_grid,
             x_edges,
             y_edges,
-            title="MD vs reweighted discrete KL imbalance (phi, psi)",
+            title="MD vs reweighted discrete KL imbalance",
             colorbar_label=kl_colorbar_label,
             colormap=config.divergence_colormap,
             symmetric_zero_center=True,
+            colorbar_vmin=kl_limits[0] if kl_limits is not None else None,
+            colorbar_vmax=kl_limits[1] if kl_limits is not None else None,
         )
     )
 
@@ -432,6 +524,92 @@ def generate_md_kl_plot(config: MDKLPlotConfig) -> dict[str, object]:
     }
 
 
+def _state_summary_supports_discrete_fe_plot(summary_csv: str) -> bool:
+    """Return True when the microstate summary has finite phi/psi centers."""
+
+    rows = read_csv_rows(summary_csv)
+    if not rows:
+        return False
+    for row in rows:
+        try:
+            x = _row_float(row, ("plot_x", "phi_center"))
+            y = _row_float(row, ("plot_y", "psi_center"))
+        except ConfigurationError:
+            return False
+        if not (np.isfinite(x) and np.isfinite(y)):
+            return False
+    return True
+
+
+def _plot_reweighted_discrete_from_state_summary(
+    plt,
+    path: str,
+    *,
+    summary_csv: str,
+    temperature_kelvin: float,
+    energy_scale: float,
+    energy_unit_label: str,
+    fel_max_energy_display: float | None,
+    colormap: str,
+) -> str:
+    """Scatter reweighted microstate centers using the same data as felp-plot."""
+
+    rows = read_csv_rows(summary_csv)
+    x_values = np.asarray([_row_float(row, ("plot_x", "phi_center")) for row in rows])
+    y_values = np.asarray([_row_float(row, ("plot_y", "psi_center")) for row in rows])
+    probabilities = np.asarray(
+        [_row_float(row, ("target_probability", "probability")) for row in rows],
+        dtype=float,
+    )
+    free_energy_kj_mol = np.asarray(
+        [
+            float(row["free_energy_kj_mol"])
+            if row.get("free_energy_kj_mol") not in (None, "")
+            else float("nan")
+            for row in rows
+        ],
+        dtype=float,
+    )
+    mask = np.isfinite(x_values) & np.isfinite(y_values)
+    if int(mask.sum()) < 1:
+        raise ConfigurationError(
+            "Microstate summary has no finite phi/psi centers for discrete plotting."
+        )
+
+    if np.isfinite(free_energy_kj_mol[mask]).any():
+        values = energy_scale * free_energy_kj_mol
+        colorbar_label = f"Relative reweighted free energy ({energy_unit_label})"
+    else:
+        values = energy_scale * free_energy_from_probabilities(
+            probabilities,
+            temperature_kelvin=temperature_kelvin,
+        )
+        colorbar_label = (
+            "Relative reweighted free energy from probability "
+            f"({energy_unit_label})"
+        )
+
+    fig, ax = plt.subplots(1, 1)
+    scatter_kwargs: dict[str, object] = {
+        "ax": ax,
+        "x": x_values[mask],
+        "y": y_values[mask],
+        "values": values[mask],
+        "colorbar_label": colorbar_label,
+        "title": "Reweighted microstate centers",
+        "xlabel": "phi (deg)",
+        "ylabel": "psi (deg)",
+        "colormap": colormap,
+    }
+    if fel_max_energy_display is not None:
+        scatter_kwargs["fel_max_energy_kj_mol"] = fel_max_energy_display
+    scatter_state_projection(**scatter_kwargs)
+    fig.tight_layout()
+    fig.savefig(path)
+    plt.close(fig)
+    return path
+
+
 def _plot_discrete_phi_psi_values(
     plt,
     path: str,
@@ -444,6 +622,8 @@ def _plot_discrete_phi_psi_values(
     colormap: str | None,
     fel_max_energy_display: float | None = None,
     symmetric_zero_center: bool = False,
+    colorbar_vmin: float | None = None,
+    colorbar_vmax: float | None = None,
 ) -> str:
     """Render a marker-based phi/psi grid using the shared state scatter style."""
 
@@ -462,6 +642,8 @@ def _plot_discrete_phi_psi_values(
         ylabel="psi (deg)",
         fel_max_energy_kj_mol=fel_max_energy_display,
         symmetric_zero_center=symmetric_zero_center,
+        colorbar_vmin=colorbar_vmin,
+        colorbar_vmax=colorbar_vmax,
         colormap=colormap,
     )
     fig.tight_layout()
@@ -470,32 +652,15 @@ def _plot_discrete_phi_psi_values(
     return path
 
 
-def _kl_display_grid(
-    kl_grid: np.ndarray,
-    *,
-    temperature_kelvin: float,
-    scale_by_kbt: bool,
-    energy_unit: str,
-) -> tuple[np.ndarray, str, dict[str, object]]:
-    """Return the displayed KL grid and metadata for optional kBT scaling."""
+def _kl_energy_display_scale_and_label(kl_energy_unit: str) -> tuple[float, str]:
+    """Return kBT multiplier and unit label for KL heatmaps."""
 
-    if not scale_by_kbt:
-        return np.asarray(kl_grid, dtype=float), "Signed KL imbalance", {
-            "kl_display_units": "dimensionless",
-            "kl_display_scale_factor": 1.0,
-        }
-    scale = K_BOLTZMANN_KJ_PER_MOL_K * float(temperature_kelvin)
-    unit_label = "kJ/mol"
-    if energy_unit == "kcal_mol":
-        scale /= _KJ_PER_KCAL
-        unit_label = "kcal/mol"
-    return (
-        np.asarray(kl_grid, dtype=float) * scale,
-        f"Signed KL contribution ({unit_label})",
-        {
-            "kl_display_units": unit_label,
-            "kl_display_scale_factor": float(scale),
-        },
+    if kl_energy_unit == "kcal_mol":
+        return 1.0 / _KJ_PER_KCAL, "kcal/mol"
+    if kl_energy_unit == "kj_mol":
+        return 1.0, "kJ/mol"
+    raise ConfigurationError(
+        f"kl_energy_unit must be 'kj_mol' or 'kcal_mol', not {kl_energy_unit!r}."
     )
 
 
@@ -516,7 +681,8 @@ def _load_frame_projected_reweighted_surface(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, object]]:
     """Project FELP reweighted frame weights onto a regular phi/psi grid."""
 
-    rows = read_csv_rows(config.resolved_reweighted_surface_csv())
+    summary_csv = config.resolved_reweighted_surface_csv()
+    rows = read_csv_rows(summary_csv)
     state_ids = [row.get("state_id", row["label"]) for row in rows]
     reference_probabilities = np.asarray(
         [float(row["reference_probability"]) for row in rows],
@@ -526,8 +692,21 @@ def _load_frame_projected_reweighted_surface(
         state_id: float(probability)
         for state_id, probability in zip(state_ids, reference_probabilities, strict=True)
     }
-    metadata = _load_microstate_summary_metadata(rows)
-    weight_treatment = config.weight_treatment or _summary_weight_treatment(metadata)
+    summary_metadata = _load_microstate_summary_metadata(rows)
+    reweighting_method = str(
+        summary_metadata.get("reweighting_method", "independent") or "independent"
+    )
+    state_reweight_factors = state_reweight_factors_from_summary_rows(rows)
+    frame_weights_csv_path = resolve_frame_weights_csv_path(
+        microstate_summary_csv=summary_csv,
+        explicit_path=config.frame_weights_csv,
+    )
+    frame_weights_by_index = (
+        load_frame_weights_csv(frame_weights_csv_path)
+        if frame_weights_csv_path is not None
+        else None
+    )
+    weight_treatment = config.weight_treatment or _summary_weight_treatment(summary_metadata)
     frame_results = load_frame_results_csv(config.raw_frame_results_csv)
     frame_results = _filter_qc_excluded_frame_results(
         frame_results,
@@ -541,6 +720,9 @@ def _load_frame_projected_reweighted_surface(
         max_points=config.fel_max_points,
         x_name="phi",
         y_name="psi",
+        state_reweight_factors=state_reweight_factors,
+        frame_weights_by_index=frame_weights_by_index,
+        reweighting_method=reweighting_method,
     )
     if sampled is None:
         raise ConfigurationError(
@@ -567,7 +749,20 @@ def _load_frame_projected_reweighted_surface(
         y_edges,
         {
             "reweighted_surface_source": "frame_results",
+            "reweighting_method": reweighting_method,
             "reweighted_frame_projection_weight_treatment": weight_treatment,
+            "reweighted_frame_projection_estimator_detail": frame_projection_weight_detail(
+                reweighting_method=reweighting_method,
+                used_frame_weights_csv=frame_weights_by_index is not None,
+            ),
+            "reweighted_frame_projection_state_mass_preserved": (
+                frame_weights_by_index is not None
+                or (
+                    reweighting_method != "independent"
+                    and bool(state_reweight_factors)
+                )
+            ),
+            "frame_weights_path": frame_weights_csv_path,
             "reweighted_projected_frame_count": int(x_values.size),
             "reweighted_probability_total_before_normalization": total,
         },

@@ -16,10 +16,20 @@ from felp.core import ConfigurationError, K_BOLTZMANN_KJ_PER_MOL_K, ReweightingQ
 from felp.io import load_frame_results_csv
 from felp.reweighting import is_reweighting_eligible_frame, psis_smooth_weights
 
+from .frame_projection_weights import (
+    frame_projection_weight_detail,
+    load_frame_weights_csv,
+    per_frame_projection_weight,
+    resolve_frame_weights_csv_path,
+    state_reweight_factors_from_summary_rows,
+)
 from .common import (
     DEFAULT_FEL_COLORMAP,
+    DEFAULT_KL_DISPLAY_THRESHOLD,
     FELP_KL_DIVERGENCE_COLORMAP,
     apply_publication_style,
+    prepare_kl_display_grid,
+    resolve_kl_colorbar_limits,
     finite_top_indices,
     free_energy_from_probabilities,
     import_matplotlib,
@@ -106,6 +116,9 @@ class FELPPlotConfig:
     microstate_summary_csv: str
     output_dir: str
     raw_frame_results_csv: str | None = None
+    frame_weights_csv: str | None = None
+    """Optional frame_weights.csv from frame-level or state-factor reweighting exports."""
+
     temperature_kelvin: float = 300.0
     top_states: int = 40
     fel_bins: int = 72
@@ -154,6 +167,13 @@ class FELPPlotConfig:
 
     kl_scale_by_kbt: bool = False
     """If true, display projected KL grids multiplied by kBT in plot energy units."""
+
+    kl_display_threshold: float | None = DEFAULT_KL_DISPLAY_THRESHOLD
+    """Plot |KL cell| below this (in display units) as zero; use 0 to disable."""
+
+    kl_colorbar_vmin: float | None = None
+    kl_colorbar_vmax: float | None = None
+    """Optional fixed KL heatmap limits (display units; symmetric if only one is set)."""
 
     weight_treatment: str | None = None
     """Optional override for frame-projected reweighting weights."""
@@ -267,6 +287,14 @@ class FELPPlotConfig:
             "divergence_colormap",
             validate_registered_colormap(div_src),
         )
+        if self.kl_display_threshold is not None:
+            threshold = float(self.kl_display_threshold)
+            if threshold < 0.0 or not math.isfinite(threshold):
+                raise ConfigurationError(
+                    "kl_display_threshold must be a non-negative finite float."
+                )
+            object.__setattr__(self, "kl_display_threshold", threshold)
+        resolve_kl_colorbar_limits(self.kl_colorbar_vmin, self.kl_colorbar_vmax)
         if self.weight_treatment is not None:
             weight_treatment = ReweightingQCConfig.normalize_weight_treatment(
                 self.weight_treatment
@@ -381,6 +409,19 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
         target_probabilities,
     )
     summary_metadata = _load_microstate_summary_metadata(rows)
+    reweighting_method = str(
+        summary_metadata.get("reweighting_method", "independent") or "independent"
+    )
+    state_reweight_factors = state_reweight_factors_from_summary_rows(rows)
+    frame_weights_csv_path = resolve_frame_weights_csv_path(
+        microstate_summary_csv=config.microstate_summary_csv,
+        explicit_path=config.frame_weights_csv,
+    )
+    frame_weights_by_index = (
+        load_frame_weights_csv(frame_weights_csv_path)
+        if frame_weights_csv_path is not None
+        else None
+    )
     summary_weight_treatment = _summary_weight_treatment(summary_metadata)
     frame_projection_weight_treatment = (
         config.weight_treatment or summary_weight_treatment
@@ -502,6 +543,10 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
                 target_probabilities=target_probabilities,
                 temperature_kelvin=config.temperature_kelvin,
                 weight_treatment=frame_projection_weight_treatment,
+                reweighting_method=reweighting_method,
+                state_reweight_factors=state_reweight_factors,
+                frame_weights_by_index=frame_weights_by_index,
+                used_frame_weights_csv=frame_weights_by_index is not None,
                 fel_estimator=config.fel_estimator,
                 fel_bandwidth=config.fel_bandwidth,
                 fel_bandwidth_rule=config.fel_bandwidth_rule,
@@ -519,6 +564,9 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
                 probability_colormap=config.probability_colormap,
                 divergence_colormap=config.divergence_colormap,
                 kl_scale_by_kbt=config.kl_scale_by_kbt,
+                kl_display_threshold=config.kl_display_threshold,
+                kl_colorbar_vmin=config.kl_colorbar_vmin,
+                kl_colorbar_vmax=config.kl_colorbar_vmax,
                 fel_plot_style=config.fel_plot_style,
                 x_name=cv_axes.x_name,
                 y_name=cv_axes.y_name,
@@ -613,9 +661,9 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
             "cv_frame_projection_estimator",
             config.fel_estimator,
         ),
-        "cv_frame_projection_estimator_detail": (
-            "w_ij proportional to pi_reference(i) * "
-            f"{frame_projection_weight_treatment} exp(-beta * delta_u_ij) / n_i"
+        "cv_frame_projection_estimator_detail": frame_projection_weight_detail(
+            reweighting_method=reweighting_method,
+            used_frame_weights_csv=frame_weights_by_index is not None,
         ),
         "cv_frame_projection_weight_treatment": frame_projection_weight_treatment,
         "cv_frame_projection_weight_treatment_source": (
@@ -637,7 +685,7 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
         "cv_frame_projection_excluded_frame_count": sum(
             len(indices) for indices in excluded_frame_indices_by_state.values()
         ),
-        "reweighting_method": summary_metadata.get("reweighting_method", "independent"),
+        "reweighting_method": reweighting_method,
         "state_reweighting_estimator": summary_metadata.get(
             "state_reweighting_estimator",
             (
@@ -646,11 +694,7 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
             ),
         ),
         "state_reweighting_weight_treatment": summary_weight_treatment,
-        "frame_weights_path": (
-            os.path.join(config.output_dir, "frame_weights.csv")
-            if os.path.isfile(os.path.join(config.output_dir, "frame_weights.csv"))
-            else None
-        ),
+        "frame_weights_path": frame_weights_csv_path,
         "fel_max_energy_kj_mol": config.fel_max_energy_kj_mol,
         "fel_colormap": config.fel_colormap,
         "fel_plot_style": config.fel_plot_style,
@@ -1354,7 +1398,7 @@ def _plot_cv_state_landscapes(
             reference_grid,
             x_edges,
             y_edges,
-            title=f"Pre-reweighted microstate probability ({x_name}, {y_name})",
+            title="Pre-reweighted microstate probability",
             colorbar_label="Probability",
             xlabel=_cv_axis_label(x_name),
             ylabel=_cv_axis_label(y_name),
@@ -1369,7 +1413,7 @@ def _plot_cv_state_landscapes(
             target_grid,
             x_edges,
             y_edges,
-            title=f"Reweighted microstate probability ({x_name}, {y_name})",
+            title="Reweighted microstate probability",
             colorbar_label="Probability",
             xlabel=_cv_axis_label(x_name),
             ylabel=_cv_axis_label(y_name),
@@ -1394,7 +1438,7 @@ def _plot_cv_state_landscapes(
             reference_fe,
             x_edges,
             y_edges,
-            title=f"Pre-reweighted microstate free energy ({x_name}, {y_name})",
+            title="Pre-reweighted microstate free energy",
             colorbar_label=f"Relative free energy ({energy_unit_label})",
             xlabel=_cv_axis_label(x_name),
             ylabel=_cv_axis_label(y_name),
@@ -1410,7 +1454,7 @@ def _plot_cv_state_landscapes(
             reweighted_fe,
             x_edges,
             y_edges,
-            title=f"Reweighted microstate free energy ({x_name}, {y_name})",
+            title="Reweighted microstate free energy",
             colorbar_label=f"Relative free energy ({energy_unit_label})",
             xlabel=_cv_axis_label(x_name),
             ylabel=_cv_axis_label(y_name),
@@ -1433,7 +1477,7 @@ def _sample_state_projection_points(
         return state_samples
 
     sample_budget = max(max_points, len(state_samples))
-    sampled: dict[str, list[tuple[float, float, float]]] = {}
+    sampled: dict[str, list[tuple[float, float, float, int]]] = {}
     for state_id, values in state_samples.items():
         target_count = max(
             1,
@@ -1450,10 +1494,10 @@ def _collect_cv_projection_state_samples(
     state_ids: set[str],
     x_name: str,
     y_name: str,
-) -> tuple[dict[str, list[tuple[float, float, float]]], list[float]] | None:
+) -> tuple[dict[str, list[tuple[float, float, float, int]]], list[float]] | None:
     """Collect finite frame CV samples keyed by microstate id."""
 
-    grouped: dict[str, list[tuple[float, float, float]]] = defaultdict(list)
+    grouped: dict[str, list[tuple[float, float, float, int]]] = defaultdict(list)
     eligible_delta_values: list[float] = []
     for result in frame_results:
         if not is_reweighting_eligible_frame(result):
@@ -1471,6 +1515,7 @@ def _collect_cv_projection_state_samples(
                 float(x_value),
                 float(y_value),
                 float(result.delta_u_kj_mol),
+                int(result.frame_index),
             )
         )
         eligible_delta_values.append(float(result.delta_u_kj_mol))
@@ -1489,6 +1534,9 @@ def _collect_cv_projection_samples(
     max_points: int,
     x_name: str,
     y_name: str,
+    state_reweight_factors: dict[str, float] | None = None,
+    frame_weights_by_index: dict[int, float] | None = None,
+    reweighting_method: str = "independent",
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
     """Collect exact 2D CV frame samples with state-consistent reference weights."""
 
@@ -1531,26 +1579,52 @@ def _collect_cv_projection_samples(
         treated_weights = (
             math.exp(-beta * (local_delta_shift - delta_shift)) * treated_weights
         )
-        for (x_value, y_value, _), treated_weight in zip(
+        local_mean_treated = float(treated_weights.mean()) if treated_weights.size else 0.0
+        state_factor = None
+        if frame_weights_by_index is None and reweighting_method != "independent":
+            state_factor = (state_reweight_factors or {}).get(state_id)
+        for (x_value, y_value, _, frame_index), treated_weight in zip(
             samples,
             treated_weights,
             strict=True,
         ):
+            frame_override = (
+                frame_weights_by_index.get(frame_index)
+                if frame_weights_by_index is not None
+                else None
+            )
             x_values.append(x_value)
             y_values.append(y_value)
             reference_weights.append(reference_probability / sample_count)
             reweighted_weights.append(
-                reference_probability * float(treated_weight) / sample_count
+                per_frame_projection_weight(
+                    reference_probability=reference_probability,
+                    treated_weight=float(treated_weight),
+                    local_mean_treated=local_mean_treated,
+                    state_reweight_factor=state_factor,
+                    frame_weight_override=frame_override,
+                )
+                / sample_count
             )
 
     if not x_values:
         return None
 
+    reweighted_array = np.asarray(reweighted_weights, dtype=float)
+    if frame_weights_by_index is None and state_reweight_factors:
+        global_normalization = sum(
+            reference_probability_by_state.get(state_id, 0.0)
+            * float(state_reweight_factors.get(state_id, 0.0))
+            for state_id in reference_probability_by_state
+        )
+        if global_normalization > 0.0:
+            reweighted_array = reweighted_array / global_normalization
+
     return (
         np.asarray(x_values, dtype=float),
         np.asarray(y_values, dtype=float),
         np.asarray(reference_weights, dtype=float),
-        np.asarray(reweighted_weights, dtype=float),
+        reweighted_array,
     )
 
 
@@ -2138,6 +2212,10 @@ def _plot_cv_projected_landscapes(
     target_probabilities: np.ndarray,
     temperature_kelvin: float,
     weight_treatment: str,
+    reweighting_method: str,
+    state_reweight_factors: dict[str, float],
+    frame_weights_by_index: dict[int, float] | None,
+    used_frame_weights_csv: bool,
     fel_estimator: str,
     fel_bandwidth: str,
     fel_bandwidth_rule: str,
@@ -2155,6 +2233,9 @@ def _plot_cv_projected_landscapes(
     probability_colormap: str,
     divergence_colormap: str,
     kl_scale_by_kbt: bool,
+    kl_display_threshold: float | None,
+    kl_colorbar_vmin: float | None,
+    kl_colorbar_vmax: float | None,
     fel_plot_style: str,
     x_name: str,
     y_name: str,
@@ -2169,12 +2250,15 @@ def _plot_cv_projected_landscapes(
         state_id: float(probability)
         for state_id, probability in zip(state_ids, target_probabilities)
     }
+    state_mass_preserved = used_frame_weights_csv or (
+        reweighting_method != "independent" and bool(state_reweight_factors)
+    )
     projection_metadata: dict[str, object] = {
         "cv_frame_projection_estimator": "histogram",
         "cv_frame_projection_kernel": None,
         "cv_frame_projection_bandwidth": None,
         "cv_frame_projection_bandwidth_rule": None,
-        "cv_frame_projection_state_mass_preserved": False,
+        "cv_frame_projection_state_mass_preserved": state_mass_preserved,
     }
     if fel_estimator == "gaussian-kernel":
         projected = _gaussian_kernel_projected_surfaces(
@@ -2205,6 +2289,9 @@ def _plot_cv_projected_landscapes(
             max_points=max_points,
             x_name=x_name,
             y_name=y_name,
+            state_reweight_factors=state_reweight_factors,
+            frame_weights_by_index=frame_weights_by_index,
+            reweighting_method=reweighting_method,
         )
         if sampled is None:
             return [], projection_metadata
@@ -2275,14 +2362,21 @@ def _plot_cv_projected_landscapes(
         "0.5 * [p_pre * log(p_pre / p_reweighted) - "
         "p_reweighted * log(p_reweighted / p_pre)]"
     )
-    kl_display_grid, kl_colorbar_label, kl_display_metadata = _kl_display_grid(
+    kl_display_grid, kl_colorbar_label, kl_display_metadata = prepare_kl_display_grid(
         kl_contribution_grid,
         temperature_kelvin=temperature_kelvin,
-        energy_scale=energy_scale,
-        energy_unit_label=energy_unit_label,
         scale_by_kbt=kl_scale_by_kbt,
+        kbt_energy_scale=energy_scale,
+        kbt_energy_unit_label=energy_unit_label,
+        display_threshold=kl_display_threshold,
+        probability_labels=("p_pre", "p_rw"),
     )
     divergence_metadata.update(kl_display_metadata)
+    kl_limits = resolve_kl_colorbar_limits(kl_colorbar_vmin, kl_colorbar_vmax)
+    if kl_limits is not None:
+        kl_cb_vmin, kl_cb_vmax = kl_limits
+        divergence_metadata["kl_colorbar_vmin"] = float(kl_cb_vmin)
+        divergence_metadata["kl_colorbar_vmax"] = float(kl_cb_vmax)
     projection_metadata.update(divergence_metadata)
 
     outputs: list[str] = []
@@ -2325,7 +2419,7 @@ def _plot_cv_projected_landscapes(
             reference_hist,
             x_edges,
             y_edges,
-            title=f"Pre-reweighted projected probability ({x_name}, {y_name})",
+            title="Pre-reweighted projected probability",
             colorbar_label="Probability",
             xlabel=_cv_axis_label(x_name),
             ylabel=_cv_axis_label(y_name),
@@ -2340,7 +2434,7 @@ def _plot_cv_projected_landscapes(
             reweighted_hist,
             x_edges,
             y_edges,
-            title=f"Reweighted projected probability ({x_name}, {y_name})",
+            title="Reweighted projected probability",
             colorbar_label="Probability",
             xlabel=_cv_axis_label(x_name),
             ylabel=_cv_axis_label(y_name),
@@ -2355,7 +2449,7 @@ def _plot_cv_projected_landscapes(
             reference_fe,
             x_edges,
             y_edges,
-            title=f"Pre-reweighted projected free energy ({x_name}, {y_name})",
+            title="Pre-reweighted projected free energy",
             colorbar_label=f"Relative free energy ({energy_unit_label})",
             xlabel=_cv_axis_label(x_name),
             ylabel=_cv_axis_label(y_name),
@@ -2371,7 +2465,7 @@ def _plot_cv_projected_landscapes(
             reweighted_fe,
             x_edges,
             y_edges,
-            title=f"Reweighted projected free energy ({x_name}, {y_name})",
+            title="Reweighted projected free energy",
             colorbar_label=f"Relative free energy ({energy_unit_label})",
             xlabel=_cv_axis_label(x_name),
             ylabel=_cv_axis_label(y_name),
@@ -2387,12 +2481,14 @@ def _plot_cv_projected_landscapes(
             kl_display_grid,
             x_edges,
             y_edges,
-            title=f"Projected FEL KL contributions ({x_name}, {y_name})",
+            title="Projected FEL KL contributions",
             colorbar_label=kl_colorbar_label,
             xlabel=_cv_axis_label(x_name),
             ylabel=_cv_axis_label(y_name),
             colormap=divergence_colormap,
             symmetric_zero_center=True,
+            colorbar_vmin=kl_limits[0] if kl_limits is not None else None,
+            colorbar_vmax=kl_limits[1] if kl_limits is not None else None,
             plot_style=fel_plot_style,
         )
     )
@@ -2400,32 +2496,6 @@ def _plot_cv_projected_landscapes(
     write_json(kl_summary_path, divergence_metadata)
     outputs.append(kl_summary_path)
     return outputs, projection_metadata
-
-
-def _kl_display_grid(
-    kl_grid: np.ndarray,
-    *,
-    temperature_kelvin: float,
-    energy_scale: float,
-    energy_unit_label: str,
-    scale_by_kbt: bool,
-) -> tuple[np.ndarray, str, dict[str, object]]:
-    """Return the displayed KL grid and metadata for optional kBT scaling."""
-
-    if not scale_by_kbt:
-        return np.asarray(kl_grid, dtype=float), "Signed KL imbalance", {
-            "kl_display_units": "dimensionless",
-            "kl_display_scale_factor": 1.0,
-        }
-    scale = K_BOLTZMANN_KJ_PER_MOL_K * float(temperature_kelvin) * float(energy_scale)
-    return (
-        np.asarray(kl_grid, dtype=float) * scale,
-        f"Signed KL contribution ({energy_unit_label})",
-        {
-            "kl_display_units": energy_unit_label,
-            "kl_display_scale_factor": float(scale),
-        },
-    )
 
 
 def _plot_discrete_microstate_cv_projection(
@@ -2463,13 +2533,13 @@ def _plot_discrete_microstate_cv_projection(
             f"Relative {free_energy_label} free energy from probability "
             f"({energy_unit_label})"
         )
-        title = f"{free_energy_label.capitalize()} microstate centers ({x_name}, {y_name})"
+        title = f"{free_energy_label.capitalize()} microstate centers"
     else:
         values = fe
         colorbar_label = (
             f"Relative {free_energy_label} free energy ({energy_unit_label})"
         )
-        title = f"{free_energy_label.capitalize()} microstate centers ({x_name}, {y_name})"
+        title = f"{free_energy_label.capitalize()} microstate centers"
 
     fig, ax = plt.subplots(1, 1)
     scatter_kwargs: dict = {

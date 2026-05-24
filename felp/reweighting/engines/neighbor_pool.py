@@ -16,6 +16,7 @@ from felp.reweighting.engines.laplacian import (
     _build_laplacian_matrix,
     _laplacian_has_edges,
 )
+from felp.reweighting.frame_weights import frame_weights_from_prep
 from felp.reweighting.outcome import ReweightingOutcome
 from felp.reweighting.prep import ReweightingPrep
 
@@ -610,7 +611,7 @@ def _aggregate_blend(
             "No grid topology available; neighbor pooling degraded to local factors."
         )
 
-    return finalize_microstate_outcome(
+    outcome = finalize_microstate_outcome(
         prep,
         method_id="neighbor_pool",
         state_reweighting_estimator=_ESTIMATOR_BLEND,
@@ -619,6 +620,10 @@ def _aggregate_blend(
         sampling_metadata=sampling_metadata,
         method_metadata=method_metadata,
     )
+    frame_weights = frame_weights_from_prep(prep, blended_factors)
+    if frame_weights:
+        outcome.auxiliary = {"frame_weights": frame_weights}
+    return outcome
 
 
 def _aggregate_variational(
@@ -696,7 +701,7 @@ def _aggregate_variational(
             "No grid topology available; neighbor pooling degraded to local factors."
         )
 
-    return finalize_microstate_outcome(
+    outcome = finalize_microstate_outcome(
         prep,
         method_id="neighbor_pool",
         state_reweighting_estimator=_ESTIMATOR_VARIATIONAL,
@@ -705,6 +710,10 @@ def _aggregate_variational(
         sampling_metadata=sampling_metadata,
         method_metadata=method_metadata,
     )
+    frame_weights = frame_weights_from_prep(prep, reweight_factors)
+    if frame_weights:
+        outcome.auxiliary = {"frame_weights": frame_weights}
+    return outcome
 
 
 class NeighborPoolEngine:
