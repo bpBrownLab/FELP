@@ -79,6 +79,9 @@ class CompositeFigureStyle:
     fel_colorbar_label: str = "Free energy (kcal/mol)"
     kl_colorbar_label: str = "Symmetric KL"
     use_kl_mathtext_label: bool = False
+    reference_colorbar_label: str = ""
+    reweighted_colorbar_label: str = ""
+    md_colorbar_label: str = ""
 
 
 @dataclass(frozen=True)
@@ -231,13 +234,10 @@ def generate_composite_figure(config: CompositeFigureConfig) -> dict[str, object
     n_cols = len(config.columns)
     has_span_reference = any(column.span_rows for column in config.columns)
 
-    n_data_cols = n_cols - (1 if has_span_reference else 0)
-    fig_width = config.style.panel_width * n_data_cols + 1.6
-    if has_span_reference:
-        fig_width += config.style.panel_width * 0.85
+    fig_width = config.style.panel_width * n_cols + 1.0
     fig_height = config.style.panel_height * n_rows + 0.6
     fig = plt.figure(figsize=(fig_width, fig_height), dpi=config.style.dpi)
-    width_ratios = [0.85 if column.span_rows else 1.0 for column in config.columns]
+    width_ratios = [1.0 for _ in config.columns]
     gs = fig.add_gridspec(
         n_rows,
         n_cols,
@@ -253,19 +253,19 @@ def generate_composite_figure(config: CompositeFigureConfig) -> dict[str, object
     column_index_by_type = {
         column.type: index for index, column in enumerate(config.columns)
     }
+    ref_row = n_rows // 2
     for row_index in range(n_rows):
         for column_index, column in enumerate(config.columns):
-            if column.span_rows and row_index > 0:
-                continue
-            payload = payload_by_key[
-                (0 if column.span_rows else row_index, column_index)
-            ]
             if column.span_rows:
-                ax = fig.add_subplot(gs[:, column_index])
-                show_colorbar = False
+                if row_index != ref_row:
+                    continue
+                payload = payload_by_key[(0, column_index)]
+                ax = fig.add_subplot(gs[ref_row, column_index])
+                show_colorbar = True
                 is_bottom = True
                 is_left = True
             else:
+                payload = payload_by_key[(row_index, column_index)]
                 ax = fig.add_subplot(gs[row_index, column_index])
                 show_colorbar = _panel_show_colorbar(
                     config.style.colorbar_mode,
@@ -274,7 +274,7 @@ def generate_composite_figure(config: CompositeFigureConfig) -> dict[str, object
                 )
                 is_bottom = row_index == n_rows - 1
                 is_left = column_index == 0 or (
-                    column_index == 1 and has_span_reference
+                    column_index == 1 and row_index != ref_row
                 )
             _draw_panel(
                 ax,
@@ -691,6 +691,12 @@ def _display_colorbar_label(payload: _PanelPayload, style: CompositeFigureStyle)
         if style.use_kl_mathtext_label:
             return symmetric_kl_imbalance_mathtext_label("p_MD", "p_rw")
         return style.kl_colorbar_label
+    if payload.panel_type == "reference_fel" and style.reference_colorbar_label:
+        return style.reference_colorbar_label
+    if payload.panel_type == "reweighted_fel" and style.reweighted_colorbar_label:
+        return style.reweighted_colorbar_label
+    if payload.panel_type == "md_fel" and style.md_colorbar_label:
+        return style.md_colorbar_label
     if payload.panel_type.endswith("_fel"):
         return style.fel_colorbar_label
     return payload.colorbar_label
@@ -722,9 +728,9 @@ def _draw_panel(
         "colormap": colormap,
         "show_colorbar": show_colorbar,
         "marker_size": style.marker_size,
-        "ramachandran_equal_aspect": True,
-        "colorbar_fraction": 0.05,
-        "colorbar_pad": 0.02,
+        "ramachandran_equal_aspect": False,
+        "colorbar_fraction": 0.04,
+        "colorbar_pad": 0.01,
         "colorbar_labelsize": style.colorbar_label_size,
     }
     if payload.fel_max_energy_display is not None and payload.panel_type.endswith("_fel"):
@@ -735,6 +741,8 @@ def _draw_panel(
             scatter_kwargs["colorbar_vmin"] = payload.kl_colorbar_vmin
             scatter_kwargs["colorbar_vmax"] = payload.kl_colorbar_vmax
     scatter_state_projection(**scatter_kwargs)
+    ax.set_xlim(-180.0, 180.0)
+    ax.set_ylim(-180.0, 180.0)
     ax.tick_params(
         labelsize=style.tick_size,
         labelbottom=show_xticklabels,
@@ -760,22 +768,62 @@ def _apply_composite_style(style: CompositeFigureStyle) -> None:
     )
 
 
+def _get_colorbar_bbox(fig, ax):
+    ax_pos = ax.get_position()
+    for other_ax in fig.get_axes():
+        if other_ax == ax:
+            continue
+        other_pos = other_ax.get_position()
+        y_match = abs(other_pos.y0 - ax_pos.y0) < 0.05 and abs(other_pos.y1 - ax_pos.y1) < 0.05
+        x_match = other_pos.x0 > ax_pos.x1 - 0.01
+        width_match = other_pos.width < ax_pos.width * 0.4
+        if y_match and x_match and width_match:
+            return other_pos
+    return None
+
+
 def _add_column_headers(
     fig,
     gs,
     config: CompositeFigureConfig,
     n_rows: int,
 ) -> None:
+    all_axes = fig.get_axes()
     for column_index, column in enumerate(config.columns):
         if not column.header:
             continue
-        if column.span_rows:
-            bbox = gs[:, column_index].get_position(fig)
+        
+        # Find the top plot axes in this column
+        plot_ax = None
+        for ax in all_axes:
+            pos = ax.get_position()
+            # Try to match the top row or the middle row if it's the reference column
+            for r in range(n_rows):
+                cell_pos = gs[r, column_index].get_position(fig)
+                if abs(pos.x0 - cell_pos.x0) < 0.05 and abs(pos.y0 - cell_pos.y0) < 0.05:
+                    plot_ax = ax
+                    break
+            if plot_ax is not None:
+                break
+
+        if plot_ax is not None:
+            plot_pos = plot_ax.get_position()
+            # If the column has a colorbar, center over the plot panel + colorbar area
+            colorbar_bbox = _get_colorbar_bbox(fig, plot_ax)
+            if colorbar_bbox is not None:
+                x_center = (plot_pos.x0 + colorbar_bbox.x1) * 0.5
+                y_top = max(plot_pos.y1, colorbar_bbox.y1)
+            else:
+                x_center = (plot_pos.x0 + plot_pos.x1) * 0.5
+                y_top = plot_pos.y1
         else:
             bbox = gs[0, column_index].get_position(fig)
+            x_center = (bbox.x0 + bbox.x1) * 0.5
+            y_top = bbox.y1
+
         fig.text(
-            (bbox.x0 + bbox.x1) * 0.5,
-            bbox.y1 + config.style.column_header_pad,
+            x_center,
+            y_top + config.style.column_header_pad,
             column.header,
             ha="center",
             va="bottom",
@@ -792,14 +840,35 @@ def _add_row_labels(
     n_rows: int,
     last_col: int,
 ) -> None:
+    all_axes = fig.get_axes()
     for row_index, row_ctx in enumerate(row_contexts):
         label = str(row_ctx.get("label", ""))
         if not label:
             continue
-        bbox = gs[row_index, last_col].get_position(fig)
-        y_pos = (bbox.y0 + bbox.y1) * 0.5
+        
+        plot_ax = None
+        for ax in all_axes:
+            pos = ax.get_position()
+            cell_pos = gs[row_index, last_col].get_position(fig)
+            if abs(pos.x0 - cell_pos.x0) < 0.05 and abs(pos.y0 - cell_pos.y0) < 0.05:
+                plot_ax = ax
+                break
+
+        if plot_ax is not None:
+            plot_pos = plot_ax.get_position()
+            colorbar_bbox = _get_colorbar_bbox(fig, plot_ax)
+            if colorbar_bbox is not None:
+                right_edge = colorbar_bbox.x1
+            else:
+                right_edge = plot_pos.x1
+            y_pos = (plot_pos.y0 + plot_pos.y1) * 0.5
+        else:
+            bbox = gs[row_index, last_col].get_position(fig)
+            right_edge = bbox.x1
+            y_pos = (bbox.y0 + bbox.y1) * 0.5
+
         fig.text(
-            style.right_margin + style.row_label_pad,
+            right_edge + style.row_label_pad,
             y_pos,
             label,
             ha="left",
@@ -821,24 +890,111 @@ def _draw_reference_arrows(
 ) -> None:
     from matplotlib.patches import FancyArrowPatch
 
-    if span_reference:
-        ref_bbox = gs[:, ref_col].get_position(fig)
-    else:
-        ref_bbox = gs[0, ref_col].get_position(fig)
+    all_axes = fig.get_axes()
+    ref_row = n_rows // 2
+    ref_ax = None
+    for ax in all_axes:
+        pos = ax.get_position()
+        cell_pos = gs[ref_row, ref_col].get_position(fig)
+        if abs(pos.x0 - cell_pos.x0) < 0.05 and abs(pos.y0 - cell_pos.y0) < 0.05:
+            ref_ax = ax
+            break
 
+    if ref_ax is None:
+        return
+
+    target_axes_by_row = {}
     for row_index in range(n_rows):
-        target_bbox = gs[row_index, target_col].get_position(fig)
-        y_center = (target_bbox.y0 + target_bbox.y1) * 0.5
-        x_start = ref_bbox.x1 + 0.01
-        x_end = target_bbox.x0 - 0.01
-        if x_end <= x_start:
+        for ax in all_axes:
+            pos = ax.get_position()
+            cell_pos = gs[row_index, target_col].get_position(fig)
+            if abs(pos.x0 - cell_pos.x0) < 0.05 and abs(pos.y0 - cell_pos.y0) < 0.05:
+                target_axes_by_row[row_index] = ax
+                break
+
+    ref_pos = ref_ax.get_position()
+    colorbar_bbox = _get_colorbar_bbox(fig, ref_ax)
+    if colorbar_bbox is not None:
+        colorbar_right = colorbar_bbox.x1
+    else:
+        colorbar_right = ref_pos.x1
+
+    x_start = colorbar_right + 0.015
+
+    target_0 = target_axes_by_row.get(0)
+    if target_0 is None:
+        return
+    t_pos_0 = target_0.get_position()
+    
+    # We estimate the width of the tick labels and y-label of Column 1
+    # to be about 0.048 in figure coordinate space.
+    label_space = 0.048
+    target_label_left = t_pos_0.x0 - label_space
+    
+    # Fallback to a smaller safe distance if gap is too narrow
+    if target_label_left <= x_start:
+        target_label_left = t_pos_0.x0 - 0.015
+        
+    x_split = x_start + 0.45 * (target_label_left - x_start)
+
+    ref_y = (ref_pos.y0 + ref_pos.y1) * 0.5
+
+    # Draw horizontal starting stem
+    line_start = FancyArrowPatch(
+        (x_start, ref_y),
+        (x_split, ref_y),
+        transform=fig.transFigure,
+        arrowstyle="-",
+        linewidth=1.5,
+        color="0.2",
+        clip_on=False,
+        zorder=10,
+    )
+    fig.patches.append(line_start)
+
+    # Gather y coordinates of targets to draw vertical backbone
+    y_coords = []
+    for row_index in range(n_rows):
+        target_ax = target_axes_by_row.get(row_index)
+        if target_ax is None:
             continue
+        t_pos = target_ax.get_position()
+        target_y = (t_pos.y0 + t_pos.y1) * 0.5
+        y_coords.append(target_y)
+
+    if not y_coords:
+        return
+
+    y_bottom = min(y_coords)
+    y_top = max(y_coords)
+
+    # Draw vertical backbone
+    line_vertical = FancyArrowPatch(
+        (x_split, y_bottom),
+        (x_split, y_top),
+        transform=fig.transFigure,
+        arrowstyle="-",
+        linewidth=1.5,
+        color="0.2",
+        clip_on=False,
+        zorder=10,
+    )
+    fig.patches.append(line_vertical)
+
+    # Draw individual arrows with arrowheads ending just before the y-axis labels
+    for row_index in range(n_rows):
+        target_ax = target_axes_by_row.get(row_index)
+        if target_ax is None:
+            continue
+        t_pos = target_ax.get_position()
+        target_y = (t_pos.y0 + t_pos.y1) * 0.5
+        
         arrow = FancyArrowPatch(
-            (x_start, y_center),
-            (x_end, y_center),
+            (x_split, target_y),
+            (target_label_left - 0.003, target_y),
             transform=fig.transFigure,
             arrowstyle="-|>",
-            mutation_scale=18,
+            mutation_scale=16,
             linewidth=1.5,
             color="0.2",
             clip_on=False,
