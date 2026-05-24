@@ -273,9 +273,7 @@ def generate_composite_figure(config: CompositeFigureConfig) -> dict[str, object
                     n_rows=n_rows,
                 )
                 is_bottom = row_index == n_rows - 1
-                is_left = column_index == 0 or (
-                    column_index == 1 and row_index != ref_row
-                )
+                is_left = False
             _draw_panel(
                 ax,
                 payload,
@@ -919,23 +917,18 @@ def _draw_reference_arrows(
     else:
         colorbar_right = ref_pos.x1
 
-    x_start = colorbar_right + 0.015
+    # We add 0.045 to clear the vertically-oriented colorbar label text!
+    x_start = colorbar_right + 0.045
 
     target_0 = target_axes_by_row.get(0)
     if target_0 is None:
         return
     t_pos_0 = target_0.get_position()
     
-    # We estimate the width of the tick labels and y-label of Column 1
-    # to be about 0.048 in figure coordinate space.
-    label_space = 0.048
-    target_label_left = t_pos_0.x0 - label_space
+    # Since Column 1 has no y-labels or tickmarks, the target_left is just its x0 minus a tiny gap
+    target_left = t_pos_0.x0 - 0.015
     
-    # Fallback to a smaller safe distance if gap is too narrow
-    if target_label_left <= x_start:
-        target_label_left = t_pos_0.x0 - 0.015
-        
-    x_split = x_start + 0.45 * (target_label_left - x_start)
+    x_split = x_start + 0.15 * (target_left - x_start)
 
     ref_y = (ref_pos.y0 + ref_pos.y1) * 0.5
 
@@ -981,7 +974,7 @@ def _draw_reference_arrows(
     )
     fig.patches.append(line_vertical)
 
-    # Draw individual arrows with arrowheads ending just before the y-axis labels
+    # Draw individual arrows with arrowheads ending just before the Column 1 axes
     for row_index in range(n_rows):
         target_ax = target_axes_by_row.get(row_index)
         if target_ax is None:
@@ -990,8 +983,8 @@ def _draw_reference_arrows(
         target_y = (t_pos.y0 + t_pos.y1) * 0.5
         
         arrow = FancyArrowPatch(
-            (x_split, target_y),
-            (target_label_left - 0.003, target_y),
+            (x_split + 0.006, target_y),
+            (target_left, target_y),
             transform=fig.transFigure,
             arrowstyle="-|>",
             mutation_scale=16,

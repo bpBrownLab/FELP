@@ -535,8 +535,9 @@ def scatter_state_projection(
             y_points,
             s=marker_size,
             facecolors=facecolors,
-            edgecolors="black",
-            linewidths=0.3,
+            edgecolors="0.6",
+            linewidths=0.15,
+            alpha=0.85,
         )
     if ramachandran_equal_aspect:
         ax.set_xlim(-180.0, 180.0)
@@ -548,12 +549,13 @@ def scatter_state_projection(
     if finite_value_mask.any() and show_colorbar:
         mappable = mpl_cm.ScalarMappable(norm=norm, cmap=cmap)
         mappable.set_array(point_values[finite_value_mask])
+        from mpl_toolkits.axes_grid1 import make_axes_locatable
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes("right", size="5%", pad=0.12)
         colorbar = ax.figure.colorbar(
             mappable,
-            ax=ax,
+            cax=cax,
             extend=colorbar_extend or "neither",
-            fraction=colorbar_fraction,
-            pad=colorbar_pad,
         )
         colorbar.set_label(
             colorbar_label,
