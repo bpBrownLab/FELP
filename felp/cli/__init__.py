@@ -1,6 +1,7 @@
 """CLI exports for FELP."""
 
 from .parser import (
+    build_composite_figure_config,
     build_ess_compare_config,
     build_felp_plot_config,
     build_md_kl_plot_config,
@@ -17,6 +18,7 @@ from .parser import (
 
 __all__ = [
     "MasterArgumentParser",
+    "build_composite_figure_config",
     "build_ess_compare_config",
     "build_felp_plot_config",
     "build_md_kl_plot_config",

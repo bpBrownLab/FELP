@@ -475,6 +475,12 @@ def scatter_state_projection(
     colorbar_vmin: float | None = None,
     colorbar_vmax: float | None = None,
     colormap: str | None = None,
+    show_colorbar: bool = True,
+    marker_size: float = 60.0,
+    ramachandran_equal_aspect: bool = False,
+    colorbar_fraction: float = 0.046,
+    colorbar_pad: float = 0.04,
+    colorbar_labelsize: float | None = None,
 ) -> None:
     """Draw a colored scatter plot for state-wise projected values."""
 
@@ -527,23 +533,34 @@ def scatter_state_projection(
         ax.scatter(
             x_points,
             y_points,
-            s=60,
+            s=marker_size,
             facecolors=facecolors,
             edgecolors="black",
             linewidths=0.3,
         )
+    if ramachandran_equal_aspect:
+        ax.set_xlim(-180.0, 180.0)
+        ax.set_ylim(-180.0, 180.0)
+        ax.set_aspect("equal", adjustable="box")
     ax.set_title(title)
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
-    if finite_value_mask.any():
+    if finite_value_mask.any() and show_colorbar:
         mappable = mpl_cm.ScalarMappable(norm=norm, cmap=cmap)
         mappable.set_array(point_values[finite_value_mask])
         colorbar = ax.figure.colorbar(
             mappable,
             ax=ax,
             extend=colorbar_extend or "neither",
+            fraction=colorbar_fraction,
+            pad=colorbar_pad,
         )
-        colorbar.set_label(colorbar_label)
+        colorbar.set_label(
+            colorbar_label,
+            fontsize=colorbar_labelsize,
+        )
+        if colorbar_labelsize is not None:
+            colorbar.ax.tick_params(labelsize=max(colorbar_labelsize - 1.0, 6.0))
 
 
 def save_pcolormesh_landscape(

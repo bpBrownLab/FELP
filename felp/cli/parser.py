@@ -37,6 +37,7 @@ from felp.plotting import (
     MDKLPlotConfig,
     MSMPlotConfig,
 )
+from felp.plotting.composite import load_composite_figure_config
 from felp.plotting.common import DEFAULT_FEL_COLORMAP, FELP_KL_DIVERGENCE_COLORMAP
 
 _KJ_PER_KCAL = 4.184
@@ -1834,6 +1835,24 @@ def _add_md_kl_plot_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_composite_figure_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add arguments for JSON-driven composite Ramachandran figures."""
+
+    parser.add_argument(
+        "--config",
+        required=True,
+        help=(
+            "JSON specification for the composite figure (rows, columns, style, "
+            "and data paths). See data/composite_rotation_mutations.json."
+        ),
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Allow overwriting the output file if it already exists.",
+    )
+
+
 def _add_ess_compare_arguments(parser: argparse.ArgumentParser) -> None:
     """Add arguments for comparing ESS diagnostics across FELP runs."""
 
@@ -2021,6 +2040,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Compare ESS and overlap diagnostics across FELP run summaries.",
     )
     _add_ess_compare_arguments(ess_compare_parser)
+
+    composite_figure_parser = subparsers.add_parser(
+        "composite-figure",
+        help="Assemble multi-row Ramachandran composite figures from FELP outputs.",
+    )
+    _add_composite_figure_arguments(composite_figure_parser)
 
     return parser
 
@@ -2466,6 +2491,16 @@ def build_md_kl_plot_config(namespace: argparse.Namespace) -> MDKLPlotConfig:
         divergence_colormap=namespace.divergence_cmap,
         overwrite=namespace.overwrite,
     )
+    config.validate()
+    return config
+
+
+def build_composite_figure_config(namespace: argparse.Namespace):
+    """Load and optionally override a composite figure JSON config."""
+
+    config = load_composite_figure_config(namespace.config)
+    if namespace.overwrite:
+        object.__setattr__(config, "overwrite", True)
     config.validate()
     return config
 

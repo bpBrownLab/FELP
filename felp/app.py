@@ -13,6 +13,7 @@ import time
 from typing import Any, Sequence
 
 from felp.cli import (
+    build_composite_figure_config,
     build_ess_compare_config,
     build_felp_plot_config,
     build_md_kl_plot_config,
@@ -30,6 +31,7 @@ from felp.io import ResultsWriter, TrajectoryLoader, load_frame_results_csv
 from felp.msm import PyEMMAPipeline, export_state_samples, load_bundle
 from felp.parallel import FrameExecutor
 from felp.plotting import (
+    generate_composite_figure,
     generate_ess_comparison_plots,
     generate_felp_plots,
     generate_md_kl_plot,
@@ -1068,6 +1070,14 @@ def compare_ess_outputs(namespace) -> dict:
     return summary
 
 
+def plot_composite_figure(namespace) -> dict:
+    """Assemble a multi-row Ramachandran composite figure from JSON config."""
+
+    summary = generate_composite_figure(build_composite_figure_config(namespace))
+    _write_stdout(summary)
+    return summary
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """CLI entry point for the FELP application."""
     parser = build_parser()
@@ -1102,6 +1112,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if namespace.command == "ess-compare":
         compare_ess_outputs(namespace)
+        return 0
+    if namespace.command == "composite-figure":
+        plot_composite_figure(namespace)
         return 0
     parser.error(f"Unknown command: {namespace.command}")
     return 2
