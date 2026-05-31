@@ -192,7 +192,7 @@ def _add_common_microstate_arguments(parser: argparse.ArgumentParser) -> None:
         help=(
             "How to define microstates for the reference landscape. "
             "Use grid for classic phi/psi first passes, file for reusable custom "
-            "CV states, auto to infer a reusable two-CV JSON from the reference "
+            "CV states, auto to infer a reusable 1–3 CV JSON from the reference "
             "trajectory, or msm_bundle for a pre-fit bundle aligned to your "
             "--trajectory grouping."
         ),
@@ -218,7 +218,7 @@ def _add_common_microstate_arguments(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=100,
         help=(
-            "Target support used to cap automatically generated two-CV microstates. "
+            "Target support used to cap automatically generated microstates. "
             "The auto grid will not exceed roughly frame_count / this value states "
             "before also applying --auto-microstate-max-states."
         ),
@@ -227,20 +227,20 @@ def _add_common_microstate_arguments(parser: argparse.ArgumentParser) -> None:
         "--auto-microstate-min-bins-per-axis",
         type=int,
         default=3,
-        help="Minimum nonconstant-axis bin count for auto two-CV microstates.",
+        help="Minimum nonconstant-axis bin count for auto microstates.",
     )
     group.add_argument(
         "--auto-microstate-max-bins-per-axis",
         type=int,
         default=64,
-        help="Maximum per-axis bin count for auto two-CV microstates.",
+        help="Maximum per-axis bin count for auto microstates.",
     )
     group.add_argument(
         "--auto-microstate-max-states",
         type=int,
         default=2500,
         help=(
-            "Maximum total states for auto two-CV microstates. Raise this for very "
+            "Maximum total states for auto microstates. Raise this for very "
             "large trajectories when the default grid is still too coarse."
         ),
     )
@@ -421,7 +421,32 @@ def _add_reweighting_method_arguments(parser: argparse.ArgumentParser) -> None:
         "--neighbor-pool-max-neighbors",
         type=int,
         default=4,
-        help="Maximum neighbors used when kNN topology fallback is required.",
+        help=(
+            "Maximum neighbors used when kNN topology fallback is required "
+            "(non-grid atlases such as MSM bundles)."
+        ),
+    )
+    group.add_argument(
+        "--neighbor-pool-grid-connectivity",
+        default="chebyshev3",
+        help=(
+            "Neighbor stencil for regular CV-grid microstates (1D/2D/3D). 'cardinal' "
+            "uses face-sharing bins. 'chebyshev' uses a Chebyshev (L_inf) ball in "
+            "bin-index space with radius set by --neighbor-pool-chebyshev-radius. "
+            "Aliases 'chebyshev1', 'chebyshev2', 'chebyshev3', etc. are accepted. "
+            "Ignored for kNN fallback topologies."
+        ),
+    )
+    group.add_argument(
+        "--neighbor-pool-chebyshev-radius",
+        type=int,
+        default=3,
+        help=(
+            "Chebyshev radius for --neighbor-pool-grid-connectivity=chebyshev. "
+            "Radius 1 includes cardinal and diagonal neighbors (8 in 2D); radius 2 "
+            "adds the next shell (24 in 2D); radius 3 adds the third shell (48 in 2D). "
+            "Ignored for cardinal connectivity and for kNN fallback."
+        ),
     )
     group.add_argument(
         "--laplacian-lambda",
@@ -1135,9 +1160,12 @@ def _add_msm_fit_arguments(parser: argparse.ArgumentParser) -> None:
     clustering_group = parser.add_argument_group("Clustering")
     clustering_group.add_argument(
         "--clustering-method",
-        choices=("kmeans", "regspace"),
+        choices=("kmeans", "regspace", "grid"),
         default="kmeans",
-        help="Clustering method used to discretize the reduced trajectories.",
+        help=(
+            "Clustering method used to discretize trajectories. 'grid' assigns frames "
+            "to a regular rectilinear lattice in feature space (requires --reducer none)."
+        ),
     )
     clustering_group.add_argument(
         "--k-clusters",
@@ -1156,6 +1184,39 @@ def _add_msm_fit_arguments(parser: argparse.ArgumentParser) -> None:
         type=float,
         default=0.5,
         help="Minimum cluster spacing for regspace clustering.",
+    )
+    clustering_group.add_argument(
+        "--grid-bins",
+        type=int,
+        nargs="+",
+        help=(
+            "Per-axis bin counts for grid clustering (1–3 axes). Omit to infer counts "
+            "from the reference trajectory using Freedman–Diaconis heuristics."
+        ),
+    )
+    clustering_group.add_argument(
+        "--grid-target-frames-per-state",
+        type=int,
+        default=100,
+        help="Target support per grid cell when auto-selecting bin counts.",
+    )
+    clustering_group.add_argument(
+        "--grid-min-bins-per-axis",
+        type=int,
+        default=3,
+        help="Minimum bins per feature axis for auto grid clustering.",
+    )
+    clustering_group.add_argument(
+        "--grid-max-bins-per-axis",
+        type=int,
+        default=64,
+        help="Maximum bins per feature axis for auto grid clustering.",
+    )
+    clustering_group.add_argument(
+        "--grid-max-total-states",
+        type=int,
+        default=2500,
+        help="Maximum total grid cells when auto-selecting bin counts.",
     )
 
     model_group = parser.add_argument_group("MSM Model")
@@ -1557,9 +1618,10 @@ def _add_felp_plot_arguments(parser: argparse.ArgumentParser) -> None:
         "--plot-cv-x",
         dest="plot_cv_x",
         help=(
-            "CV name for the x-axis in 2D FEL plots. "
-            "Pass either the short name (e.g. 'ends') or the full distance-cv "
+            "CV name for the x-axis in FEL/CV plots. "
+            "Pass either the short name (e.g. 'ends' or 'psi_114') or the full distance-cv "
             "spec string (e.g. 'ends:1:CA:10:CA'); only the name part is used. "
+            "For 1D microstates, this alone selects the plotting axis. "
             "Defaults to custom CVs when available, otherwise phi/psi."
         ),
     )
@@ -1570,7 +1632,7 @@ def _add_felp_plot_arguments(parser: argparse.ArgumentParser) -> None:
             "CV name for the y-axis in 2D FEL plots. "
             "Pass either the short name (e.g. 'turn') or the full distance-cv "
             "spec string (e.g. 'turn:3:CA:6:CA'); only the name part is used. "
-            "Must be provided together with --plot-cv-x."
+            "Omit for 1D microstate summaries with a single CV."
         ),
     )
     parser.add_argument(
@@ -1670,6 +1732,32 @@ def _add_md_kl_plot_arguments(parser: argparse.ArgumentParser) -> None:
         help=(
             "Optional MDTraj selection string identifying exactly one internal residue "
             "for phi/psi; overrides residue-number/name resolution."
+        ),
+    )
+    input_group.add_argument(
+        "--distance-cv",
+        action="append",
+        dest="distance_cv_tokens",
+        metavar="NAME:RES1:ATOM1:RES2:ATOM2",
+        help=(
+            "Repeatable distance CV for MD trajectory measurement, e.g. "
+            "ends:1:CA:10:CA. Use with --plot-cv-x/--plot-cv-y instead of phi/psi."
+        ),
+    )
+    input_group.add_argument(
+        "--plot-cv-x",
+        dest="plot_cv_x",
+        help=(
+            "CV name for the x-axis (e.g. ends). Required with --plot-cv-y when "
+            "using --distance-cv."
+        ),
+    )
+    input_group.add_argument(
+        "--plot-cv-y",
+        dest="plot_cv_y",
+        help=(
+            "CV name for the y-axis (e.g. turn). Required with --plot-cv-x when "
+            "using --distance-cv."
         ),
     )
     input_group.add_argument(
@@ -1906,6 +1994,16 @@ def _add_ess_compare_arguments(parser: argparse.ArgumentParser) -> None:
         default=0,
         help="RNG seed for reproducible bootstrap resampling.",
     )
+    parser.add_argument(
+        "--panel-layout",
+        choices=("combined", "by_reference"),
+        default="by_reference",
+        help=(
+            "Bar chart layout: 'by_reference' uses one subplot per reference "
+            "dipeptide (default); 'combined' groups reference residues "
+            "side-by-side for each target on one panel."
+        ),
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1952,7 +2050,10 @@ def build_parser() -> argparse.ArgumentParser:
             "Re-assign every frame to microstates defined by the current "
             "--microstate-source / --phi-bins / --psi-bins / --auto-* options "
             "instead of using the microstate_id stored in frame_results.csv. "
-            "This is cheap—it reuses the expensive delta_u values already computed."
+            "For msm_bundle, frames are assigned to the nearest MSM feature-space "
+            "centroid using stored assignment_measurements (with Angstrom→nm "
+            "conversion for distance CVs). This is cheap—it reuses the expensive "
+            "delta_u values already computed."
         ),
     )
     summarize_parser.add_argument(
@@ -2284,6 +2385,12 @@ def build_reweighting_config(namespace: argparse.Namespace) -> ReweightingConfig
                 getattr(namespace, "neighbor_pool_min_local_weight", 0.0)
             ),
             max_neighbors=int(getattr(namespace, "neighbor_pool_max_neighbors", 4)),
+            grid_connectivity=str(
+                getattr(namespace, "neighbor_pool_grid_connectivity", "chebyshev3")
+            ),
+            chebyshev_radius=int(
+                getattr(namespace, "neighbor_pool_chebyshev_radius", 3)
+            ),
         ),
         laplacian=LaplacianConfig(
             lambda_kj_mol2=float(getattr(namespace, "laplacian_lambda_kj_mol2", 1.0)),
@@ -2333,6 +2440,10 @@ def build_msm_fit_config(namespace: argparse.Namespace) -> MSMFitConfig:
     if namespace.its_lags:
         its_lags = tuple(int(x) for x in namespace.its_lags)
 
+    grid_bins: tuple[int, ...] | None = None
+    if getattr(namespace, "grid_bins", None):
+        grid_bins = tuple(int(value) for value in namespace.grid_bins)
+
     config = MSMFitConfig(
         topology_file=namespace.topology_file,
         trajectory_files=tuple(
@@ -2353,6 +2464,11 @@ def build_msm_fit_config(namespace: argparse.Namespace) -> MSMFitConfig:
         k_clusters=namespace.k_clusters,
         k_iter=namespace.k_iter,
         regspace_dmin=namespace.regspace_dmin,
+        grid_bins=grid_bins,
+        grid_target_frames_per_state=int(namespace.grid_target_frames_per_state),
+        grid_min_bins_per_axis=int(namespace.grid_min_bins_per_axis),
+        grid_max_bins_per_axis=int(namespace.grid_max_bins_per_axis),
+        grid_max_total_states=int(namespace.grid_max_total_states),
         msm_lag=namespace.msm_lag,
         metastable_states=namespace.metastable_states,
         hmm_states=namespace.hmm_states,
@@ -2469,6 +2585,9 @@ def build_md_kl_plot_config(namespace: argparse.Namespace) -> MDKLPlotConfig:
         phi_psi_residue_number=namespace.phi_psi_residue_number,
         phi_psi_residue_name=namespace.phi_psi_residue_name,
         phi_psi_selection=namespace.phi_psi_selection,
+        plot_cv_x=namespace.plot_cv_x,
+        plot_cv_y=namespace.plot_cv_y,
+        distance_cv_specs=_parse_distance_cv_specs(namespace.distance_cv_tokens),
         stride=namespace.stride,
         frame_start=namespace.frame_start,
         frame_stop=namespace.frame_stop,
@@ -2517,6 +2636,7 @@ def build_ess_compare_config(namespace: argparse.Namespace) -> ESSCompareConfig:
         bootstrap_block_size=namespace.bootstrap_blocks,
         bootstrap_draws=namespace.bootstrap_draws,
         bootstrap_seed=namespace.bootstrap_seed,
+        panel_layout=namespace.panel_layout,
     )
     config.validate()
     return config

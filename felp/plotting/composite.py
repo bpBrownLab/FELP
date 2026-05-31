@@ -19,7 +19,6 @@ from .common import (
     free_energy_from_probabilities,
     import_matplotlib,
     prepare_kl_display_grid,
-    prepare_output_dir,
     probability_surface_to_free_energy,
     read_csv_rows,
     resolve_kl_colorbar_limits,
@@ -82,6 +81,11 @@ class CompositeFigureStyle:
     reference_colorbar_label: str = ""
     reweighted_colorbar_label: str = ""
     md_colorbar_label: str = ""
+    show_panel_labels: bool = True
+    panel_label_size: float = 12.0
+    panel_label_weight: str = "bold"
+    panel_label_x: float = 0.0
+    panel_label_y: float = 1.02
 
 
 @dataclass(frozen=True)
@@ -105,6 +109,9 @@ class CompositeFigureConfig:
     reference: Mapping[str, Any] | None = None
     defaults: Mapping[str, Any] = field(default_factory=dict)
     data_root: str | None = None
+    reference_residue: str | None = None
+    md_reference_residue: str | None = None
+    md_data_root: str | None = None
     path_templates: Mapping[str, str] = field(default_factory=dict)
     overwrite: bool = False
 
@@ -163,6 +170,9 @@ def load_composite_figure_config(path: str) -> CompositeFigureConfig:
         reference=payload.get("reference"),
         defaults=payload.get("defaults", {}),
         data_root=payload.get("data_root"),
+        reference_residue=payload.get("reference_residue"),
+        md_reference_residue=payload.get("md_reference_residue"),
+        md_data_root=payload.get("md_data_root"),
         path_templates=payload.get("path_templates", {}),
         overwrite=bool(payload.get("overwrite", False)),
     )
@@ -254,6 +264,28 @@ def generate_composite_figure(config: CompositeFigureConfig) -> dict[str, object
         column.type: index for index, column in enumerate(config.columns)
     }
     ref_row = n_rows // 2
+
+    # Pre-generate panel labels sequentially
+    LABEL_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    panel_labels = {}
+    label_index = 0
+
+    # 1. Label all span_rows columns first, in their middle/rendering row
+    for column_index, column in enumerate(config.columns):
+        if column.span_rows:
+            if label_index < len(LABEL_CHARS):
+                panel_labels[(ref_row, column_index)] = f"({LABEL_CHARS[label_index]})"
+                label_index += 1
+
+    # 2. Label all regular panels row-by-row, column-by-column
+    for row_index in range(n_rows):
+        for column_index, column in enumerate(config.columns):
+            if column.span_rows:
+                continue
+            if label_index < len(LABEL_CHARS):
+                panel_labels[(row_index, column_index)] = f"({LABEL_CHARS[label_index]})"
+                label_index += 1
+
     for row_index in range(n_rows):
         for column_index, column in enumerate(config.columns):
             if column.span_rows:
@@ -264,6 +296,7 @@ def generate_composite_figure(config: CompositeFigureConfig) -> dict[str, object
                 show_colorbar = True
                 is_bottom = True
                 is_left = True
+                label_text = panel_labels.get((ref_row, column_index), "")
             else:
                 payload = payload_by_key[(row_index, column_index)]
                 ax = fig.add_subplot(gs[row_index, column_index])
@@ -274,6 +307,7 @@ def generate_composite_figure(config: CompositeFigureConfig) -> dict[str, object
                 )
                 is_bottom = row_index == n_rows - 1
                 is_left = False
+                label_text = panel_labels.get((row_index, column_index), "")
             _draw_panel(
                 ax,
                 payload,
@@ -285,6 +319,7 @@ def generate_composite_figure(config: CompositeFigureConfig) -> dict[str, object
                 show_xticklabels=is_bottom,
                 show_yticklabels=is_left,
                 show_colorbar=show_colorbar,
+                panel_label=label_text,
             )
 
     if config.style.show_column_headers:
@@ -311,7 +346,9 @@ def generate_composite_figure(config: CompositeFigureConfig) -> dict[str, object
 
     output_path = config.output
     output_dir = os.path.dirname(output_path) or "."
-    prepare_output_dir(output_dir, overwrite=config.overwrite)
+    os.makedirs(output_dir, exist_ok=True)
+    if os.path.exists(output_path) and not config.overwrite:
+        raise FileExistsError(f"Output already exists: {output_path}")
     fig.savefig(output_path, dpi=config.style.dpi)
     plt.close(fig)
 
@@ -329,8 +366,10 @@ def generate_composite_figure(config: CompositeFigureConfig) -> dict[str, object
         ],
         "reference": reference_context,
     }
-    summary_path = os.path.join(output_dir, "composite_figure_summary.json")
+    output_stem = os.path.splitext(os.path.basename(output_path))[0]
+    summary_path = os.path.join(output_dir, f"{output_stem}_summary.json")
     write_json(summary_path, summary)
+    summary["summary"] = summary_path
     return summary
 
 
@@ -362,7 +401,7 @@ class _PanelPayload:
 
 def _resolve_row_context(row: Mapping[str, Any], config: CompositeFigureConfig) -> dict[str, Any]:
     context: dict[str, Any] = {
-        "data_root": config.data_root or "",
+        **_composite_template_context(config),
         "label": str(row.get("label", "")),
         "target": row.get("target", ""),
     }
@@ -397,15 +436,35 @@ def _resolve_reference_context(
     reference: Mapping[str, Any],
     config: CompositeFigureConfig,
 ) -> dict[str, Any]:
-    context = dict(reference)
-    base = {"data_root": config.data_root or ""}
+    context = {**_composite_template_context(config)}
     for key, value in reference.items():
         if isinstance(value, str):
-            context[key] = _expand_template(value, base)
+            context[key] = _expand_template(value, context)
+        else:
+            context[key] = value
     if "microstate_summary" not in context:
         raise ConfigurationError("reference.microstate_summary is required.")
     context.setdefault("probability_column", "reference_probability")
     return context
+
+
+def _composite_template_context(config: CompositeFigureConfig) -> dict[str, str]:
+    """Shared template variables for row and reference path expansion."""
+
+    data_root = config.data_root or ""
+    reference_residue = config.reference_residue
+    if not reference_residue and data_root:
+        reference_residue = os.path.basename(os.path.normpath(data_root))
+    md_data_root = config.md_data_root
+    if not md_data_root and data_root:
+        md_data_root = os.path.dirname(os.path.normpath(data_root))
+    md_reference_residue = config.md_reference_residue or "GLY"
+    return {
+        "data_root": data_root,
+        "reference_residue": reference_residue or "",
+        "md_data_root": md_data_root or "",
+        "md_reference_residue": md_reference_residue,
+    }
 
 
 def _expand_template(value: str, context: Mapping[str, Any]) -> str:
@@ -435,22 +494,20 @@ def _build_panel_payload(
             raise ConfigurationError("reference_fel requires a reference block.")
         summary_csv = str(job.reference_context["microstate_summary"])
         probability_column = str(job.reference_context.get("probability_column", "reference_probability"))
-        x, y, values, colorbar_label = _summary_free_energy_arrays(
+        x, y, values, colorbar_label = _summary_grid_free_energy_arrays(
             summary_csv,
             probability_column=probability_column,
             temperature_kelvin=temperature_kelvin,
             energy_scale=energy_scale,
-            prefer_csv_free_energy=False,
         )
         title = "Reference"
     elif panel_type == "reweighted_fel":
         summary_csv = str(job.row_context["microstate_summary"])
-        x, y, values, colorbar_label = _summary_free_energy_arrays(
+        x, y, values, colorbar_label = _summary_grid_free_energy_arrays(
             summary_csv,
             probability_column="target_probability",
             temperature_kelvin=temperature_kelvin,
             energy_scale=energy_scale,
-            prefer_csv_free_energy=True,
         )
         title = "Reweighted"
     elif panel_type == "md_fel":
@@ -507,35 +564,32 @@ def _build_panel_payload(
     )
 
 
-def _summary_free_energy_arrays(
+def _summary_grid_free_energy_arrays(
     summary_csv: str,
     *,
     probability_column: str,
     temperature_kelvin: float,
     energy_scale: float,
-    prefer_csv_free_energy: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, str]:
-    rows = read_csv_rows(summary_csv)
-    x_values = np.asarray([_row_float(row, ("plot_x", "phi_center")) for row in rows])
-    y_values = np.asarray([_row_float(row, ("plot_y", "psi_center")) for row in rows])
-    probabilities = np.asarray([float(row[probability_column]) for row in rows], dtype=float)
-    free_energy_kj_mol = np.asarray(
-        [
-            float(row["free_energy_kj_mol"])
-            if row.get("free_energy_kj_mol") not in (None, "")
-            else float("nan")
-            for row in rows
-        ],
-        dtype=float,
+    """Render a microstate summary as a regular phi/psi grid (matches MD panels)."""
+
+    surface, x_edges, y_edges = _load_summary_probability_surface(
+        summary_csv,
+        probability_column=probability_column,
     )
-    if prefer_csv_free_energy and np.isfinite(free_energy_kj_mol).any():
-        values = energy_scale * free_energy_kj_mol
-    else:
-        values = energy_scale * free_energy_from_probabilities(
-            probabilities,
-            temperature_kelvin=temperature_kelvin,
-        )
-    return x_values, y_values, values, ""
+    x_centers = 0.5 * (x_edges[:-1] + x_edges[1:])
+    y_centers = 0.5 * (y_edges[:-1] + y_edges[1:])
+    x_grid, y_grid = np.meshgrid(x_centers, y_centers, indexing="ij")
+    free_energy = energy_scale * probability_surface_to_free_energy(
+        surface,
+        temperature_kelvin,
+    )
+    return (
+        x_grid.ravel(),
+        y_grid.ravel(),
+        free_energy.ravel(),
+        "",
+    )
 
 
 def _md_free_energy_arrays(
@@ -627,12 +681,20 @@ def _delta_free_energy_arrays(
 
 def _load_summary_probability_surface(
     summary_csv: str,
+    *,
+    probability_column: str = "target_probability",
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     rows = read_csv_rows(summary_csv)
     x_values = np.asarray([_row_float(row, ("plot_x", "phi_center")) for row in rows])
     y_values = np.asarray([_row_float(row, ("plot_y", "psi_center")) for row in rows])
+    if probability_column == "target_probability":
+        prob_names = ("target_probability", "probability")
+    elif probability_column == "reference_probability":
+        prob_names = ("reference_probability",)
+    else:
+        prob_names = (probability_column,)
     probabilities = np.asarray(
-        [_row_float(row, ("target_probability", "probability")) for row in rows],
+        [_row_float(row, prob_names) for row in rows],
         dtype=float,
     )
     finite = np.isfinite(x_values) & np.isfinite(y_values) & np.isfinite(probabilities)
@@ -712,6 +774,7 @@ def _draw_panel(
     show_xticklabels: bool,
     show_yticklabels: bool,
     show_colorbar: bool,
+    panel_label: str = "",
 ) -> None:
     colormap = kl_colormap if payload.panel_type == "kl_divergence" else fel_colormap
     scatter_kwargs: dict[str, object] = {
@@ -751,6 +814,20 @@ def _draw_panel(
         ax.set_xlabel("")
     if not show_yticklabels:
         ax.set_ylabel("")
+
+    if style.show_panel_labels and panel_label:
+        ax.text(
+            style.panel_label_x,
+            style.panel_label_y,
+            panel_label,
+            transform=ax.transAxes,
+            fontsize=style.panel_label_size,
+            fontweight=style.panel_label_weight,
+            va="bottom",
+            ha="left",
+            clip_on=False,
+            zorder=15,
+        )
 
 
 def _apply_composite_style(style: CompositeFigureStyle) -> None:
@@ -927,10 +1004,10 @@ def _draw_reference_arrows(
     target_left = t_pos_0.x0 - 0.005
     
     # We want the start of the arrow to clear the Reference colorbar text.
-    # We add 0.048 to completely clear the vertically-oriented colorbar axes and ticks/label text!
+    # We add 0.038 to completely clear the vertically-oriented colorbar axes and ticks/label text!
     # But we also make sure x_start is strictly to the left of target_left.
-    # We guarantee a positive gap of at least 0.020 between x_start and target_left!
-    x_start = min(colorbar_right + 0.048, target_left - 0.020)
+    # We guarantee a positive gap of at least 0.012 between x_start and target_left!
+    x_start = min(colorbar_right + 0.038, target_left - 0.012)
     
     # To give the branching horizontal arrows (which have the arrowheads) plenty of length
     # so they never get inverted/confused by FancyArrowPatch, we place x_split (the vertical backbone)
@@ -998,7 +1075,7 @@ def _draw_reference_arrows(
             (target_left, target_y),
             transform=fig.transFigure,
             arrowstyle="-|>",
-            mutation_scale=14,
+            mutation_scale=11,
             linewidth=1.5,
             color="0.2",
             clip_on=False,

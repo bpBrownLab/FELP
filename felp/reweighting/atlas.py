@@ -16,6 +16,7 @@ from felp.core import (
     MicrostateDefinition,
 )
 from felp.msm import load_bundle
+from felp.msm.repartition import MSMAssignmentIndex, enrich_msm_definitions
 
 
 def _load_serialized_payload(path: str) -> dict:
@@ -38,16 +39,27 @@ class MicrostateAtlas:
     definitions: tuple[MicrostateDefinition, ...]
     allow_unassigned: bool = False
     reference_probability_mode: str = "loaded"
+    msm_assignment_index: MSMAssignmentIndex | None = None
 
     @classmethod
     def from_config(cls, config: MicrostateConfig) -> "MicrostateAtlas":
         """Build an atlas from the provided configuration."""
 
+        msm_assignment_index = None
         if config.source == "file":
             definitions = tuple(load_microstate_definitions(config.definition_file))
         elif config.source == "msm_bundle":
             bundle = load_bundle(config.msm_bundle_dir)
-            definitions = bundle.definitions_for_level(config.state_level)
+            raw_definitions = bundle.definitions_for_level(config.state_level)
+            definitions = enrich_msm_definitions(
+                bundle,
+                raw_definitions,
+                state_level=config.state_level,
+            )
+            msm_assignment_index = MSMAssignmentIndex.from_bundle(
+                bundle,
+                config.state_level,
+            )
         elif config.source == "grid":
             definitions = tuple(generate_phi_psi_grid(config.phi_bins, config.psi_bins))
         else:
@@ -59,6 +71,7 @@ class MicrostateAtlas:
             definitions=definitions,
             allow_unassigned=config.allow_unassigned,
             reference_probability_mode=config.reference_probability_mode,
+            msm_assignment_index=msm_assignment_index,
         )
 
     @classmethod
@@ -67,6 +80,7 @@ class MicrostateAtlas:
         definitions: Iterable[MicrostateDefinition],
         allow_unassigned: bool = False,
         reference_probability_mode: str = "loaded",
+        msm_assignment_index: MSMAssignmentIndex | None = None,
     ) -> "MicrostateAtlas":
         """Build an atlas directly from an iterable of definitions."""
 
@@ -74,6 +88,7 @@ class MicrostateAtlas:
             definitions=tuple(definitions),
             allow_unassigned=allow_unassigned,
             reference_probability_mode=reference_probability_mode,
+            msm_assignment_index=msm_assignment_index,
         )
 
     def assign(
@@ -85,8 +100,16 @@ class MicrostateAtlas:
 
         measurements = _coerce_measurements(measurements_or_phi, psi_degrees)
         for definition in self.definitions:
-            if definition.contains(measurements):
+            if definition.cv_ranges and definition.contains(measurements):
                 return self._assignment_from_definition(definition, measurements)
+        if self.msm_assignment_index is not None:
+            state_id = self.msm_assignment_index.assign(measurements)
+            definition = self.by_id().get(state_id)
+            if definition is None:
+                raise MicrostateAssignmentError(
+                    f"MSM assignment index returned unknown state id: {state_id!r}."
+                )
+            return self._assignment_from_definition(definition, measurements)
         if self.allow_unassigned:
             return MicrostateAssignment(
                 state_id="unassigned",

@@ -26,6 +26,7 @@ from felp.plotting.ess_bootstrap import (
     _resolve_microstate_paths_for_run,
     bootstrap_run_directory,
     percentile_summary,
+    reweighting_config_from_run_summary,
 )
 from felp.reweighting import MicrostateAtlas
 
@@ -76,6 +77,21 @@ def test_ess_compare_config_bootstrap_requires_both(tmp_path) -> None:
             output_dir=str(out),
             bootstrap_block_size=5,
             bootstrap_draws=None,
+        ).validate()
+
+
+def test_ess_compare_config_panel_layout(tmp_path) -> None:
+    summary_a = tmp_path / "a.json"
+    summary_b = tmp_path / "b.json"
+    summary_a.write_text("{}", encoding="utf-8")
+    summary_b.write_text("{}", encoding="utf-8")
+    out = tmp_path / "out"
+    out.mkdir()
+    with pytest.raises(ConfigurationError, match="panel_layout"):
+        ESSCompareConfig(
+            input_paths=(str(summary_a), str(summary_b)),
+            output_dir=str(out),
+            panel_layout="invalid",
         ).validate()
 
 
@@ -132,6 +148,22 @@ def test_bootstrap_run_directory_finds_run_config_in_ancestor(tmp_path) -> None:
     with open(summary_path, encoding="utf-8") as handle:
         summary = json.load(handle)
     assert bootstrap_run_directory(summary, str(summary_path)) == str(root.resolve())
+
+
+def test_bootstrap_run_directory_finds_lcurve_sibling_msm_bundle(tmp_path) -> None:
+    gly = tmp_path / "GLY"
+    gly.mkdir()
+    source = gly / "felp_GLY_to_ALA_full.from_msm_bundle"
+    lcurve = gly / "felp_GLY_to_ALA_reweight_lcurve"
+    neighbor_pool = lcurve / "reweighting_neighbor_pool"
+    neighbor_pool.mkdir(parents=True)
+    source.mkdir()
+    (source / "run_config.json").write_text("{}", encoding="utf-8")
+    summary_path = neighbor_pool / "run_summary.json"
+    summary_path.write_text("{}", encoding="utf-8")
+    with open(summary_path, encoding="utf-8") as handle:
+        summary = json.load(handle)
+    assert bootstrap_run_directory(summary, str(summary_path)) == str(source.resolve())
 
 
 def test_resolve_msm_bundle_dir_against_data_parent_not_bundle_root(tmp_path) -> None:
@@ -231,3 +263,35 @@ def test_bootstrap_run_directory_errors_when_missing_run_config(tmp_path) -> Non
         summary = json.load(handle)
     with pytest.raises(ConfigurationError, match="run_config"):
         bootstrap_run_directory(summary, str(summary_path))
+
+
+def test_reweighting_config_from_neighbor_pool_summary_uses_fixed_tau() -> None:
+    from felp.core import RunConfig
+
+    summary = {
+        "reweighting_method": "neighbor_pool",
+        "neighbor_pool": {
+            "tau": 5.5,
+            "tau_mode": "lcurve",
+            "pool_solver": "blend",
+        },
+    }
+    run_config = RunConfig.from_dict(
+        {
+            "input": {
+                "topology_file": "top.pdb",
+                "trajectory_files": ["traj.dcd"],
+            },
+            "perturbation": {"mutation_string": "A0G"},
+            "rosetta": {},
+            "restraints": {"cv_specs": [{"name": "phi", "atoms": [1, 2, 3, 4]}]},
+            "energy": {"temperature_kelvin": 310.0},
+            "microstates": {"source": "grid", "phi_bins": 4, "psi_bins": 4},
+            "parallel": {},
+            "output": {"output_dir": "out"},
+        }
+    )
+    config = reweighting_config_from_run_summary(summary, run_config)
+    assert config.methods == ("neighbor_pool",)
+    assert config.neighbor_pool.tau == pytest.approx(5.5)
+    assert config.neighbor_pool.solver == "blend"

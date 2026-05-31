@@ -28,6 +28,7 @@ from .common import (
     DEFAULT_KL_DISPLAY_THRESHOLD,
     FELP_KL_DIVERGENCE_COLORMAP,
     apply_publication_style,
+    compute_weighted_histogram1d,
     prepare_kl_display_grid,
     resolve_kl_colorbar_limits,
     finite_top_indices,
@@ -37,6 +38,7 @@ from .common import (
     prepare_output_dir,
     probability_surface_to_free_energy,
     read_csv_rows,
+    save_1d_profile_landscape,
     save_pcolormesh_landscape,
     scatter_state_projection,
     validate_registered_colormap,
@@ -309,8 +311,8 @@ class FELPPlotConfig:
             object.__setattr__(self, "cv_x", _normalize_cv_name(self.cv_x))
         if self.cv_y is not None:
             object.__setattr__(self, "cv_y", _normalize_cv_name(self.cv_y))
-        if (self.cv_x is None) != (self.cv_y is None):
-            raise ConfigurationError("cv_x and cv_y must be provided together.")
+        if self.cv_y is not None and self.cv_x is None:
+            raise ConfigurationError("cv_y requires cv_x.")
         if self.cv_x is not None and self.cv_y is not None and self.cv_x == self.cv_y:
             raise ConfigurationError("cv_x and cv_y must be different CV names.")
         _plot_energy_display_scale_and_label(self.plot_energy_unit)
@@ -319,8 +321,12 @@ class FELPPlotConfig:
 @dataclass(frozen=True)
 class _CVAxisSelection:
     x_name: str
-    y_name: str
+    y_name: str | None
     source: str
+
+    @property
+    def is_one_dimensional(self) -> bool:
+        return self.y_name is None
 
 
 def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
@@ -438,6 +444,8 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
         requested_x=config.cv_x,
         requested_y=config.cv_y,
     )
+    cv_one_dimensional = cv_axes is not None and cv_axes.is_one_dimensional
+    plot_y_is_placeholder = _plot_y_is_placeholder_for_1d(plot_y, rows)
 
     outputs = [
         _plot_occupancy_shift(
@@ -464,12 +472,15 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
 
     cv_axes_are_custom = (
         cv_axes is not None
+        and not cv_one_dimensional
         and not _DEFAULT_DIHEDRAL_CV_NAMES.issuperset({cv_axes.x_name, cv_axes.y_name})
     )
     if (
         np.isfinite(plot_x).any()
         and np.isfinite(plot_y).any()
         and not cv_axes_are_custom
+        and not cv_one_dimensional
+        and not plot_y_is_placeholder
     ):
         outputs.extend(
             _plot_projected_state_quantities(
@@ -491,26 +502,60 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
     state_x = state_y = None
     if cv_axes is not None:
         state_x = _state_cv_array(rows, cv_axes.x_name)
-        state_y = _state_cv_array(rows, cv_axes.y_name)
-        outputs.extend(
-            _plot_cv_state_landscapes(
-                plt=plt,
-                x_centers=state_x,
-                y_centers=state_y,
-                x_name=cv_axes.x_name,
-                y_name=cv_axes.y_name,
-                reference_probabilities=reference_probabilities,
-                target_probabilities=target_probabilities,
-                temperature_kelvin=config.temperature_kelvin,
-                output_dir=config.output_dir,
-                energy_scale=energy_scale,
-                energy_unit_label=energy_unit_label,
-                fel_max_energy_display=fel_max_display,
-                fel_colormap=config.fel_colormap,
-                probability_colormap=config.probability_colormap,
-                fel_plot_style=config.fel_plot_style,
+        if cv_one_dimensional:
+            outputs.extend(
+                _plot_1d_state_quantities(
+                    plt=plt,
+                    x_values=state_x,
+                    x_name=cv_axes.x_name,
+                    reference_probabilities=reference_probabilities,
+                    target_probabilities=target_probabilities,
+                    delta_free_energy=energy_scale
+                    * (target_free_energy_kj_mol - reference_free_energy_kj_mol),
+                    output_dir=config.output_dir,
+                    fel_max_energy_display=fel_max_display,
+                    energy_unit_label=energy_unit_label,
+                    fel_colormap=config.fel_colormap,
+                    probability_colormap=config.probability_colormap,
+                )
             )
-        )
+            outputs.extend(
+                _plot_cv_state_landscapes_1d(
+                    plt=plt,
+                    x_centers=state_x,
+                    x_name=cv_axes.x_name,
+                    reference_probabilities=reference_probabilities,
+                    target_probabilities=target_probabilities,
+                    temperature_kelvin=config.temperature_kelvin,
+                    output_dir=config.output_dir,
+                    energy_scale=energy_scale,
+                    energy_unit_label=energy_unit_label,
+                    fel_max_energy_display=fel_max_display,
+                    fel_colormap=config.fel_colormap,
+                    probability_colormap=config.probability_colormap,
+                )
+            )
+        else:
+            state_y = _state_cv_array(rows, cv_axes.y_name)
+            outputs.extend(
+                _plot_cv_state_landscapes(
+                    plt=plt,
+                    x_centers=state_x,
+                    y_centers=state_y,
+                    x_name=cv_axes.x_name,
+                    y_name=cv_axes.y_name,
+                    reference_probabilities=reference_probabilities,
+                    target_probabilities=target_probabilities,
+                    temperature_kelvin=config.temperature_kelvin,
+                    output_dir=config.output_dir,
+                    energy_scale=energy_scale,
+                    energy_unit_label=energy_unit_label,
+                    fel_max_energy_display=fel_max_display,
+                    fel_colormap=config.fel_colormap,
+                    probability_colormap=config.probability_colormap,
+                    fel_plot_style=config.fel_plot_style,
+                )
+            )
 
     frame_projection_available = False
     frame_projection_metadata: dict[str, object] = {
@@ -535,46 +580,142 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
             )
         )
         if cv_axes is not None:
-            projected_outputs, frame_projection_metadata = _plot_cv_projected_landscapes(
+            if cv_one_dimensional:
+                projected_outputs, frame_projection_metadata = (
+                    _plot_cv_projected_landscapes_1d(
+                        plt=plt,
+                        frame_results=plot_frame_results,
+                        state_ids=state_ids,
+                        reference_probabilities=reference_probabilities,
+                        target_probabilities=target_probabilities,
+                        temperature_kelvin=config.temperature_kelvin,
+                        weight_treatment=frame_projection_weight_treatment,
+                        reweighting_method=reweighting_method,
+                        state_reweight_factors=state_reweight_factors,
+                        frame_weights_by_index=frame_weights_by_index,
+                        used_frame_weights_csv=frame_weights_by_index is not None,
+                        fel_estimator=config.fel_estimator,
+                        fel_surface_smooth_sigma_bins=config.fel_surface_smooth_sigma_bins,
+                        bins=config.fel_bins,
+                        max_points=config.fel_max_points,
+                        output_dir=config.output_dir,
+                        energy_scale=energy_scale,
+                        energy_unit_label=energy_unit_label,
+                        fel_max_energy_display=fel_max_display,
+                        fel_colormap=config.fel_colormap,
+                        probability_colormap=config.probability_colormap,
+                        divergence_colormap=config.divergence_colormap,
+                        kl_scale_by_kbt=config.kl_scale_by_kbt,
+                        kl_display_threshold=config.kl_display_threshold,
+                        kl_colorbar_vmin=config.kl_colorbar_vmin,
+                        kl_colorbar_vmax=config.kl_colorbar_vmax,
+                        x_name=cv_axes.x_name,
+                    )
+                )
+            else:
+                projected_outputs, frame_projection_metadata = _plot_cv_projected_landscapes(
+                    plt=plt,
+                    frame_results=plot_frame_results,
+                    state_ids=state_ids,
+                    reference_probabilities=reference_probabilities,
+                    target_probabilities=target_probabilities,
+                    temperature_kelvin=config.temperature_kelvin,
+                    weight_treatment=frame_projection_weight_treatment,
+                    reweighting_method=reweighting_method,
+                    state_reweight_factors=state_reweight_factors,
+                    frame_weights_by_index=frame_weights_by_index,
+                    used_frame_weights_csv=frame_weights_by_index is not None,
+                    fel_estimator=config.fel_estimator,
+                    fel_bandwidth=config.fel_bandwidth,
+                    fel_bandwidth_rule=config.fel_bandwidth_rule,
+                    fel_bandwidth_scale=config.fel_bandwidth_scale,
+                    fel_bandwidth_max_bins=config.fel_bandwidth_max_bins,
+                    fel_bandwidth_min_bins=config.fel_bandwidth_min_bins,
+                    fel_surface_smooth_sigma_bins=config.fel_surface_smooth_sigma_bins,
+                    bins=config.fel_bins,
+                    max_points=config.fel_max_points,
+                    output_dir=config.output_dir,
+                    energy_scale=energy_scale,
+                    energy_unit_label=energy_unit_label,
+                    fel_max_energy_display=fel_max_display,
+                    fel_colormap=config.fel_colormap,
+                    probability_colormap=config.probability_colormap,
+                    divergence_colormap=config.divergence_colormap,
+                    kl_scale_by_kbt=config.kl_scale_by_kbt,
+                    kl_display_threshold=config.kl_display_threshold,
+                    kl_colorbar_vmin=config.kl_colorbar_vmin,
+                    kl_colorbar_vmax=config.kl_colorbar_vmax,
+                    fel_plot_style=config.fel_plot_style,
+                    x_name=cv_axes.x_name,
+                    y_name=cv_axes.y_name,
+                )
+            if projected_outputs:
+                frame_projection_available = True
+                outputs.extend(projected_outputs)
+    if cv_one_dimensional and state_x is not None and np.isfinite(state_x).any():
+        outputs.extend(
+            _plot_discrete_microstate_cv_projection_1d(
                 plt=plt,
-                frame_results=plot_frame_results,
-                state_ids=state_ids,
-                reference_probabilities=reference_probabilities,
-                target_probabilities=target_probabilities,
-                temperature_kelvin=config.temperature_kelvin,
-                weight_treatment=frame_projection_weight_treatment,
-                reweighting_method=reweighting_method,
-                state_reweight_factors=state_reweight_factors,
-                frame_weights_by_index=frame_weights_by_index,
-                used_frame_weights_csv=frame_weights_by_index is not None,
-                fel_estimator=config.fel_estimator,
-                fel_bandwidth=config.fel_bandwidth,
-                fel_bandwidth_rule=config.fel_bandwidth_rule,
-                fel_bandwidth_scale=config.fel_bandwidth_scale,
-                fel_bandwidth_max_bins=config.fel_bandwidth_max_bins,
-                fel_bandwidth_min_bins=config.fel_bandwidth_min_bins,
-                fel_surface_smooth_sigma_bins=config.fel_surface_smooth_sigma_bins,
-                bins=config.fel_bins,
-                max_points=config.fel_max_points,
+                x_values=state_x,
+                x_name=cv_axes.x_name if cv_axes is not None else "x",
+                free_energy_kj_mol=reference_free_energy_kj_mol,
+                probability=reference_probabilities,
+                labels=labels,
                 output_dir=config.output_dir,
+                temperature_kelvin=config.temperature_kelvin,
                 energy_scale=energy_scale,
                 energy_unit_label=energy_unit_label,
                 fel_max_energy_display=fel_max_display,
                 fel_colormap=config.fel_colormap,
-                probability_colormap=config.probability_colormap,
-                divergence_colormap=config.divergence_colormap,
-                kl_scale_by_kbt=config.kl_scale_by_kbt,
-                kl_display_threshold=config.kl_display_threshold,
-                kl_colorbar_vmin=config.kl_colorbar_vmin,
-                kl_colorbar_vmax=config.kl_colorbar_vmax,
-                fel_plot_style=config.fel_plot_style,
-                x_name=cv_axes.x_name,
-                y_name=cv_axes.y_name,
+                free_energy_label="reference",
+                filename_prefix="reference",
             )
-            if projected_outputs:
-                frame_projection_available = True
-                outputs.extend(projected_outputs)
-    if state_x is not None and state_y is not None and np.isfinite(state_x).any() and np.isfinite(state_y).any():
+        )
+        outputs.extend(
+            _plot_discrete_microstate_cv_projection_1d(
+                plt=plt,
+                x_values=state_x,
+                x_name=cv_axes.x_name if cv_axes is not None else "x",
+                free_energy_kj_mol=target_free_energy_kj_mol,
+                probability=target_probabilities,
+                labels=labels,
+                output_dir=config.output_dir,
+                temperature_kelvin=config.temperature_kelvin,
+                energy_scale=energy_scale,
+                energy_unit_label=energy_unit_label,
+                fel_max_energy_display=fel_max_display,
+                fel_colormap=config.fel_colormap,
+                free_energy_label="reweighted",
+            )
+        )
+        outputs.extend(
+            _plot_ess_projection_1d(
+                plt=plt,
+                x_values=state_x,
+                x_name=cv_axes.x_name if cv_axes is not None else "x",
+                ess_values=effective_sample_sizes,
+                output_dir=config.output_dir,
+                title="Globally scaled ESS by microstate",
+                filename="effective_sample_size_projection.png",
+            )
+        )
+        outputs.extend(
+            _plot_ess_projection_1d(
+                plt=plt,
+                x_values=state_x,
+                x_name=cv_axes.x_name if cv_axes is not None else "x",
+                ess_values=state_effective_sample_sizes,
+                output_dir=config.output_dir,
+                title="In-state QC ESS by microstate",
+                filename="state_effective_sample_size_projection.png",
+            )
+        )
+    elif (
+        state_x is not None
+        and state_y is not None
+        and np.isfinite(state_x).any()
+        and np.isfinite(state_y).any()
+    ):
         outputs.extend(
             _plot_discrete_microstate_cv_projection(
                 plt=plt,
@@ -653,7 +794,12 @@ def generate_felp_plots(config: FELPPlotConfig) -> dict[str, object]:
         "prior_probability_mode": summary_metadata.get("prior_probability_mode"),
         "reweighting_qc": summary_metadata.get("reweighting_qc"),
         "cv_axes": (
-            [cv_axes.x_name, cv_axes.y_name] if cv_axes is not None else []
+            [cv_axes.x_name]
+            if cv_axes is not None and cv_one_dimensional
+            else ([cv_axes.x_name, cv_axes.y_name] if cv_axes is not None else [])
+        ),
+        "cv_plot_dimensionality": (
+            1 if cv_one_dimensional else (2 if cv_axes is not None else 0)
         ),
         "cv_axis_source": cv_axes.source if cv_axes is not None else None,
         "cv_frame_projection_available": frame_projection_available,
@@ -775,8 +921,11 @@ def _optional_mapping_float(mapping: dict[str, Any], key: str) -> float | None:
         return None
 
 
-def _cv_filename_suffix(x_name: str, y_name: str) -> str:
-    suffix = f"{x_name}_{y_name}".lower()
+def _cv_filename_suffix(x_name: str, y_name: str | None = None) -> str:
+    if y_name is None:
+        suffix = str(x_name).lower()
+    else:
+        suffix = f"{x_name}_{y_name}".lower()
     suffix = re.sub(r"[^a-z0-9]+", "_", suffix).strip("_")
     return suffix or "cv_projection"
 
@@ -788,6 +937,22 @@ def _cv_axis_label(name: str, *, center: bool = False) -> str:
         return r"$\psi$ center (deg)" if center else r"$\psi$ (deg)"
     if name == "omega":
         return r"$\omega$ center (deg)" if center else r"$\omega$ (deg)"
+    match = re.fullmatch(r"phi_(\d+)", name)
+    if match:
+        residue = match.group(1)
+        return (
+            rf"$\phi_{{{residue}}}$ center (deg)"
+            if center
+            else rf"$\phi_{{{residue}}}$ (deg)"
+        )
+    match = re.fullmatch(r"psi_(\d+)", name)
+    if match:
+        residue = match.group(1)
+        return (
+            rf"$\psi_{{{residue}}}$ center (deg)"
+            if center
+            else rf"$\psi_{{{residue}}}$ (deg)"
+        )
     return f"{name} center" if center else name
 
 
@@ -795,6 +960,28 @@ def _axis_range(x_name: str, y_name: str) -> tuple[tuple[float, float], tuple[fl
     if x_name in _ANGULAR_CV_NAMES and y_name in _ANGULAR_CV_NAMES:
         return ((-180.0, 180.0), (-180.0, 180.0))
     return None
+
+
+def _axis_range_1d(x_name: str) -> tuple[float, float] | None:
+    if x_name in _ANGULAR_CV_NAMES:
+        return (-180.0, 180.0)
+    if re.fullmatch(r"(phi|psi|omega)_\d+", x_name):
+        return (-180.0, 180.0)
+    return None
+
+
+def _plot_y_is_placeholder_for_1d(
+    plot_y: np.ndarray,
+    rows: list[dict[str, str]],
+) -> bool:
+    """Return True when plot_y is the auto-microstate 1D placeholder (all zeros)."""
+
+    if len(_available_state_cv_names(rows)) != 1:
+        return False
+    finite_y = plot_y[np.isfinite(plot_y)]
+    if finite_y.size == 0:
+        return True
+    return bool(np.allclose(finite_y, 0.0))
 
 
 def _state_cv_center(row: dict[str, str], name: str) -> float:
@@ -889,17 +1076,21 @@ def _resolve_cv_axes(
 ) -> _CVAxisSelection | None:
     if requested_x is not None and requested_y is not None:
         return _CVAxisSelection(requested_x, requested_y, "configured")
+    if requested_x is not None:
+        return _CVAxisSelection(requested_x, None, "configured_1d")
 
     state_names = _available_state_cv_names(rows)
     frame_names = _available_frame_cv_names(frame_results or ())
     combined = state_names + [name for name in frame_names if name not in state_names]
 
     custom = [n for n in combined if n not in _DEFAULT_DIHEDRAL_CV_NAMES]
+    if len(custom) == 1:
+        return _CVAxisSelection(custom[0], None, "inferred_custom_cv_1d")
     if len(custom) >= 2:
         return _CVAxisSelection(custom[0], custom[1], "inferred_custom_cv")
     if "phi" in combined and "psi" in combined:
         return _CVAxisSelection("phi", "psi", "inferred_phi_psi")
-    if "plot_x" in combined and "plot_y" in combined:
+    if "plot_x" in combined and "plot_y" in combined and len(state_names) != 1:
         return _CVAxisSelection("plot_x", "plot_y", "inferred_plot_projection")
     if len(combined) >= 2:
         return _CVAxisSelection(combined[0], combined[1], "inferred_cv_metadata")
@@ -2496,6 +2687,751 @@ def _plot_cv_projected_landscapes(
     write_json(kl_summary_path, divergence_metadata)
     outputs.append(kl_summary_path)
     return outputs, projection_metadata
+
+
+def _build_regular_state_profile_1d(
+    x_centers: np.ndarray,
+    values: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Build a sorted 1D state profile when centers form a regular grid."""
+
+    if not (x_centers.size == values.size and np.isfinite(x_centers).all()):
+        return None
+    grid = _regular_centers_to_edges(x_centers)
+    if grid is None:
+        return None
+    x_unique, x_edges = grid
+    if x_unique.size != values.size:
+        return None
+    x_index = {float(value): index for index, value in enumerate(x_centers)}
+    profile = np.asarray(
+        [float(values[x_index[float(value)]]) for value in x_unique],
+        dtype=float,
+    )
+    return profile, x_edges
+
+
+def _plot_1d_state_quantities(
+    plt,
+    *,
+    x_values: np.ndarray,
+    x_name: str,
+    reference_probabilities: np.ndarray,
+    target_probabilities: np.ndarray,
+    delta_free_energy: np.ndarray,
+    output_dir: str,
+    fel_max_energy_display: float | None,
+    energy_unit_label: str,
+    fel_colormap: str,
+    probability_colormap: str,
+) -> list[str]:
+    """Plot state probabilities and delta free energy along one CV axis."""
+
+    mask = np.isfinite(x_values)
+    if not mask.any():
+        return []
+
+    order = np.argsort(x_values[mask])
+    x_sorted = x_values[mask][order]
+    outputs: list[str] = []
+    suffix = _cv_filename_suffix(x_name)
+    for values, title, ylabel, filename, is_delta_fe, _cmap in (
+        (
+            reference_probabilities,
+            "Pre-reweighted state probability",
+            "Probability",
+            f"reference_{suffix}_probability_projection.png",
+            False,
+            probability_colormap,
+        ),
+        (
+            target_probabilities,
+            "Reweighted state probability",
+            "Probability",
+            f"target_{suffix}_probability_projection.png",
+            False,
+            probability_colormap,
+        ),
+        (
+            delta_free_energy,
+            r"$\Delta\Delta G$ (reweighted $-$ reference)",
+            f"$\\Delta\\Delta G$ ({energy_unit_label})",
+            f"delta_{suffix}_free_energy_projection.png",
+            True,
+            fel_colormap,
+        ),
+    ):
+        y_sorted = np.asarray(values, dtype=float)[mask][order]
+        x_sorted_iter = x_values[mask][order]
+        profile = _build_regular_state_profile_1d(x_sorted_iter, y_sorted)
+        if profile is not None:
+            prof_values, x_edges = profile
+            path = save_1d_profile_landscape(
+                plt,
+                os.path.join(output_dir, filename),
+                prof_values,
+                x_edges,
+                title=title,
+                colorbar_label=ylabel,
+                xlabel=_cv_axis_label(x_name, center=True),
+                fel_max_energy_kj_mol=fel_max_energy_display if is_delta_fe else None,
+                colormap=_cmap,
+                symmetric_zero_center=is_delta_fe,
+            )
+            outputs.append(path)
+        else:
+            fig, ax = plt.subplots(1, 1)
+            scatter_kwargs: dict = {
+                "ax": ax,
+                "x": x_sorted_iter,
+                "y": y_sorted,
+                "values": y_sorted,
+                "colorbar_label": ylabel,
+                "title": title,
+                "xlabel": _cv_axis_label(x_name, center=True),
+                "ylabel": ylabel,
+                "colormap": _cmap,
+                "show_colorbar": True,
+            }
+            if is_delta_fe and fel_max_energy_display is not None:
+                scatter_kwargs["fel_max_energy_kj_mol"] = fel_max_energy_display
+                scatter_kwargs["symmetric_energy_cap"] = True
+            _plot_1d_colored_profile(**scatter_kwargs)
+            fig.tight_layout()
+            path = os.path.join(output_dir, filename)
+            fig.savefig(path)
+            plt.close(fig)
+            outputs.append(path)
+    return outputs
+
+
+def _plot_1d_colored_profile(
+    ax,
+    *,
+    x: np.ndarray,
+    y: np.ndarray,
+    values: np.ndarray,
+    colorbar_label: str,
+    title: str,
+    xlabel: str,
+    ylabel: str,
+    colormap: str,
+    show_colorbar: bool = True,
+    fel_max_energy_kj_mol: float | None = None,
+    symmetric_energy_cap: bool = False,
+) -> None:
+    """Draw a 1D profile with marker colors mapped to the y values."""
+
+    import matplotlib.cm as mpl_cm
+    import matplotlib.colors as mcolors
+
+    x_plot = np.asarray(x, dtype=float)
+    y_plot = np.asarray(y, dtype=float)
+    value_plot = np.asarray(values, dtype=float)
+    mask = np.isfinite(x_plot) & np.isfinite(y_plot) & np.isfinite(value_plot)
+    try:
+        cmap = mpl_cm.colormaps[colormap]
+    except (AttributeError, KeyError):
+        cmap = mpl_cm.get_cmap(colormap)
+    norm = mcolors.Normalize()
+    if fel_max_energy_kj_mol is not None and symmetric_energy_cap:
+        cap = float(fel_max_energy_kj_mol)
+        norm = mcolors.Normalize(vmin=-cap, vmax=cap, clip=False)
+    elif np.isfinite(value_plot[mask]).any():
+        norm.autoscale(value_plot[mask])
+    colors = cmap(norm(value_plot[mask]))
+    ax.scatter(x_plot[mask], y_plot[mask], c=colors, s=28.0, edgecolors="none")
+    ax.plot(x_plot[mask], y_plot[mask], color="0.35", linewidth=0.8, alpha=0.7, zorder=0)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    if show_colorbar:
+        image = mpl_cm.ScalarMappable(norm=norm, cmap=cmap)
+        colorbar = ax.figure.colorbar(image, ax=ax)
+        colorbar.set_label(colorbar_label)
+
+
+def _plot_cv_state_landscapes_1d(
+    plt,
+    *,
+    x_centers: np.ndarray,
+    x_name: str,
+    reference_probabilities: np.ndarray,
+    target_probabilities: np.ndarray,
+    temperature_kelvin: float,
+    output_dir: str,
+    energy_scale: float,
+    energy_unit_label: str,
+    fel_max_energy_display: float | None,
+    fel_colormap: str,
+    probability_colormap: str,
+) -> list[str]:
+    """Build 1D CV free-energy profiles from discrete state probabilities."""
+
+    reference_profile = _build_regular_state_profile_1d(
+        x_centers,
+        reference_probabilities,
+    )
+    target_profile = _build_regular_state_profile_1d(
+        x_centers,
+        target_probabilities,
+    )
+    if reference_profile is None or target_profile is None:
+        return []
+    reference_values, x_edges = reference_profile
+    target_values, _ = target_profile
+    reference_fe = energy_scale * probability_surface_to_free_energy(
+        reference_values,
+        temperature_kelvin,
+    )
+    reweighted_fe = energy_scale * probability_surface_to_free_energy(
+        target_values,
+        temperature_kelvin,
+    )
+
+    outputs: list[str] = []
+    suffix = _cv_filename_suffix(x_name)
+    outputs.append(
+        save_1d_profile_landscape(
+            plt,
+            os.path.join(output_dir, f"reference_{suffix}_state_probability_landscape.png"),
+            reference_values,
+            x_edges,
+            title="Pre-reweighted microstate probability",
+            colorbar_label="Probability",
+            xlabel=_cv_axis_label(x_name),
+            colormap=probability_colormap,
+        )
+    )
+    outputs.append(
+        save_1d_profile_landscape(
+            plt,
+            os.path.join(output_dir, f"reweighted_{suffix}_state_probability_landscape.png"),
+            target_values,
+            x_edges,
+            title="Reweighted microstate probability",
+            colorbar_label="Probability",
+            xlabel=_cv_axis_label(x_name),
+            colormap=probability_colormap,
+        )
+    )
+    outputs.append(
+        save_1d_profile_landscape(
+            plt,
+            os.path.join(output_dir, f"reference_{suffix}_state_free_energy_landscape.png"),
+            reference_fe,
+            x_edges,
+            title="Pre-reweighted microstate free energy",
+            colorbar_label=f"Relative free energy ({energy_unit_label})",
+            xlabel=_cv_axis_label(x_name),
+            fel_max_energy_kj_mol=fel_max_energy_display,
+            colormap=fel_colormap,
+        )
+    )
+    outputs.append(
+        save_1d_profile_landscape(
+            plt,
+            os.path.join(output_dir, f"reweighted_{suffix}_state_free_energy_landscape.png"),
+            reweighted_fe,
+            x_edges,
+            title="Reweighted microstate free energy",
+            colorbar_label=f"Relative free energy ({energy_unit_label})",
+            xlabel=_cv_axis_label(x_name),
+            fel_max_energy_kj_mol=fel_max_energy_display,
+            colormap=fel_colormap,
+        )
+    )
+    return outputs
+
+
+def _collect_cv_projection_state_samples_1d(
+    *,
+    frame_results,
+    state_ids: set[str],
+    x_name: str,
+) -> tuple[dict[str, list[tuple[float, float, int]]], list[float]] | None:
+    """Collect finite 1D frame CV samples keyed by microstate id."""
+
+    grouped: dict[str, list[tuple[float, float, int]]] = defaultdict(list)
+    eligible_delta_values: list[float] = []
+    for result in frame_results:
+        if not is_reweighting_eligible_frame(result):
+            continue
+        if result.microstate_id not in state_ids:
+            continue
+        x_value = _frame_cv_value(result, x_name)
+        if x_value is None or not math.isfinite(x_value):
+            continue
+        grouped[result.microstate_id].append(
+            (
+                float(x_value),
+                float(result.delta_u_kj_mol),
+                int(result.frame_index),
+            )
+        )
+        eligible_delta_values.append(float(result.delta_u_kj_mol))
+
+    if not eligible_delta_values:
+        return None
+    return grouped, eligible_delta_values
+
+
+def _collect_cv_projection_samples_1d(
+    *,
+    frame_results,
+    reference_probability_by_state: dict[str, float],
+    temperature_kelvin: float,
+    weight_treatment: str,
+    max_points: int,
+    x_name: str,
+    state_reweight_factors: dict[str, float] | None = None,
+    frame_weights_by_index: dict[int, float] | None = None,
+    reweighting_method: str = "independent",
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    """Collect exact 1D CV frame samples with state-consistent reference weights."""
+
+    collected = _collect_cv_projection_state_samples_1d(
+        frame_results=frame_results,
+        state_ids=set(reference_probability_by_state),
+        x_name=x_name,
+    )
+    if collected is None:
+        return None
+    grouped, eligible_delta_values = collected
+
+    missing_positive_prior = [
+        state_id
+        for state_id, probability in reference_probability_by_state.items()
+        if probability > 0.0 and not grouped.get(state_id)
+    ]
+    if missing_positive_prior:
+        return None
+
+    sampled_raw: dict[str, list[tuple[float, float, int]]] = {}
+    total_count = sum(len(values) for values in grouped.values())
+    sample_budget = max(max_points, len(grouped))
+    for state_id, values in grouped.items():
+        target_count = max(
+            1,
+            int(round(len(values) * sample_budget / total_count)),
+        ) if total_count > 0 else len(values)
+        target_count = min(target_count, len(values))
+        sampled_raw[state_id] = [
+            values[index] for index in _subsample_indices(len(values), target_count)
+        ]
+
+    beta = 1.0 / (K_BOLTZMANN_KJ_PER_MOL_K * temperature_kelvin)
+    delta_shift = min(eligible_delta_values)
+
+    x_values: list[float] = []
+    reference_weights: list[float] = []
+    reweighted_weights: list[float] = []
+    for state_id, samples in sampled_raw.items():
+        sample_count = len(samples)
+        if sample_count == 0:
+            continue
+        reference_probability = reference_probability_by_state.get(state_id, 0.0)
+        delta_values = np.asarray([sample[1] for sample in samples], dtype=float)
+        local_delta_shift = float(delta_values.min())
+        treated_weights = np.exp(-beta * (delta_values - local_delta_shift))
+        if weight_treatment == "psis-smoothed":
+            treated_weights, _ = psis_smooth_weights(treated_weights)
+        treated_weights = (
+            math.exp(-beta * (local_delta_shift - delta_shift)) * treated_weights
+        )
+        local_mean_treated = float(treated_weights.mean()) if treated_weights.size else 0.0
+        state_factor = None
+        if frame_weights_by_index is None and reweighting_method != "independent":
+            state_factor = (state_reweight_factors or {}).get(state_id)
+        for (x_value, _, frame_index), treated_weight in zip(
+            samples,
+            treated_weights,
+            strict=True,
+        ):
+            frame_override = (
+                frame_weights_by_index.get(frame_index)
+                if frame_weights_by_index is not None
+                else None
+            )
+            x_values.append(x_value)
+            reference_weights.append(reference_probability / sample_count)
+            reweighted_weights.append(
+                per_frame_projection_weight(
+                    reference_probability=reference_probability,
+                    treated_weight=float(treated_weight),
+                    local_mean_treated=local_mean_treated,
+                    state_reweight_factor=state_factor,
+                    frame_weight_override=frame_override,
+                )
+                / sample_count
+            )
+
+    if not x_values:
+        return None
+
+    reweighted_array = np.asarray(reweighted_weights, dtype=float)
+    if frame_weights_by_index is None and state_reweight_factors:
+        global_normalization = sum(
+            reference_probability_by_state.get(state_id, 0.0)
+            * float(state_reweight_factors.get(state_id, 0.0))
+            for state_id in reference_probability_by_state
+        )
+        if global_normalization > 0.0:
+            reweighted_array = reweighted_array / global_normalization
+
+    return (
+        np.asarray(x_values, dtype=float),
+        np.asarray(reference_weights, dtype=float),
+        reweighted_array,
+    )
+
+
+def _plot_cv_projected_landscapes_1d(
+    plt,
+    *,
+    frame_results,
+    state_ids: list[str],
+    reference_probabilities: np.ndarray,
+    target_probabilities: np.ndarray,
+    temperature_kelvin: float,
+    weight_treatment: str,
+    reweighting_method: str,
+    state_reweight_factors: dict[str, float],
+    frame_weights_by_index: dict[int, float] | None,
+    used_frame_weights_csv: bool,
+    fel_estimator: str,
+    fel_surface_smooth_sigma_bins: float,
+    bins: int,
+    max_points: int,
+    output_dir: str,
+    energy_scale: float,
+    energy_unit_label: str,
+    fel_max_energy_display: float | None,
+    fel_colormap: str,
+    probability_colormap: str,
+    divergence_colormap: str,
+    kl_scale_by_kbt: bool,
+    kl_display_threshold: float | None,
+    kl_colorbar_vmin: float | None,
+    kl_colorbar_vmax: float | None,
+    x_name: str,
+) -> tuple[list[str], dict[str, object]]:
+    """Project exact 1D CV frame samples using prior-consistent frame weights."""
+
+    if fel_estimator == "gaussian-kernel":
+        return [], {
+            "cv_frame_projection_estimator": "gaussian-kernel",
+            "cv_frame_projection_note": (
+                "1D gaussian-kernel projection is not implemented; use histogram."
+            ),
+        }
+
+    reference_probability_by_state = {
+        state_id: float(probability)
+        for state_id, probability in zip(state_ids, reference_probabilities)
+    }
+    projection_metadata: dict[str, object] = {
+        "cv_frame_projection_estimator": "histogram",
+        "cv_frame_projection_kernel": None,
+        "cv_frame_projection_bandwidth": None,
+        "cv_frame_projection_bandwidth_rule": None,
+        "cv_frame_projection_state_mass_preserved": used_frame_weights_csv
+        or (reweighting_method != "independent" and bool(state_reweight_factors)),
+        "cv_plot_dimensionality": 1,
+    }
+    sampled = _collect_cv_projection_samples_1d(
+        frame_results=frame_results,
+        reference_probability_by_state=reference_probability_by_state,
+        temperature_kelvin=temperature_kelvin,
+        weight_treatment=weight_treatment,
+        max_points=max_points,
+        x_name=x_name,
+        state_reweight_factors=state_reweight_factors,
+        frame_weights_by_index=frame_weights_by_index,
+        reweighting_method=reweighting_method,
+    )
+    if sampled is None:
+        return [], projection_metadata
+
+    x_values, reference_weights, reweighted_weights = sampled
+    hist_range = _axis_range_1d(x_name)
+    reference_hist, x_edges = compute_weighted_histogram1d(
+        x_values,
+        bins=bins,
+        weights=reference_weights,
+        range=hist_range,
+    )
+    reweighted_hist, _ = compute_weighted_histogram1d(
+        x_values,
+        bins=bins,
+        weights=reweighted_weights,
+        range=hist_range,
+    )
+    if fel_surface_smooth_sigma_bins > 0.0:
+        try:
+            from scipy.ndimage import gaussian_filter1d
+        except ImportError as exc:
+            raise ConfigurationError(
+                "fel_surface_smooth_sigma_bins > 0 requires scipy to be installed."
+            ) from exc
+        reference_hist = gaussian_filter1d(reference_hist, sigma=fel_surface_smooth_sigma_bins)
+        reweighted_hist = gaussian_filter1d(reweighted_hist, sigma=fel_surface_smooth_sigma_bins)
+        ref_total = float(reference_hist.sum())
+        rew_total = float(reweighted_hist.sum())
+        if ref_total > 0.0:
+            reference_hist = reference_hist / ref_total
+        if rew_total > 0.0:
+            reweighted_hist = reweighted_hist / rew_total
+        projection_metadata["cv_frame_projection_display_smoothing_sigma_bins"] = (
+            float(fel_surface_smooth_sigma_bins)
+        )
+
+    reference_fe = energy_scale * probability_surface_to_free_energy(
+        reference_hist,
+        temperature_kelvin,
+    )
+    reweighted_fe = energy_scale * probability_surface_to_free_energy(
+        reweighted_hist,
+        temperature_kelvin,
+    )
+    divergence_metadata, kl_contribution = _surface_divergence_summary(
+        reference_hist,
+        reweighted_hist,
+    )
+    kl_display, kl_colorbar_label, kl_display_metadata = prepare_kl_display_grid(
+        kl_contribution,
+        temperature_kelvin=temperature_kelvin,
+        scale_by_kbt=kl_scale_by_kbt,
+        kbt_energy_scale=energy_scale,
+        kbt_energy_unit_label=energy_unit_label,
+        display_threshold=kl_display_threshold,
+        probability_labels=("p_pre", "p_rw"),
+    )
+    divergence_metadata.update(kl_display_metadata)
+    kl_limits = resolve_kl_colorbar_limits(kl_colorbar_vmin, kl_colorbar_vmax)
+    if kl_limits is not None:
+        divergence_metadata["kl_colorbar_vmin"] = float(kl_limits[0])
+        divergence_metadata["kl_colorbar_vmax"] = float(kl_limits[1])
+    projection_metadata.update(divergence_metadata)
+
+    outputs: list[str] = []
+    suffix = _cv_filename_suffix(x_name)
+    outputs.append(
+        save_1d_profile_landscape(
+            plt,
+            os.path.join(output_dir, f"reference_{suffix}_projected_probability.png"),
+            reference_hist,
+            x_edges,
+            title="Pre-reweighted projected probability",
+            colorbar_label="Probability",
+            xlabel=_cv_axis_label(x_name),
+            colormap=probability_colormap,
+        )
+    )
+    outputs.append(
+        save_1d_profile_landscape(
+            plt,
+            os.path.join(output_dir, f"reweighted_{suffix}_projected_probability.png"),
+            reweighted_hist,
+            x_edges,
+            title="Reweighted projected probability",
+            colorbar_label="Probability",
+            xlabel=_cv_axis_label(x_name),
+            colormap=probability_colormap,
+        )
+    )
+    outputs.append(
+        save_1d_profile_landscape(
+            plt,
+            os.path.join(output_dir, f"reference_{suffix}_free_energy_landscape.png"),
+            reference_fe,
+            x_edges,
+            title="Pre-reweighted projected free energy",
+            colorbar_label=f"Relative free energy ({energy_unit_label})",
+            xlabel=_cv_axis_label(x_name),
+            fel_max_energy_kj_mol=fel_max_energy_display,
+            colormap=fel_colormap,
+        )
+    )
+    outputs.append(
+        save_1d_profile_landscape(
+            plt,
+            os.path.join(output_dir, f"reweighted_{suffix}_free_energy_landscape.png"),
+            reweighted_fe,
+            x_edges,
+            title="Reweighted projected free energy",
+            colorbar_label=f"Relative free energy ({energy_unit_label})",
+            xlabel=_cv_axis_label(x_name),
+            fel_max_energy_kj_mol=fel_max_energy_display,
+            colormap=fel_colormap,
+        )
+    )
+    outputs.append(
+        save_1d_profile_landscape(
+            plt,
+            os.path.join(output_dir, f"kl_{suffix}_projected_fel_contributions.png"),
+            kl_display,
+            x_edges,
+            title="Projected FEL KL contributions",
+            colorbar_label=kl_colorbar_label,
+            xlabel=_cv_axis_label(x_name),
+            colormap=divergence_colormap,
+            symmetric_zero_center=True,
+            colorbar_vmin=kl_limits[0] if kl_limits is not None else None,
+            colorbar_vmax=kl_limits[1] if kl_limits is not None else None,
+        )
+    )
+    kl_summary_path = os.path.join(output_dir, f"kl_{suffix}_projected_fel_summary.json")
+    write_json(kl_summary_path, divergence_metadata)
+    outputs.append(kl_summary_path)
+    return outputs, projection_metadata
+
+
+def _plot_discrete_microstate_cv_projection_1d(
+    plt,
+    *,
+    x_values: np.ndarray,
+    x_name: str,
+    free_energy_kj_mol: np.ndarray,
+    probability: np.ndarray,
+    labels: list[str],
+    output_dir: str,
+    temperature_kelvin: float,
+    energy_scale: float,
+    energy_unit_label: str,
+    fel_max_energy_display: float | None,
+    fel_colormap: str,
+    free_energy_label: str,
+    filename_prefix: str | None = None,
+) -> list[str]:
+    """Plot microstate free energy along one CV axis."""
+
+    mask = np.isfinite(x_values)
+    if int(mask.sum()) < 1:
+        return []
+
+    fe = energy_scale * np.asarray(free_energy_kj_mol, dtype=float)
+    if not np.isfinite(fe[mask]).any():
+        values = energy_scale * free_energy_from_probabilities(
+            np.asarray(probability, dtype=float),
+            temperature_kelvin=temperature_kelvin,
+        )
+        ylabel = (
+            f"Relative {free_energy_label} free energy ({energy_unit_label})"
+        )
+        title = f"{free_energy_label.capitalize()} microstate free energy"
+    else:
+        values = fe
+        ylabel = (
+            f"Relative {free_energy_label} free energy ({energy_unit_label})"
+        )
+        title = f"{free_energy_label.capitalize()} microstate free energy"
+
+    profile = _build_regular_state_profile_1d(
+        np.asarray(x_values, dtype=float),
+        np.asarray(values, dtype=float),
+    )
+    suffix = _cv_filename_suffix(x_name)
+    stem = "discrete_microstate_free_energy"
+    if filename_prefix:
+        stem = f"{filename_prefix}_{stem}"
+    path = os.path.join(output_dir, f"{stem}_{suffix}.png")
+    if profile is not None:
+        fe_profile, x_edges = profile
+        return [
+            save_1d_profile_landscape(
+                plt,
+                path,
+                fe_profile,
+                x_edges,
+                title=title,
+                colorbar_label=ylabel,
+                xlabel=_cv_axis_label(x_name, center=True),
+                fel_max_energy_kj_mol=fel_max_energy_display,
+                colormap=fel_colormap,
+            )
+        ]
+
+    order = np.argsort(x_values[mask])
+    x_sorted = x_values[mask][order]
+    y_sorted = values[mask][order]
+    x_edges = _regular_centers_to_edges(x_sorted)
+    if x_edges is not None:
+        _, edge_arr = x_edges
+        return [
+            save_1d_profile_landscape(
+                plt,
+                path,
+                y_sorted,
+                edge_arr,
+                title=title,
+                colorbar_label=ylabel,
+                xlabel=_cv_axis_label(x_name, center=True),
+                fel_max_energy_kj_mol=fel_max_energy_display,
+                colormap=fel_colormap,
+            )
+        ]
+
+    from matplotlib.ticker import AutoMinorLocator
+    fig, ax = plt.subplots(1, 1, figsize=(7.0, 2.8))
+    ax.plot(x_sorted, y_sorted, color="0.15", linewidth=1.4, zorder=3)
+    ax.fill_between(x_sorted, np.nanmin(y_sorted), y_sorted, alpha=0.2, color="0.45")
+    ax.set_xlabel(_cv_axis_label(x_name, center=True))
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    if fel_max_energy_display is not None:
+        cap = float(fel_max_energy_display)
+        ax.set_ylim(bottom=-0.15 * cap, top=cap * 1.05)
+        ax.axhline(cap, color="0.6", linewidth=0.6, linestyle="--")
+    ax.xaxis.set_minor_locator(AutoMinorLocator())
+    ax.yaxis.set_minor_locator(AutoMinorLocator())
+    fig.tight_layout()
+    fig.savefig(path, dpi=300, bbox_inches="tight", pad_inches=0.05)
+    plt.close(fig)
+    return [path]
+
+
+def _plot_ess_projection_1d(
+    plt,
+    *,
+    x_values: np.ndarray,
+    x_name: str,
+    ess_values: np.ndarray,
+    output_dir: str,
+    title: str,
+    filename: str,
+) -> list[str]:
+    """Plot log10 ESS along one CV axis."""
+
+    mask = np.isfinite(x_values)
+    if int(mask.sum()) < 1:
+        return []
+
+    ess = np.asarray(ess_values, dtype=float)
+    log_ess = np.full_like(ess, fill_value=np.nan, dtype=float)
+    positive_mask = np.isfinite(ess) & (ess > 0.0)
+    log_ess[positive_mask] = np.log10(ess[positive_mask])
+    if not np.isfinite(log_ess[mask]).any():
+        return []
+
+    order = np.argsort(x_values[mask])
+    fig, ax = plt.subplots(1, 1)
+    _plot_1d_colored_profile(
+        ax=ax,
+        x=x_values[mask][order],
+        y=log_ess[mask][order],
+        values=log_ess[mask][order],
+        colorbar_label="log10(ESS)",
+        title=title,
+        xlabel=_cv_axis_label(x_name, center=True),
+        ylabel="log10(ESS)",
+        colormap=_ESS_COLORMAP,
+    )
+    fig.tight_layout()
+    path = os.path.join(output_dir, filename)
+    fig.savefig(path)
+    plt.close(fig)
+    return [path]
 
 
 def _plot_discrete_microstate_cv_projection(

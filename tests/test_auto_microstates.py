@@ -5,6 +5,25 @@ import numpy as np
 from felp.reweighting.auto_microstates import build_auto_microstate_payload
 
 
+def test_build_auto_microstate_payload_writes_one_cv_grid() -> None:
+    psi = np.linspace(-120.0, 120.0, 300)
+
+    payload = build_auto_microstate_payload(
+        cv_values={"psi_114": psi},
+        cv_names=("psi_114",),
+    )
+
+    metadata = payload["metadata"]
+    states = payload["states"]
+    bins = metadata["axes"]["psi_114"]["bin_count"]
+
+    assert metadata["cv_names"] == ["psi_114"]
+    assert metadata["frame_count"] == 300
+    assert len(states) == bins
+    assert all(set(state["cv_ranges"]) == {"psi_114"} for state in states)
+    assert all(state["plot_y"] == 0.0 for state in states)
+
+
 def test_build_auto_microstate_payload_writes_complete_two_cv_grid() -> None:
     ends = np.linspace(8.0, 24.0, 200)
     turn = np.concatenate(

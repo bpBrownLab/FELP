@@ -73,10 +73,11 @@ def _grid_atlas() -> MicrostateAtlas:
 
 def test_topology_from_bin_indices() -> None:
     atlas = _grid_atlas()
-    topology = build_grid_topology(atlas)
+    topology = build_grid_topology(atlas, grid_connectivity="cardinal")
     assert topology is not None
     assert topology.source == "bin_indices"
     assert topology.grid_shape == (3, 3)
+    assert topology.connectivity == "cardinal"
     center_id = "phi_01_psi_01"
     neighbors = set(topology.neighbor_ids(center_id))
     assert neighbors == {
@@ -85,6 +86,69 @@ def test_topology_from_bin_indices() -> None:
         "phi_01_psi_00",
         "phi_01_psi_02",
     }
+
+
+def test_topology_chebyshev1_includes_diagonal_neighbors() -> None:
+    atlas = _grid_atlas()
+    topology = build_grid_topology(
+        atlas,
+        grid_connectivity="chebyshev1",
+    )
+    assert topology is not None
+    assert topology.connectivity == "chebyshev"
+    assert topology.chebyshev_radius == 1
+    center_id = "phi_01_psi_01"
+    neighbors = set(topology.neighbor_ids(center_id))
+    assert neighbors == {
+        "phi_00_psi_00",
+        "phi_00_psi_01",
+        "phi_00_psi_02",
+        "phi_01_psi_00",
+        "phi_01_psi_02",
+        "phi_02_psi_00",
+        "phi_02_psi_01",
+        "phi_02_psi_02",
+    }
+
+
+def test_topology_chebyshev2_adds_second_shell() -> None:
+    definitions = []
+    for x_index in range(5):
+        for y_index in range(5):
+            state_id = f"phi_{x_index:02d}_psi_{y_index:02d}"
+            definitions.append(
+                MicrostateDefinition(
+                    state_id=state_id,
+                    label=state_id,
+                    cv_ranges={
+                        "phi": (float(x_index), float(x_index + 1)),
+                        "psi": (float(y_index), float(y_index + 1)),
+                    },
+                    metadata={"bin_indices": {"phi": x_index, "psi": y_index}},
+                )
+            )
+    atlas = MicrostateAtlas.from_definitions(definitions)
+    topology = build_grid_topology(
+        atlas,
+        grid_connectivity="chebyshev",
+        chebyshev_radius=2,
+    )
+    assert topology is not None
+    assert topology.chebyshev_radius == 2
+    center_id = "phi_02_psi_02"
+    assert len(topology.neighbor_ids(center_id)) == 24
+
+
+def test_neighbor_pool_config_parses_chebyshev_alias() -> None:
+    config = NeighborPoolConfig(grid_connectivity="chebyshev2")
+    assert config.grid_connectivity == "chebyshev"
+    assert config.chebyshev_radius == 2
+
+
+def test_neighbor_pool_default_connectivity_is_chebyshev3() -> None:
+    config = NeighborPoolConfig()
+    assert config.grid_connectivity == "chebyshev"
+    assert config.chebyshev_radius == 3
 
 
 def test_independent_matches_legacy_aggregator() -> None:

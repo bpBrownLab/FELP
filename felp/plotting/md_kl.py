@@ -12,6 +12,7 @@ import numpy as np
 from felp.core import (
     ConfigurationError,
     DependencyError,
+    DistanceCVSpec,
     K_BOLTZMANN_KJ_PER_MOL_K,
     ReweightingQCConfig,
 )
@@ -42,11 +43,13 @@ from .frame_projection_weights import (
     state_reweight_factors_from_summary_rows,
 )
 from .felp import (
+    _ANGULAR_CV_NAMES,
     _axis_range,
     _collect_cv_projection_samples,
     _excluded_frame_indices_by_state,
     _filter_qc_excluded_frame_results,
     _load_microstate_summary_metadata,
+    _normalize_cv_name,
     _summary_weight_treatment,
     _surface_divergence_summary,
 )
@@ -71,6 +74,9 @@ class MDKLPlotConfig:
     phi_psi_residue_number: int | None = None
     phi_psi_residue_name: str | None = None
     phi_psi_selection: str | None = None
+    plot_cv_x: str | None = None
+    plot_cv_y: str | None = None
+    distance_cv_specs: tuple[DistanceCVSpec, ...] = ()
     stride: int = 1
     frame_start: int = 0
     frame_stop: int | None = None
@@ -119,10 +125,38 @@ class MDKLPlotConfig:
             raise ConfigurationError("chunk_size must be at least 1.")
         if self.temperature_kelvin <= 0.0:
             raise ConfigurationError("temperature_kelvin must be positive.")
-        if self.phi_psi_selection is None and self.phi_psi_residue_number is None:
+        if self.distance_cv_specs:
+            if self.phi_psi_selection is not None or self.phi_psi_residue_number is not None:
+                raise ConfigurationError(
+                    "Do not combine --distance-cv with phi/psi residue options."
+                )
+            x_name, y_name = _resolved_plot_cv_names(self)
+            spec_names = {spec.name for spec in self.distance_cv_specs}
+            missing = {x_name, y_name} - spec_names
+            if missing:
+                raise ConfigurationError(
+                    "Each --plot-cv-x/--plot-cv-y name must have a matching "
+                    f"--distance-cv specification; missing: {sorted(missing)}."
+                )
+        elif self.phi_psi_selection is None and self.phi_psi_residue_number is None:
             raise ConfigurationError(
-                "Provide either --phi-psi-selection or --phi-psi-residue-number."
+                "Provide either --phi-psi-selection, --phi-psi-residue-number, "
+                "or repeatable --distance-cv with --plot-cv-x/--plot-cv-y."
             )
+        if (self.plot_cv_x is None) != (self.plot_cv_y is None):
+            raise ConfigurationError(
+                "--plot-cv-x and --plot-cv-y must be provided together."
+            )
+        if self.plot_cv_x is not None:
+            object.__setattr__(self, "plot_cv_x", _normalize_cv_name(self.plot_cv_x))
+        if self.plot_cv_y is not None:
+            object.__setattr__(self, "plot_cv_y", _normalize_cv_name(self.plot_cv_y))
+        if self.plot_cv_x is not None and self.plot_cv_y is not None:
+            x_name, y_name = _resolved_plot_cv_names(self)
+            if x_name == y_name:
+                raise ConfigurationError(
+                    "--plot-cv-x and --plot-cv-y must name different CVs."
+                )
 
         reweighted_surface = self.resolved_reweighted_surface_csv()
         if not os.path.isfile(reweighted_surface):
@@ -191,6 +225,28 @@ class MDKLPlotConfig:
         )
 
 
+def _resolved_plot_cv_names(config: MDKLPlotConfig) -> tuple[str, str]:
+    if config.plot_cv_x is not None and config.plot_cv_y is not None:
+        return config.plot_cv_x, config.plot_cv_y
+    if config.distance_cv_specs:
+        names = [spec.name for spec in config.distance_cv_specs]
+        if len(names) >= 2:
+            return names[0], names[1]
+    return "phi", "psi"
+
+
+def _cv_axis_labels(x_name: str, y_name: str) -> tuple[str, str]:
+    if x_name in _ANGULAR_CV_NAMES:
+        return f"{x_name} (deg)", f"{y_name} (deg)" if y_name in _ANGULAR_CV_NAMES else y_name
+    if y_name in _ANGULAR_CV_NAMES:
+        return x_name, f"{y_name} (deg)"
+    return f"{x_name} (Å)", f"{y_name} (Å)"
+
+
+def _cv_axes_are_angular(x_name: str, y_name: str) -> bool:
+    return x_name in _ANGULAR_CV_NAMES and y_name in _ANGULAR_CV_NAMES
+
+
 def generate_md_kl_plot(config: MDKLPlotConfig) -> dict[str, object]:
     """Generate standalone MD-vs-reweighted KL plots."""
 
@@ -198,6 +254,10 @@ def generate_md_kl_plot(config: MDKLPlotConfig) -> dict[str, object]:
     prepare_output_dir(config.output_dir, overwrite=config.overwrite)
     plt = import_matplotlib()
     apply_publication_style()
+
+    x_name, y_name = _resolved_plot_cv_names(config)
+    x_label, y_label = _cv_axis_labels(x_name, y_name)
+    angular_axes = _cv_axes_are_angular(x_name, y_name)
 
     summary_csv = config.resolved_reweighted_surface_csv()
     state_discrete_fe_available = _state_summary_supports_discrete_fe_plot(summary_csv)
@@ -208,7 +268,10 @@ def generate_md_kl_plot(config: MDKLPlotConfig) -> dict[str, object]:
                 x_edges,
                 y_edges,
                 surface_metadata,
-            ) = _load_regular_reweighted_probability_surface(summary_csv)
+            ) = _load_regular_reweighted_probability_surface(
+                summary_csv,
+                angular_axes=angular_axes,
+            )
         except ConfigurationError:
             (
                 reweighted_surface,
@@ -235,23 +298,28 @@ def generate_md_kl_plot(config: MDKLPlotConfig) -> dict[str, object]:
             x_edges,
             y_edges,
             surface_metadata,
-        ) = _load_regular_reweighted_probability_surface(summary_csv)
+        ) = _load_regular_reweighted_probability_surface(
+            summary_csv,
+            angular_axes=angular_axes,
+        )
         surface_metadata = {
             **surface_metadata,
             "reweighted_kl_probability_surface_source": "regular_surface_csv",
             "reweighted_display_probability_surface_source": "regular_surface_csv",
             "raw_frame_results_used_for_kl": False,
         }
-    phi_degrees, psi_degrees = _load_md_phi_psi_degrees(config)
+    x_values, y_values = _load_md_projection_values(config, x_name, y_name)
     md_surface, _, _ = np.histogram2d(
-        phi_degrees,
-        psi_degrees,
+        x_values,
+        y_values,
         bins=(x_edges, y_edges),
     )
     if md_surface.sum() > 0.0:
         md_surface = md_surface / float(md_surface.sum())
     else:
-        raise ConfigurationError("No MD frames fell inside the inferred phi/psi grid.")
+        raise ConfigurationError(
+            f"No MD frames fell inside the inferred {x_name}/{y_name} grid."
+        )
 
     energy_scale, energy_unit_label = _plot_energy_display_scale_and_label(
         config.plot_energy_unit
@@ -290,7 +358,23 @@ def generate_md_kl_plot(config: MDKLPlotConfig) -> dict[str, object]:
         config.kl_colorbar_vmax,
     )
     summary_metadata = {
-        "md_frame_count": int(phi_degrees.size),
+        "md_frame_count": int(x_values.size),
+        "plot_cv_x": x_name,
+        "plot_cv_y": y_name,
+        "distance_cv_specs": [
+            {
+                "name": spec.name,
+                "atom1": {
+                    "residue_number": spec.atom1.residue_number,
+                    "atom_name": spec.atom1.atom_name,
+                },
+                "atom2": {
+                    "residue_number": spec.atom2.residue_number,
+                    "atom_name": spec.atom2.atom_name,
+                },
+            }
+            for spec in config.distance_cv_specs
+        ],
         "reweighted_surface_csv": config.resolved_reweighted_surface_csv(),
         "raw_frame_results_csv": config.raw_frame_results_csv,
         "topology_file": config.topology_file,
@@ -373,8 +457,8 @@ def generate_md_kl_plot(config: MDKLPlotConfig) -> dict[str, object]:
             y_edges,
             title="MD probability",
             colorbar_label="Probability",
-            xlabel="phi (deg)",
-            ylabel="psi (deg)",
+            xlabel=x_label,
+            ylabel=y_label,
             colormap=probability_cmap,
         )
     )
@@ -387,8 +471,8 @@ def generate_md_kl_plot(config: MDKLPlotConfig) -> dict[str, object]:
             y_edges,
             title="MD reference free energy",
             colorbar_label=f"Relative free energy ({energy_unit_label})",
-            xlabel="phi (deg)",
-            ylabel="psi (deg)",
+            xlabel=x_label,
+            ylabel=y_label,
             fel_max_energy_kj_mol=fel_max_energy_display,
             colormap=config.fel_colormap,
         )
@@ -418,8 +502,8 @@ def generate_md_kl_plot(config: MDKLPlotConfig) -> dict[str, object]:
             y_edges,
             title="Reweighted probability",
             colorbar_label="Probability",
-            xlabel="phi (deg)",
-            ylabel="psi (deg)",
+            xlabel=x_label,
+            ylabel=y_label,
             colormap=probability_cmap,
         )
     )
@@ -435,8 +519,8 @@ def generate_md_kl_plot(config: MDKLPlotConfig) -> dict[str, object]:
             y_edges,
             title="Reweighted free energy",
             colorbar_label=f"Relative free energy ({energy_unit_label})",
-            xlabel="phi (deg)",
-            ylabel="psi (deg)",
+            xlabel=x_label,
+            ylabel=y_label,
             fel_max_energy_kj_mol=fel_max_energy_display,
             colormap=config.fel_colormap,
         )
@@ -483,8 +567,8 @@ def generate_md_kl_plot(config: MDKLPlotConfig) -> dict[str, object]:
             y_edges,
             title="MD vs reweighted KL imbalance",
             colorbar_label=kl_colorbar_label,
-            xlabel="phi (deg)",
-            ylabel="psi (deg)",
+            xlabel=x_label,
+            ylabel=y_label,
             colormap=config.divergence_colormap,
             symmetric_zero_center=True,
             colorbar_vmin=kl_limits[0] if kl_limits is not None else None,
@@ -679,8 +763,9 @@ def _plot_energy_display_scale_and_label(plot_energy_unit: str) -> tuple[float, 
 def _load_frame_projected_reweighted_surface(
     config: MDKLPlotConfig,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, object]]:
-    """Project FELP reweighted frame weights onto a regular phi/psi grid."""
+    """Project FELP reweighted frame weights onto a regular CV grid."""
 
+    x_name, y_name = _resolved_plot_cv_names(config)
     summary_csv = config.resolved_reweighted_surface_csv()
     rows = read_csv_rows(summary_csv)
     state_ids = [row.get("state_id", row["label"]) for row in rows]
@@ -718,20 +803,20 @@ def _load_frame_projected_reweighted_surface(
         temperature_kelvin=float(config.temperature_kelvin),
         weight_treatment=weight_treatment,
         max_points=config.fel_max_points,
-        x_name="phi",
-        y_name="psi",
+        x_name=x_name,
+        y_name=y_name,
         state_reweight_factors=state_reweight_factors,
         frame_weights_by_index=frame_weights_by_index,
         reweighting_method=reweighting_method,
     )
     if sampled is None:
         raise ConfigurationError(
-            "Could not project reweighted frame_results onto phi/psi. Check that "
-            "the frame results match the supplied microstate summary and include "
-            "finite phi/psi values."
+            f"Could not project reweighted frame_results onto {x_name}/{y_name}. "
+            "Check that the frame results match the supplied microstate summary "
+            "and include finite CV values."
         )
     x_values, y_values, _reference_weights, reweighted_weights = sampled
-    hist_range = _axis_range("phi", "psi")
+    hist_range = _axis_range(x_name, y_name)
     reweighted_surface, x_edges, y_edges = np.histogram2d(
         x_values,
         y_values,
@@ -771,6 +856,8 @@ def _load_frame_projected_reweighted_surface(
 
 def _load_regular_reweighted_probability_surface(
     path: str,
+    *,
+    angular_axes: bool,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, object]]:
     rows = read_csv_rows(path)
     if not rows:
@@ -810,8 +897,8 @@ def _load_regular_reweighted_probability_surface(
     if total <= 0.0:
         raise ConfigurationError("Reweighted probability surface has zero total mass.")
     surface /= total
-    x_edges = _edges_from_centers(x_centers, angular=True)
-    y_edges = _edges_from_centers(y_centers, angular=True)
+    x_edges = _edges_from_centers(x_centers, angular=angular_axes)
+    y_edges = _edges_from_centers(y_centers, angular=angular_axes)
     return (
         surface,
         x_edges,
@@ -852,6 +939,136 @@ def _edges_from_centers(centers: np.ndarray, *, angular: bool) -> np.ndarray:
     if not np.all(np.isfinite(edges)):
         raise ConfigurationError("Surface grid edges must be finite.")
     return edges
+
+
+def _resolve_mdtraj_atom_index(topology, residue_number: int, atom_name: str) -> int:
+    """Resolve an atom using FELP pose-indexed residue numbering (1-based)."""
+
+    residues = list(topology.residues)
+    matches: list[object] = []
+    if 1 <= residue_number <= len(residues):
+        matches = [residues[residue_number - 1]]
+    if not matches:
+        matches = [
+            residue
+            for residue in residues
+            if getattr(residue, "resSeq", None) == residue_number
+        ]
+    if not matches:
+        matches = [
+            residue
+            for residue in residues
+            if int(residue.index) + 1 == residue_number
+        ]
+    if len(matches) != 1:
+        raise ConfigurationError(
+            f"Could not resolve a unique residue for residue_number={residue_number}."
+        )
+    for atom in matches[0].atoms:
+        if atom.name == atom_name:
+            return int(atom.index)
+    raise ConfigurationError(
+        f"Residue {residue_number} is missing required atom {atom_name!r}."
+    )
+
+
+def _load_md_topology(topology_file: str):
+    from felp.msm.phi_psi_spec import _load_topology
+
+    return _load_topology(topology_file)
+
+
+def _load_md_projection_values(
+    config: MDKLPlotConfig,
+    x_name: str,
+    y_name: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    if config.distance_cv_specs:
+        return _load_md_distance_cv_values(config, x_name, y_name)
+    return _load_md_phi_psi_degrees(config)
+
+
+def _load_md_distance_cv_values(
+    config: MDKLPlotConfig,
+    x_name: str,
+    y_name: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    try:
+        import mdtraj as md
+    except ImportError as exc:
+        raise DependencyError("MDTraj is required for md-kl-plot trajectory loading.") from exc
+
+    spec_by_name = {spec.name: spec for spec in config.distance_cv_specs}
+    missing = {x_name, y_name} - set(spec_by_name)
+    if missing:
+        raise ConfigurationError(
+            f"Missing --distance-cv specifications for: {sorted(missing)}."
+        )
+    topology = _load_md_topology(config.topology_file)
+    atom_pairs: list[list[int]] = []
+    for name in (x_name, y_name):
+        spec = spec_by_name[name]
+        atom_pairs.append(
+            [
+                _resolve_mdtraj_atom_index(
+                    topology,
+                    spec.atom1.residue_number,
+                    spec.atom1.atom_name,
+                ),
+                _resolve_mdtraj_atom_index(
+                    topology,
+                    spec.atom2.residue_number,
+                    spec.atom2.atom_name,
+                ),
+            ]
+        )
+
+    x_chunks: list[np.ndarray] = []
+    y_chunks: list[np.ndarray] = []
+    selected_index = 0
+    chunk_size = max(1, int(config.chunk_size))
+    for group in config.trajectory_files:
+        group_source_index = 0
+        for trajectory_file in group:
+            iter_stride = int(config.stride) if len(group) == 1 else 1
+            for chunk in md.iterload(
+                trajectory_file,
+                chunk=chunk_size,
+                top=config.topology_file,
+                stride=iter_stride,
+            ):
+                if len(group) == 1:
+                    keep = np.arange(chunk.n_frames)
+                    group_source_index += chunk.n_frames * int(config.stride)
+                else:
+                    source_indices = group_source_index + np.arange(chunk.n_frames)
+                    keep = np.flatnonzero(source_indices % int(config.stride) == 0)
+                    group_source_index += chunk.n_frames
+                if keep.size == 0:
+                    continue
+                chunk = chunk[keep]
+                n_frames = chunk.n_frames
+                selected_indices = selected_index + np.arange(n_frames)
+                selected_index += n_frames
+                frame_mask = selected_indices >= int(config.frame_start)
+                if config.frame_stop is not None:
+                    frame_mask &= selected_indices < int(config.frame_stop)
+                if not frame_mask.any():
+                    continue
+                if config.frame_stop is not None and selected_indices[0] >= config.frame_stop:
+                    break
+                chunk = chunk[frame_mask]
+                distances_angstrom = md.compute_distances(chunk, atom_pairs) * 10.0
+                finite = np.isfinite(distances_angstrom).all(axis=1)
+                if finite.any():
+                    x_chunks.append(distances_angstrom[finite, 0])
+                    y_chunks.append(distances_angstrom[finite, 1])
+
+    if not x_chunks:
+        raise ConfigurationError(
+            f"No finite {x_name}/{y_name} values were measured from the MD input."
+        )
+    return np.concatenate(x_chunks), np.concatenate(y_chunks)
 
 
 def _load_md_phi_psi_degrees(config: MDKLPlotConfig) -> tuple[np.ndarray, np.ndarray]:

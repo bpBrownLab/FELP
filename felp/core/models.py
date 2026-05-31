@@ -983,6 +983,8 @@ class NeighborPoolConfig:
     solver: str = "blend"
     min_local_weight: float = 0.0
     max_neighbors: int = 4
+    grid_connectivity: str = "chebyshev3"
+    chebyshev_radius: int = 3
 
     def __post_init__(self) -> None:
         solver = str(self.solver).strip().lower()
@@ -1012,6 +1014,19 @@ class NeighborPoolConfig:
         object.__setattr__(self, "tau_mode", mode)
         if self.tau is not None and float(self.tau) < 0.0:
             raise ConfigurationError("neighbor_pool.tau must be non-negative.")
+        if int(self.max_neighbors) < 1:
+            raise ConfigurationError("neighbor_pool.max_neighbors must be at least 1.")
+        object.__setattr__(self, "max_neighbors", int(self.max_neighbors))
+        object.__setattr__(self, "chebyshev_radius", max(1, int(self.chebyshev_radius)))
+
+        from felp.reweighting.topology import normalize_grid_connectivity
+
+        connectivity, radius = normalize_grid_connectivity(
+            self.grid_connectivity,
+            chebyshev_radius=self.chebyshev_radius,
+        )
+        object.__setattr__(self, "grid_connectivity", connectivity)
+        object.__setattr__(self, "chebyshev_radius", radius if connectivity == "chebyshev" else 1)
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "NeighborPoolConfig":
@@ -1021,6 +1036,8 @@ class NeighborPoolConfig:
             solver=str(payload.get("solver", payload.get("pool_solver", "blend"))),
             min_local_weight=float(payload.get("min_local_weight", 0.0)),
             max_neighbors=int(payload.get("max_neighbors", 4)),
+            grid_connectivity=str(payload.get("grid_connectivity", "chebyshev3")),
+            chebyshev_radius=int(payload.get("chebyshev_radius", 3)),
         )
 
 

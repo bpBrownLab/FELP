@@ -5,15 +5,19 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 import json
 import os
-from typing import Any
+from typing import Any, Iterable
 
 import numpy as np
 
 from felp.core import (
     ConfigurationError,
+    LaplacianConfig,
     MicrostateConfig,
     MicrostateDefinition,
+    NeighborPoolConfig,
+    ReweightingConfig,
     ReweightingError,
+    ReweightingQCConfig,
     RunConfig,
 )
 from felp.io import load_reweighting_eligible_frame_results_csv
@@ -21,14 +25,20 @@ from felp.reweighting import (
     MicrostateAtlas,
     ReweightingAggregator,
 )
+from felp.reweighting.atlas import generate_phi_psi_grid
+from felp.reweighting.engines import VALID_REWEIGHTING_METHODS
 
 _ANCESTOR_RUN_CONFIG_MAX_STEPS = 32
+# Must match data/run_reweight_lcurve.sh (--temperature-kelvin 310).
+_LCURVE_SUMMARIZE_TEMPERATURE_KELVIN = 310.0
 
 METADATA_KEYS: tuple[str, ...] = (
     "global_effective_sample_fraction",
     "overlap_coefficient",
     "target_probability_unreliable_local_support",
     "max_normalized_weight",
+    "target_probability_low_ess_mass_ess_lt_10",
+    "target_probability_low_ess_mass_ess_lt_50",
 )
 
 
@@ -101,6 +111,21 @@ def _frame_state_atlas_for_bootstrap(
     )
 
 
+def _lcurve_layout_directories(summary_dir: str) -> tuple[str, ...]:
+    """Candidate run roots for neighbor-pool summaries under ``*_reweight_lcurve``."""
+
+    parent = os.path.dirname(summary_dir)
+    base = os.path.basename(parent)
+    if "_reweight_lcurve" not in base:
+        return ()
+    grandparent = os.path.dirname(parent)
+    sibling = os.path.join(
+        grandparent,
+        base.replace("_reweight_lcurve", "_full.from_msm_bundle"),
+    )
+    return (parent, sibling)
+
+
 def bootstrap_run_directory(summary: dict[str, Any], summary_path: str) -> str:
     """Resolve the directory that contains ``run_config.json`` for this summary.
 
@@ -112,6 +137,8 @@ def bootstrap_run_directory(summary: dict[str, Any], summary_path: str) -> str:
     3. **Ancestors** of the summary folder (nested outputs often store
        ``run_summary.json`` under ``.../grid/...`` while ``run_config.json`` sits
        in the bundle root).
+    4. Sibling ``*_full.from_msm_bundle`` trees for ``*_reweight_lcurve`` outputs
+       (``run_config.json`` lives with the source MSM bundle, not the L-curve root).
     """
 
     summary_dir = os.path.dirname(os.path.abspath(summary_path))
@@ -147,6 +174,13 @@ def bootstrap_run_directory(summary: dict[str, Any], summary_path: str) -> str:
         seen.add(d)
         if os.path.isfile(os.path.join(d, "run_config.json")):
             return d
+
+    for candidate in _lcurve_layout_directories(summary_dir):
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if os.path.isfile(os.path.join(candidate, "run_config.json")):
+            return candidate
 
     tried = ", ".join(repr(p) for p in [summary_dir, *candidates] if p)
     raise ConfigurationError(
@@ -255,10 +289,186 @@ class BootstrapSetup:
     blocks: list[list[Any]]
     reference_counts: dict[str, int] | None
     sampling_metadata: dict[str, Any] | None
+    reweighting_config: ReweightingConfig
     run_dir: str
     eligible_frame_count: int
     block_count: int
     block_size: int
+
+
+def _lcurve_root_from_artifact_dir(artifact_dir: str) -> str | None:
+    if os.path.basename(artifact_dir).startswith("reweighting_"):
+        return os.path.dirname(artifact_dir)
+    return None
+
+
+def _state_ids_from_microstate_summary(summary_csv: str) -> tuple[str, ...]:
+    import csv
+
+    state_ids: list[str] = []
+    with open(summary_csv, encoding="utf-8", newline="") as handle:
+        for row in csv.DictReader(handle):
+            state_id = str(row.get("state_id", "")).strip()
+            if state_id:
+                state_ids.append(state_id)
+    if not state_ids:
+        raise ConfigurationError(
+            f"microstate_summary.csv contains no state_id rows: {summary_csv}"
+        )
+    return tuple(state_ids)
+
+
+def _grid_atlas_from_state_ids(
+    state_ids: Iterable[str],
+    *,
+    allow_unassigned: bool,
+) -> MicrostateAtlas:
+    phi_bins = 0
+    psi_bins = 0
+    for raw_state_id in state_ids:
+        parts = str(raw_state_id).split("_")
+        if len(parts) != 2:
+            raise ConfigurationError(
+                "Grid atlas bootstrap expected state_id values like 'phiBin_psiBin'; "
+                f"got {raw_state_id!r}."
+            )
+        phi_bins = max(phi_bins, int(parts[0]) + 1)
+        psi_bins = max(psi_bins, int(parts[1]) + 1)
+    if phi_bins < 1 or psi_bins < 1:
+        raise ConfigurationError("Could not infer phi/psi grid dimensions for bootstrap.")
+    return MicrostateAtlas.from_definitions(
+        definitions=tuple(generate_phi_psi_grid(phi_bins, psi_bins)),
+        allow_unassigned=allow_unassigned,
+        reference_probability_mode="raw_counts",
+    )
+
+
+def _bootstrap_atlas(
+    *,
+    method_id: str,
+    allow_unassigned: bool,
+    eligible: list[Any],
+    lcurve_root: str | None,
+) -> MicrostateAtlas:
+    """Build the atlas used for bootstrap reweighting."""
+
+    if method_id in {"neighbor_pool", "laplacian"}:
+        if lcurve_root is not None:
+            summary_csv = os.path.join(lcurve_root, "microstate_summary.csv")
+            if os.path.isfile(summary_csv):
+                return _grid_atlas_from_state_ids(
+                    _state_ids_from_microstate_summary(summary_csv),
+                    allow_unassigned=allow_unassigned,
+                )
+        return _grid_atlas_from_state_ids(
+            {frame.microstate_id for frame in eligible},
+            allow_unassigned=allow_unassigned,
+        )
+    return _frame_state_atlas_for_bootstrap(allow_unassigned, eligible)
+
+
+def reweighting_config_from_run_summary(
+    summary: dict[str, Any],
+    run_config: RunConfig,
+) -> ReweightingConfig:
+    """Match the published run_summary estimator, including fixed neighbor-pool tau."""
+
+    method = str(summary.get("reweighting_method") or "independent").strip()
+    if method not in VALID_REWEIGHTING_METHODS:
+        raise ConfigurationError(
+            f"Unsupported reweighting_method in run_summary.json: {method!r}."
+        )
+
+    if method == "neighbor_pool":
+        np_meta = summary.get("neighbor_pool")
+        if not isinstance(np_meta, dict):
+            raise ConfigurationError(
+                "Block bootstrap for neighbor_pool requires neighbor_pool metadata "
+                "in run_summary.json, including the selected L-curve tau."
+            )
+        tau = np_meta.get("tau")
+        if tau is None:
+            raise ConfigurationError(
+                "Block bootstrap for neighbor_pool requires neighbor_pool.tau in "
+                "run_summary.json (the tau selected by the L-curve scan)."
+            )
+        pool_defaults = run_config.reweighting.neighbor_pool
+        pool_config = NeighborPoolConfig(
+            tau=float(tau),
+            tau_mode=str(np_meta.get("tau_mode", pool_defaults.tau_mode)),
+            solver=str(np_meta.get("pool_solver", pool_defaults.solver)),
+            min_local_weight=pool_defaults.min_local_weight,
+            max_neighbors=pool_defaults.max_neighbors,
+            grid_connectivity=str(
+                np_meta.get("grid_connectivity", pool_defaults.grid_connectivity)
+            ),
+            chebyshev_radius=int(
+                np_meta.get("chebyshev_radius", pool_defaults.chebyshev_radius)
+            ),
+        )
+        return ReweightingConfig(methods=(method,), neighbor_pool=pool_config)
+
+    if method == "laplacian":
+        lap_defaults = run_config.reweighting.laplacian
+        lap_meta = summary.get("laplacian")
+        if isinstance(lap_meta, dict):
+            lambda_kj_mol2 = lap_meta.get(
+                "lambda_kj_mol2",
+                lap_defaults.lambda_kj_mol2,
+            )
+            lambda_scale_by_kbt = lap_meta.get(
+                "lambda_scale_by_kbt",
+                lap_defaults.lambda_scale_by_kbt,
+            )
+        else:
+            lambda_kj_mol2 = lap_defaults.lambda_kj_mol2
+            lambda_scale_by_kbt = lap_defaults.lambda_scale_by_kbt
+        laplacian_config = LaplacianConfig(
+            lambda_kj_mol2=float(lambda_kj_mol2),
+            lambda_scale_by_kbt=bool(lambda_scale_by_kbt),
+            max_iterations=lap_defaults.max_iterations,
+        )
+        return ReweightingConfig(methods=(method,), laplacian=laplacian_config)
+
+    return ReweightingConfig(methods=(method,))
+
+
+def _qc_config_from_run_summary(
+    summary: dict[str, Any],
+    fallback: ReweightingQCConfig,
+) -> ReweightingQCConfig:
+    """Rebuild QC settings recorded in run_summary.json."""
+
+    policy = summary.get("reweighting_qc_policy")
+    thresholds = summary.get("reweighting_qc_thresholds")
+    if policy is None and not isinstance(thresholds, dict):
+        return fallback
+    payload: dict[str, Any] = dict(thresholds or {})
+    if policy is not None:
+        payload["policy"] = policy
+    weight_treatment = summary.get("reweighting_weight_treatment")
+    if weight_treatment is not None:
+        payload["weight_treatment"] = weight_treatment
+    return ReweightingQCConfig.from_dict(payload)
+
+
+def _temperature_kelvin_for_bootstrap(
+    summary: dict[str, Any],
+    *,
+    lcurve_root: str | None,
+    fallback: float,
+) -> float:
+    sampling = summary.get("sampling")
+    for container in (
+        summary,
+        sampling if isinstance(sampling, dict) else {},
+    ):
+        raw = container.get("temperature_kelvin")
+        if raw is not None:
+            return float(raw)
+    if lcurve_root is not None:
+        return _LCURVE_SUMMARIZE_TEMPERATURE_KELVIN
+    return float(fallback)
 
 
 def _first_existing_child_file(parents: tuple[str, ...], name: str) -> str | None:
@@ -286,18 +496,30 @@ def prepare_bootstrap_setup(summary_path: str, block_size: int) -> BootstrapSetu
 
     with open(config_path, encoding="utf-8") as handle:
         run_config = RunConfig.from_dict(json.load(handle))
+
+    lcurve_root = _lcurve_root_from_artifact_dir(artifact_dir)
+    temperature_kelvin = _temperature_kelvin_for_bootstrap(
+        summary,
+        lcurve_root=lcurve_root,
+        fallback=run_config.energy.temperature_kelvin,
+    )
+    qc_config = _qc_config_from_run_summary(summary, run_config.reweighting_qc)
     aggregator = ReweightingAggregator(
-        run_config.energy.temperature_kelvin,
-        qc_config=run_config.reweighting_qc,
+        temperature_kelvin,
+        qc_config=qc_config,
     )
 
     frame_name = run_config.output.raw_frame_results_name
-    frame_csv = _first_existing_child_file((artifact_dir, config_dir), frame_name)
+    frame_dirs = (artifact_dir, config_dir)
+    if os.path.basename(artifact_dir).startswith("reweighting_"):
+        frame_dirs = (artifact_dir, os.path.dirname(artifact_dir), config_dir)
+    frame_csv = _first_existing_child_file(frame_dirs, frame_name)
     if not frame_csv:
         raise ConfigurationError(
             "Block bootstrap needs frame results CSV "
-            f"{frame_name!r} in the directory with run_summary.json "
-            f"({artifact_dir!r}) or with run_config.json ({config_dir!r})."
+            f"{frame_name!r} beside run_summary.json ({artifact_dir!r}), "
+            f"the parent L-curve output folder, or with run_config.json "
+            f"({config_dir!r}). Searched: {frame_dirs!r}."
         )
 
     frame_results = load_reweighting_eligible_frame_results_csv(frame_csv)
@@ -305,9 +527,15 @@ def prepare_bootstrap_setup(summary_path: str, block_size: int) -> BootstrapSetu
     if not eligible:
         raise ConfigurationError(f"No reweighting-eligible frames in {frame_csv}")
 
-    atlas = _frame_state_atlas_for_bootstrap(
-        run_config.microstates.allow_unassigned,
-        eligible,
+    reweighting_config = reweighting_config_from_run_summary(summary, run_config)
+    allow_unassigned = (
+        False if lcurve_root is not None else run_config.microstates.allow_unassigned
+    )
+    atlas = _bootstrap_atlas(
+        method_id=reweighting_config.methods[0],
+        allow_unassigned=allow_unassigned,
+        eligible=eligible,
+        lcurve_root=lcurve_root,
     )
 
     blocks = _non_overlapping_blocks(eligible, block_size)
@@ -317,6 +545,7 @@ def prepare_bootstrap_setup(summary_path: str, block_size: int) -> BootstrapSetu
         blocks=blocks,
         reference_counts=None,
         sampling_metadata=None,
+        reweighting_config=reweighting_config,
         run_dir=artifact_dir,
         eligible_frame_count=len(eligible),
         block_count=len(blocks),
@@ -367,6 +596,7 @@ def bootstrap_overlap_metrics(
                 _atlas_empirical_priors_for_bootstrap(setup.atlas),
                 reference_counts=None,
                 sampling_metadata=None,
+                reweighting_config=setup.reweighting_config,
             )
             meta = results[0].metadata if results else {}
             for k, key in enumerate(METADATA_KEYS):

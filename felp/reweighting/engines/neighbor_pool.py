@@ -31,6 +31,20 @@ _ESTIMATOR_VARIATIONAL = (
 )
 
 
+def _topology_metadata(prep: ReweightingPrep) -> dict[str, object]:
+    metadata: dict[str, object] = {
+        "topology_source": prep.topology.source if prep.topology is not None else None,
+        "topology_warnings": (
+            list(prep.topology.warnings) if prep.topology is not None else []
+        ),
+    }
+    if prep.topology is not None and prep.topology.source != "knn":
+        metadata["grid_connectivity"] = prep.topology.connectivity
+        if prep.topology.chebyshev_radius is not None:
+            metadata["chebyshev_radius"] = prep.topology.chebyshev_radius
+    return metadata
+
+
 def _pool_factor(
     state_id: str,
     prep: ReweightingPrep,
@@ -597,12 +611,7 @@ def _aggregate_blend(
         "neighbor_pool": {
             "pool_solver": "blend",
             **tau_metadata,
-            "topology_source": (
-                prep.topology.source if prep.topology is not None else None
-            ),
-            "topology_warnings": (
-                list(prep.topology.warnings) if prep.topology is not None else []
-            ),
+            **_topology_metadata(prep),
             "high_pooling_low_local_ess_state_ids": high_pooling_low_ess[:20],
         }
     }
@@ -687,12 +696,7 @@ def _aggregate_variational(
             "pool_solver": "variational",
             **tau_metadata,
             **solve_metadata,
-            "topology_source": (
-                prep.topology.source if prep.topology is not None else None
-            ),
-            "topology_warnings": (
-                list(prep.topology.warnings) if prep.topology is not None else []
-            ),
+            **_topology_metadata(prep),
             "high_pooling_low_local_ess_state_ids": high_pooling_low_ess[:20],
         }
     }

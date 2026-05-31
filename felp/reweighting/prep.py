@@ -77,6 +77,8 @@ def build_reweighting_prep(
     reference_counts: dict[str, int] | None = None,
     workers: int = 1,
     max_neighbors: int = 4,
+    grid_connectivity: str = "chebyshev3",
+    chebyshev_radius: int = 3,
 ) -> ReweightingPrep:
     """Run grouping, priors, QC, and per-state weight construction once."""
 
@@ -225,7 +227,12 @@ def build_reweighting_prep(
             psis_weight_metadata=psis_metadata,
         )
 
-    topology = build_grid_topology(atlas, max_neighbors=max_neighbors)
+    topology = build_grid_topology(
+        atlas,
+        max_neighbors=max_neighbors,
+        grid_connectivity=grid_connectivity,
+        chebyshev_radius=chebyshev_radius,
+    )
     return ReweightingPrep(
         atlas=atlas,
         reference_probabilities=reference_probabilities,

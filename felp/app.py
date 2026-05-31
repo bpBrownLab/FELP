@@ -29,6 +29,7 @@ from felp.cli import (
 from felp.core import ConfigurationError, OutputConfig
 from felp.io import ResultsWriter, TrajectoryLoader, load_frame_results_csv
 from felp.msm import PyEMMAPipeline, export_state_samples, load_bundle
+from felp.msm.repartition import repartition_frame_results_to_msm_bundle
 from felp.parallel import FrameExecutor
 from felp.plotting import (
     generate_composite_figure,
@@ -528,6 +529,10 @@ def _repartition_frame_results(
         if fast is not None:
             return fast
 
+    fast = repartition_frame_results_to_msm_bundle(frame_results, atlas)
+    if fast is not None:
+        return fast
+
     fast = _repartition_frame_results_to_complete_2d_grid(frame_results, atlas)
     if fast is not None:
         return fast
@@ -836,9 +841,9 @@ def _build_auto_atlas_from_frame_results(
             continue
         if cv_names is None:
             names = tuple(measurements)
-            if len(names) != 2:
+            if not names or len(names) > 3:
                 raise ConfigurationError(
-                    "Repartition with auto microstates requires exactly 2 CVs in the "
+                    "Repartition with auto microstates requires 1–3 CVs in the "
                     f"stored frame results, but found {len(names)}: "
                     f"{', '.join(names) or '<none>'}."
                 )

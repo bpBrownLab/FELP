@@ -350,6 +350,12 @@ def build_protocol_summary(
             "neighbor_pool_solver": config.reweighting.neighbor_pool.solver,
             "neighbor_pool_tau": config.reweighting.neighbor_pool.tau,
             "neighbor_pool_tau_mode": config.reweighting.neighbor_pool.tau_mode,
+            "neighbor_pool_grid_connectivity": (
+                config.reweighting.neighbor_pool.grid_connectivity
+            ),
+            "neighbor_pool_chebyshev_radius": (
+                config.reweighting.neighbor_pool.chebyshev_radius
+            ),
             "laplacian_lambda_kj_mol2": config.reweighting.laplacian.lambda_kj_mol2,
             "laplacian_lambda_scale_by_kbt": (
                 config.reweighting.laplacian.lambda_scale_by_kbt

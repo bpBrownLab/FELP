@@ -683,6 +683,107 @@ def test_generate_felp_plots_supports_custom_cv_axes(tmp_path: Path) -> None:
     assert not (tmp_path / "felp_plots" / "reference_probability_projection.png").is_file()
 
 
+def test_generate_felp_plots_supports_1d_cv_axes(tmp_path: Path) -> None:
+    summary_csv = tmp_path / "microstate_summary.csv"
+    frame_csv = tmp_path / "frame_results.csv"
+
+    centers = [-120.0, -60.0, 0.0, 60.0, 120.0]
+    with open(summary_csv, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "state_id",
+                "label",
+                "plot_x",
+                "plot_y",
+                "frame_count",
+                "reference_probability",
+                "target_probability",
+                "free_energy_kj_mol",
+                "metadata",
+            ],
+        )
+        writer.writeheader()
+        for index, center in enumerate(centers):
+            writer.writerow(
+                {
+                    "state_id": f"psi_114_{index:02d}",
+                    "label": f"psi_114_{index:02d}",
+                    "plot_x": center,
+                    "plot_y": 0.0,
+                    "frame_count": 10,
+                    "reference_probability": 0.2,
+                    "target_probability": 0.2,
+                    "free_energy_kj_mol": float(index),
+                    "metadata": (
+                        '{"reference_probability_source":"raw_counts",'
+                        f'"cv_centers":{{"psi_114":{center}}},'
+                        f'"cv_ranges":{{"psi_114":[{center - 5.0},{center + 5.0}]}}'
+                        "}"
+                    ),
+                }
+            )
+
+    writer = ResultsWriter(OutputConfig(output_dir=str(tmp_path / "frame_out")))
+    writer.prepare_output_dir()
+    writer.write_frame_results(
+        [
+            FrameResult(
+                frame_index=index,
+                stride_number=index,
+                microstate_id=f"psi_114_{index % len(centers):02d}",
+                microstate_label=f"psi_114_{index % len(centers):02d}",
+                phi_degrees=None,
+                psi_degrees=None,
+                reference_energy_kj_mol=0.0,
+                perturbed_energy_kj_mol=delta_u,
+                delta_u_kj_mol=delta_u,
+                reference_relaxed_phi_degrees=None,
+                reference_relaxed_psi_degrees=None,
+                perturbed_relaxed_phi_degrees=None,
+                perturbed_relaxed_psi_degrees=None,
+                metadata={"assignment_measurements": {"psi_114": center + offset}},
+            )
+            for index, (center, offset, delta_u) in enumerate(
+                (
+                    (-120.0, 0.5, -0.2),
+                    (-60.0, -0.3, 0.1),
+                    (0.0, 0.2, 0.3),
+                    (60.0, -0.4, -0.4),
+                    (120.0, 0.1, 0.0),
+                    (-118.0, 0.0, 0.2),
+                    (-62.0, 0.3, -0.1),
+                )
+            )
+        ]
+    )
+    frame_csv.write_text(
+        Path(writer.raw_frame_results_path).read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+
+    summary = generate_felp_plots(
+        FELPPlotConfig(
+            microstate_summary_csv=str(summary_csv),
+            raw_frame_results_csv=str(frame_csv),
+            output_dir=str(tmp_path / "felp_plots"),
+            fel_bins=20,
+        )
+    )
+
+    assert summary["cv_axes"] == ["psi_114"]
+    assert summary["cv_plot_dimensionality"] == 1
+    assert summary["cv_frame_projection_available"] is True
+    plot_dir = tmp_path / "felp_plots"
+    assert (plot_dir / "reference_psi_114_state_probability_landscape.png").is_file()
+    assert (plot_dir / "reweighted_psi_114_state_free_energy_landscape.png").is_file()
+    assert (plot_dir / "reference_psi_114_projected_probability.png").is_file()
+    assert (plot_dir / "reference_psi_114_free_energy_landscape.png").is_file()
+    assert (plot_dir / "kl_psi_114_projected_fel_contributions.png").is_file()
+    assert (plot_dir / "reference_discrete_microstate_free_energy_psi_114.png").is_file()
+    assert not (plot_dir / "reference_probability_projection.png").is_file()
+
+
 def test_frame_projection_filters_qc_excluded_frames() -> None:
     rows = [
         {

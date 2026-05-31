@@ -48,6 +48,11 @@ class MSMFitConfig:
     k_clusters: int = 100
     k_iter: int = 10
     regspace_dmin: float = 0.5
+    grid_bins: tuple[int, ...] | None = None
+    grid_target_frames_per_state: int = 100
+    grid_min_bins_per_axis: int = 3
+    grid_max_bins_per_axis: int = 64
+    grid_max_total_states: int = 2500
     msm_lag: int = 1
     metastable_states: Optional[int] = None
     hmm_states: Optional[int] = None
@@ -114,7 +119,7 @@ class MSMFitConfig:
             raise ConfigurationError("reducer_lag must be at least 1.")
         if not 0.0 < self.variance_cutoff <= 1.0:
             raise ConfigurationError("variance_cutoff must be in the interval (0, 1].")
-        if self.clustering_method not in {"kmeans", "regspace"}:
+        if self.clustering_method not in {"kmeans", "regspace", "grid"}:
             raise ConfigurationError(
                 f"Unsupported clustering method: {self.clustering_method}"
             )
@@ -124,6 +129,29 @@ class MSMFitConfig:
             raise ConfigurationError("k_iter must be at least 1.")
         if self.regspace_dmin <= 0.0:
             raise ConfigurationError("regspace_dmin must be positive.")
+        if self.clustering_method == "grid":
+            if self.reducer != "none":
+                raise ConfigurationError(
+                    "clustering_method=grid requires reducer=none so bins are defined "
+                    "in the raw feature/CV space."
+                )
+            if self.grid_bins is not None:
+                if not self.grid_bins:
+                    raise ConfigurationError(
+                        "grid_bins must contain at least one positive integer per feature axis."
+                    )
+                if any(int(value) < 1 for value in self.grid_bins):
+                    raise ConfigurationError("grid_bins values must be at least 1.")
+            if self.grid_target_frames_per_state < 1:
+                raise ConfigurationError("grid_target_frames_per_state must be at least 1.")
+            if self.grid_min_bins_per_axis < 1:
+                raise ConfigurationError("grid_min_bins_per_axis must be at least 1.")
+            if self.grid_max_bins_per_axis < self.grid_min_bins_per_axis:
+                raise ConfigurationError(
+                    "grid_max_bins_per_axis must be >= grid_min_bins_per_axis."
+                )
+            if self.grid_max_total_states < 1:
+                raise ConfigurationError("grid_max_total_states must be at least 1.")
         if self.msm_lag < 1:
             raise ConfigurationError("msm_lag must be at least 1.")
         if self.metastable_states is not None and self.metastable_states < 2:

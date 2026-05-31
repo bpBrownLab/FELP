@@ -698,6 +698,144 @@ def save_pcolormesh_landscape(
     return path
 
 
+def compute_weighted_histogram1d(
+    x: np.ndarray,
+    bins: int,
+    weights: np.ndarray | None = None,
+    range: tuple[float, float] | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute a 1D histogram and normalize it to a probability profile."""
+
+    histogram, edges = np.histogram(x, bins=bins, weights=weights, range=range)
+    total = float(histogram.sum())
+    if total > 0.0:
+        histogram = histogram / total
+    return histogram, edges
+
+
+def save_1d_profile_landscape(
+    plt,
+    path: str,
+    y: np.ndarray,
+    x_edges: np.ndarray,
+    *,
+    title: str,
+    colorbar_label: str,
+    xlabel: str,
+    fel_max_energy_kj_mol: float | None = None,
+    colormap: str | None = None,
+    symmetric_zero_center: bool = False,
+    colorbar_vmin: float | None = None,
+    colorbar_vmax: float | None = None,
+    plot_style: str = "default",
+) -> str:
+    """Render a publication-quality 1D CV profile as a line plot."""
+
+    from matplotlib.ticker import AutoMinorLocator
+
+    _SINGLE_COL_WIDTH = 3.5
+    _DOUBLE_COL_WIDTH = 7.0
+    _PUB_FONT_SIZE = 8
+    _PUB_LABEL_SIZE = 9
+    _PUB_TITLE_SIZE = 10
+    _PUB_LINE_WIDTH = 1.4
+    _PUB_DPI = 300
+
+    x_edges = np.asarray(x_edges, dtype=float)
+    x_centers = 0.5 * (x_edges[:-1] + x_edges[1:])
+    y_arr = np.asarray(y, dtype=float)
+    is_energy = fel_max_energy_kj_mol is not None or symmetric_zero_center
+
+    with plt.rc_context(
+        {
+            "font.size": _PUB_FONT_SIZE,
+            "axes.labelsize": _PUB_LABEL_SIZE,
+            "axes.titlesize": _PUB_TITLE_SIZE,
+            "xtick.labelsize": _PUB_FONT_SIZE,
+            "ytick.labelsize": _PUB_FONT_SIZE,
+            "xtick.direction": "in",
+            "ytick.direction": "in",
+            "xtick.top": True,
+            "ytick.right": True,
+            "axes.linewidth": 0.8,
+            "lines.linewidth": _PUB_LINE_WIDTH,
+            "figure.dpi": _PUB_DPI,
+            "savefig.dpi": _PUB_DPI,
+            "savefig.bbox": "tight",
+            "savefig.pad_inches": 0.05,
+        }
+    ):
+        fig, ax = plt.subplots(1, 1, figsize=(_DOUBLE_COL_WIDTH, 2.8))
+        ax.set_facecolor("white")
+
+        if is_energy:
+            finite_mask = np.isfinite(y_arr)
+            y_plot = np.where(finite_mask, y_arr, np.nan)
+            if fel_max_energy_kj_mol is not None and not symmetric_zero_center:
+                cap = float(fel_max_energy_kj_mol)
+                y_plot = np.where(y_plot <= cap, y_plot, np.nan)
+            ax.fill_between(
+                x_centers,
+                np.nanmin(y_plot[finite_mask]) if finite_mask.any() else 0.0,
+                y_plot,
+                alpha=0.20,
+                color="0.45",
+                step="mid",
+                linewidth=0.0,
+            )
+            ax.step(
+                x_centers,
+                y_plot,
+                where="mid",
+                color="0.15",
+                linewidth=_PUB_LINE_WIDTH,
+                zorder=3,
+            )
+            ax.set_ylabel(colorbar_label)
+            if fel_max_energy_kj_mol is not None and not symmetric_zero_center:
+                ax.set_ylim(bottom=-0.15 * cap, top=cap * 1.05)
+                ax.axhline(cap, color="0.6", linewidth=0.6, linestyle="--", zorder=1)
+            elif symmetric_zero_center:
+                if colorbar_vmin is not None and colorbar_vmax is not None:
+                    ax.set_ylim(float(colorbar_vmin), float(colorbar_vmax))
+                else:
+                    flat = y_arr[np.isfinite(y_arr)]
+                    if flat.size:
+                        absmax = float(np.max(np.abs(flat))) * 1.1
+                        ax.set_ylim(-absmax, absmax)
+                ax.axhline(0.0, color="0.6", linewidth=0.6, linestyle="-", zorder=1)
+        else:
+            ax.fill_between(
+                x_centers,
+                0.0,
+                y_arr,
+                step="mid",
+                alpha=0.30,
+                color="#4C72B0",
+                linewidth=0.0,
+            )
+            ax.step(
+                x_centers,
+                y_arr,
+                where="mid",
+                color="#1F3A5F",
+                linewidth=_PUB_LINE_WIDTH,
+                zorder=3,
+            )
+            ax.set_ylabel(colorbar_label)
+            ax.set_ylim(bottom=0.0)
+
+        ax.set_xlabel(xlabel)
+        ax.set_xlim(float(x_edges[0]), float(x_edges[-1]))
+        ax.xaxis.set_minor_locator(AutoMinorLocator())
+        ax.yaxis.set_minor_locator(AutoMinorLocator())
+        ax.set_title(title, pad=6)
+        fig.tight_layout()
+        fig.savefig(path)
+        plt.close(fig)
+    return path
+
+
 def finite_top_indices(values: Iterable[float], count: int) -> np.ndarray:
     """Return indices of the largest finite absolute values."""
 

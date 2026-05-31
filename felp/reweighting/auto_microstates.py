@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import itertools
 import json
 import math
 import os
@@ -15,6 +16,8 @@ import numpy as np
 from felp.conversion import StructureConversionService
 from felp.core import ConfigurationError, RunConfig, SnapshotJob
 from felp.restraints import BackboneDihedralCVProtocol
+
+from felp.reweighting.grid_microstates import _cap_joint_bin_count as _cap_nd_bin_counts
 
 from .coordinate_cv import coordinate_cv_extractors
 
@@ -30,7 +33,7 @@ class AutoMicrostateFile:
     """Description of an automatically generated microstate definition file."""
 
     path: str
-    cv_names: tuple[str, str]
+    cv_names: tuple[str, ...]
     state_count: int
     frame_count: int
     metadata: dict[str, Any]
@@ -129,29 +132,6 @@ def _freedman_diaconis_bin_count(
     return min(int(max_bins), bins)
 
 
-def _cap_joint_bin_count(
-    x_bins: int,
-    y_bins: int,
-    frame_count: int,
-    *,
-    target_frames_per_state: int,
-    max_total_states: int,
-) -> tuple[int, int]:
-    max_states_by_support = max(1, frame_count // int(target_frames_per_state))
-    max_states = max(4, min(int(max_total_states), max_states_by_support))
-    x_bins = max(1, int(x_bins))
-    y_bins = max(1, int(y_bins))
-
-    while x_bins * y_bins > max_states and (x_bins > 1 or y_bins > 1):
-        if x_bins >= y_bins and x_bins > 1:
-            x_bins -= 1
-        elif y_bins > 1:
-            y_bins -= 1
-        else:
-            break
-    return x_bins, y_bins
-
-
 def _edges_for_values(values: np.ndarray, bin_count: int) -> np.ndarray:
     finite = values[np.isfinite(values)]
     if finite.size == 0:
@@ -185,84 +165,93 @@ def _axis_stats(values: np.ndarray, bins: int, edges: np.ndarray) -> dict[str, A
 def build_auto_microstate_payload(
     *,
     cv_values: dict[str, np.ndarray],
-    cv_names: tuple[str, str],
+    cv_names: tuple[str, ...],
     target_frames_per_state: int = _DEFAULT_TARGET_FRAMES_PER_STATE,
     min_bins_per_axis: int = _DEFAULT_MIN_BINS_PER_NONCONSTANT_AXIS,
     max_bins_per_axis: int = _DEFAULT_MAX_BINS_PER_AXIS,
     max_total_states: int = _DEFAULT_MAX_TOTAL_STATES,
 ) -> dict[str, Any]:
-    """Build reusable microstate JSON from observed 2D CV statistics."""
+    """Build reusable microstate JSON from observed 1D–3D CV statistics."""
+
+    if not cv_names or len(cv_names) > 3:
+        raise ConfigurationError(
+            "Automatic microstate generation requires 1–3 configured CVs, "
+            f"but found {len(cv_names)}: {', '.join(cv_names) or '<none>'}."
+        )
 
     target_frames_per_state = max(1, int(target_frames_per_state))
     min_bins_per_axis = max(1, int(min_bins_per_axis))
     max_bins_per_axis = max(min_bins_per_axis, int(max_bins_per_axis))
     max_total_states = max(1, int(max_total_states))
 
-    x_name, y_name = cv_names
-    x_values = cv_values[x_name]
-    y_values = cv_values[y_name]
-    finite_mask = np.isfinite(x_values) & np.isfinite(y_values)
+    arrays = [np.asarray(cv_values[name], dtype=float) for name in cv_names]
+    finite_mask = np.ones(arrays[0].shape[0], dtype=bool)
+    for array in arrays:
+        if array.shape != arrays[0].shape:
+            raise ConfigurationError(
+                "All configured CV arrays must have the same length for auto microstates."
+            )
+        finite_mask &= np.isfinite(array)
     if not finite_mask.any():
         raise ConfigurationError(
             "Cannot auto-generate microstates because no frames have finite values "
-            f"for both {x_name!r} and {y_name!r}."
+            f"for all configured CVs: {', '.join(cv_names)}."
         )
 
-    x_values = x_values[finite_mask]
-    y_values = y_values[finite_mask]
-    x_bins = _freedman_diaconis_bin_count(
-        x_values,
-        min_bins=min_bins_per_axis,
-        max_bins=max_bins_per_axis,
-    )
-    y_bins = _freedman_diaconis_bin_count(
-        y_values,
-        min_bins=min_bins_per_axis,
-        max_bins=max_bins_per_axis,
-    )
-    uncapped_x_bins = int(x_bins)
-    uncapped_y_bins = int(y_bins)
-    x_bins, y_bins = _cap_joint_bin_count(
-        x_bins,
-        y_bins,
+    filtered = [array[finite_mask] for array in arrays]
+    uncapped_bin_counts: dict[str, int] = {}
+    bin_counts: list[int] = []
+    for name, values in zip(cv_names, filtered, strict=True):
+        count = _freedman_diaconis_bin_count(
+            values,
+            min_bins=min_bins_per_axis,
+            max_bins=max_bins_per_axis,
+        )
+        uncapped_bin_counts[name] = int(count)
+        bin_counts.append(int(count))
+
+    capped_bin_counts = _cap_nd_bin_counts(
+        bin_counts,
         int(finite_mask.sum()),
         target_frames_per_state=target_frames_per_state,
         max_total_states=max_total_states,
     )
-    x_edges = _edges_for_values(x_values, x_bins)
-    y_edges = _edges_for_values(y_values, y_bins)
+    edges_list = [
+        _edges_for_values(values, bin_count)
+        for values, bin_count in zip(filtered, capped_bin_counts, strict=True)
+    ]
 
-    x_token = _safe_token(x_name)
-    y_token = _safe_token(y_name)
     states: list[dict[str, Any]] = []
-    for x_index in range(len(x_edges) - 1):
-        for y_index in range(len(y_edges) - 1):
-            x_lower = float(x_edges[x_index])
-            x_upper = float(x_edges[x_index + 1])
-            y_lower = float(y_edges[y_index])
-            y_upper = float(y_edges[y_index + 1])
-            state_id = f"{x_token}_{x_index:02d}_{y_token}_{y_index:02d}"
-            states.append(
-                {
-                    "state_id": state_id,
-                    "label": state_id,
-                    "cv_ranges": {
-                        x_name: [x_lower, x_upper],
-                        y_name: [y_lower, y_upper],
-                    },
-                    "plot_x": (x_lower + x_upper) / 2.0,
-                    "plot_y": (y_lower + y_upper) / 2.0,
-                    "metadata": {
-                        "auto_microstate": True,
-                        "bin_indices": {x_name: x_index, y_name: y_index},
-                    },
-                }
-            )
+    index_ranges = [range(len(edges) - 1) for edges in edges_list]
+    for indices in itertools.product(*index_ranges):
+        cv_ranges: dict[str, list[float]] = {}
+        bin_indices: dict[str, int] = {}
+        centers: list[float] = []
+        state_id_parts: list[str] = []
+        for name, index, edges in zip(cv_names, indices, edges_list, strict=True):
+            lower = float(edges[index])
+            upper = float(edges[index + 1])
+            cv_ranges[name] = [lower, upper]
+            bin_indices[name] = int(index)
+            centers.append((lower + upper) / 2.0)
+            state_id_parts.extend([_safe_token(name), f"{int(index):02d}"])
+        state: dict[str, Any] = {
+            "state_id": "_".join(state_id_parts),
+            "label": "_".join(state_id_parts),
+            "cv_ranges": cv_ranges,
+            "plot_x": centers[0],
+            "plot_y": centers[1] if len(centers) > 1 else 0.0,
+            "metadata": {
+                "auto_microstate": True,
+                "bin_indices": bin_indices,
+            },
+        }
+        states.append(state)
 
     metadata = {
         "generator": "felp.auto_microstates",
         "version": _AUTO_MICROSTATE_VERSION,
-        "cv_names": [x_name, y_name],
+        "cv_names": list(cv_names),
         "frame_count": int(finite_mask.sum()),
         "state_count": len(states),
         "policy": {
@@ -274,15 +263,12 @@ def build_auto_microstate_payload(
                 max(1, int(finite_mask.sum()) // target_frames_per_state)
             ),
             "max_bins_per_axis": max_bins_per_axis,
-            "uncapped_bin_counts": {
-                x_name: uncapped_x_bins,
-                y_name: uncapped_y_bins,
-            },
+            "uncapped_bin_counts": uncapped_bin_counts,
             "complete_joint_grid": True,
         },
         "axes": {
-            x_name: _axis_stats(x_values, len(x_edges) - 1, x_edges),
-            y_name: _axis_stats(y_values, len(y_edges) - 1, y_edges),
+            name: _axis_stats(values, len(edges) - 1, edges)
+            for name, values, edges in zip(cv_names, filtered, edges_list, strict=True)
         },
     }
     return {"metadata": metadata, "states": states}
@@ -297,10 +283,10 @@ def write_auto_microstate_file(
     """Measure configured CVs and write an auto-generated microstate JSON file."""
 
     cv_names = _configured_cv_names(config)
-    if len(cv_names) != 2:
+    if not cv_names or len(cv_names) > 3:
         raise ConfigurationError(
-            "Automatic microstate generation currently requires exactly two configured "
-            f"CVs, but found {len(cv_names)}: {', '.join(cv_names) or '<none>'}."
+            "Automatic microstate generation requires 1–3 configured CVs, "
+            f"but found {len(cv_names)}: {', '.join(cv_names) or '<none>'}."
         )
 
     cv_values = _measure_configured_cvs(jobs, config)
@@ -316,7 +302,7 @@ def write_auto_microstate_file(
     metadata = dict(payload["metadata"])
     return AutoMicrostateFile(
         path=output_path,
-        cv_names=tuple(cv_names),  # type: ignore[arg-type]
+        cv_names=tuple(cv_names),
         state_count=len(payload["states"]),
         frame_count=int(metadata["frame_count"]),
         metadata=metadata,

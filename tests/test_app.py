@@ -6,7 +6,11 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from felp.app import _repartition_frame_results_to_complete_2d_grid, summarize_results
+from felp.app import (
+    _repartition_frame_results_to_complete_2d_grid,
+    summarize_results,
+)
+from felp.msm.repartition import repartition_frame_results_to_msm_bundle
 from felp.cli.parser import build_parser
 from felp.core import FrameResult, MicrostateConfig, OutputConfig
 from felp.io import ResultsWriter, load_frame_results_csv
@@ -282,3 +286,184 @@ def test_fast_auto_grid_repartition_matches_atlas_assignment(tmp_path: Path) -> 
         for frame in frames
     ]
     assert [frame.microstate_id for frame in repartitioned] == expected_state_ids
+
+
+def test_msm_bundle_repartition_assigns_distance_frames(tmp_path: Path) -> None:
+    from felp.core import MicrostateConfig
+    from felp.msm import MSMBundleManifest, save_bundle
+    from felp.core import MicrostateDefinition
+
+    bundle_dir = tmp_path / "bundle"
+    manifest = MSMBundleManifest(
+        topology_file=str(tmp_path / "topology.pdb"),
+        trajectory_groups=((str(tmp_path / "traj.xtc"),),),
+        stride=1,
+        dt_traj="1 step",
+        lag_time=1,
+        feature_spec={
+            "operations": [
+                {
+                    "kind": "distances",
+                    "labels": ["ends", "turn"],
+                    "pairs": [[0, 1], [2, 3]],
+                }
+            ]
+        },
+        reducer={"kind": "none"},
+        clustering={"method": "kmeans"},
+        model={"discrete_msm": {"active_state_fraction": 1.0}},
+        state_definitions={
+            "cluster": (
+                MicrostateDefinition(
+                    state_id="0",
+                    label="cluster_0",
+                    reference_probability=0.5,
+                    plot_x=-1.0,
+                    plot_y=0.5,
+                    state_level="cluster",
+                ),
+                MicrostateDefinition(
+                    state_id="1",
+                    label="cluster_1",
+                    reference_probability=0.5,
+                    plot_x=1.0,
+                    plot_y=-0.5,
+                    state_level="cluster",
+                ),
+            )
+        },
+    )
+    (tmp_path / "topology.pdb").write_text("placeholder\n", encoding="utf-8")
+    (tmp_path / "traj.xtc").write_text("placeholder\n", encoding="utf-8")
+    save_bundle(
+        bundle_dir=str(bundle_dir),
+        manifest=manifest,
+        assignments={"cluster": (np.array([0, 1]),)},
+        frame_source_indices=(np.array([0, 1]),),
+        embedding={
+            "cluster_centers": np.array([[-1.0, 0.5], [1.0, -0.5]]),
+            "feature_centers": np.array([[-1.0, 0.5], [1.0, -0.5]]),
+        },
+    )
+    atlas = MicrostateAtlas.from_config(
+        MicrostateConfig(
+            source="msm_bundle",
+            msm_bundle_dir=str(bundle_dir),
+            state_level="cluster",
+            reference_probability_mode="loaded",
+        )
+    )
+    frames = [
+        _distance_frame_result(0, ends=-10.0, turn=5.0),
+        _distance_frame_result(1, ends=10.0, turn=-5.0),
+    ]
+
+    repartitioned = repartition_frame_results_to_msm_bundle(frames, atlas)
+
+    assert repartitioned is not None
+    assert [frame.microstate_id for frame in repartitioned] == ["0", "1"]
+
+
+def test_summarize_repartition_msm_bundle(tmp_path: Path) -> None:
+    from felp.core import MicrostateConfig, MicrostateDefinition
+    from felp.msm import MSMBundleManifest, save_bundle
+
+    bundle_dir = tmp_path / "bundle"
+    manifest = MSMBundleManifest(
+        topology_file=str(tmp_path / "topology.pdb"),
+        trajectory_groups=((str(tmp_path / "traj.xtc"),),),
+        stride=1,
+        dt_traj="1 step",
+        lag_time=1,
+        feature_spec={
+            "operations": [
+                {
+                    "kind": "distances",
+                    "labels": ["ends", "turn"],
+                    "pairs": [[0, 1], [2, 3]],
+                }
+            ]
+        },
+        reducer={"kind": "none"},
+        clustering={"method": "kmeans"},
+        model={"discrete_msm": {"active_state_fraction": 1.0}},
+        state_definitions={
+            "cluster": (
+                MicrostateDefinition(
+                    state_id="0",
+                    label="cluster_0",
+                    reference_probability=0.5,
+                    plot_x=-1.0,
+                    plot_y=0.5,
+                    state_level="cluster",
+                ),
+                MicrostateDefinition(
+                    state_id="1",
+                    label="cluster_1",
+                    reference_probability=0.5,
+                    plot_x=1.0,
+                    plot_y=-0.5,
+                    state_level="cluster",
+                ),
+            )
+        },
+    )
+    (tmp_path / "topology.pdb").write_text("placeholder\n", encoding="utf-8")
+    (tmp_path / "traj.xtc").write_text("placeholder\n", encoding="utf-8")
+    save_bundle(
+        bundle_dir=str(bundle_dir),
+        manifest=manifest,
+        assignments={"cluster": (np.array([0, 1]),)},
+        frame_source_indices=(np.array([0, 1]),),
+        embedding={
+            "cluster_centers": np.array([[-1.0, 0.5], [1.0, -0.5]]),
+            "feature_centers": np.array([[-1.0, 0.5], [1.0, -0.5]]),
+        },
+    )
+
+    raw_writer = ResultsWriter(OutputConfig(output_dir=str(tmp_path / "raw")))
+    raw_writer.prepare_output_dir()
+    raw_writer.write_frame_results(
+        [
+            FrameResult(
+                **{
+                    **_distance_frame_result(0, ends=-10.0, turn=5.0).to_row(),
+                    "delta_u_kj_mol": 0.0,
+                }
+            ),
+            FrameResult(
+                **{
+                    **_distance_frame_result(1, ends=10.0, turn=-5.0).to_row(),
+                    "delta_u_kj_mol": 1.0,
+                }
+            ),
+        ]
+    )
+
+    parser = build_parser()
+    output_dir = tmp_path / "summary"
+    namespace = parser.parse_args(
+        [
+            "summarize",
+            "--raw-frame-results",
+            raw_writer.raw_frame_results_path,
+            "--output-dir",
+            str(output_dir),
+            "--repartition",
+            "--microstate-source",
+            "msm_bundle",
+            "--msm-bundle-dir",
+            str(bundle_dir),
+            "--state-level",
+            "cluster",
+            "--prior-probability-mode",
+            "loaded",
+            "--reweighting-qc-policy",
+            "none",
+        ]
+    )
+
+    summarize_results(namespace)
+
+    written_frames = load_frame_results_csv(str(output_dir / "frame_results.csv"))
+    assert [result.microstate_id for result in written_frames] == ["0", "1"]

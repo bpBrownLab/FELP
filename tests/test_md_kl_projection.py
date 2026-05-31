@@ -12,8 +12,28 @@ from felp.core import FrameResult
 from felp.plotting.md_kl import (
     MDKLPlotConfig,
     _load_frame_projected_reweighted_surface,
+    _resolve_mdtraj_atom_index,
     generate_md_kl_plot,
 )
+
+
+class _FakeAtom:
+    def __init__(self, index: int, name: str) -> None:
+        self.index = index
+        self.name = name
+
+
+class _FakeResidue:
+    def __init__(self, index: int, res_seq: int, name: str, atoms: tuple[_FakeAtom, ...]) -> None:
+        self.index = index
+        self.resSeq = res_seq
+        self.name = name
+        self.atoms = atoms
+
+
+class _FakeTopology:
+    def __init__(self, residues: tuple[_FakeResidue, ...]) -> None:
+        self.residues = residues
 
 
 def _frame(frame_index: int, state_id: str, *, phi: float, psi: float, delta_u: float) -> FrameResult:
@@ -32,6 +52,20 @@ def _frame(frame_index: int, state_id: str, *, phi: float, psi: float, delta_u: 
         perturbed_relaxed_phi_degrees=phi,
         perturbed_relaxed_psi_degrees=psi,
     )
+
+
+def test_resolve_mdtraj_atom_index_uses_pose_numbering_before_resseq() -> None:
+    topology = _FakeTopology(
+        (
+            _FakeResidue(0, 0, "GLY", (_FakeAtom(4, "CA"),)),
+            _FakeResidue(1, 1, "TYR", (_FakeAtom(11, "CA"),)),
+            _FakeResidue(2, 2, "ASP", (_FakeAtom(32, "CA"),)),
+        )
+    )
+
+    assert _resolve_mdtraj_atom_index(topology, 1, "CA") == 4
+    assert _resolve_mdtraj_atom_index(topology, 2, "CA") == 11
+    assert _resolve_mdtraj_atom_index(topology, 3, "CA") == 32
 
 
 def test_md_kl_frame_projection_passes_neighbor_pool_factors(tmp_path: Path) -> None:
@@ -136,7 +170,7 @@ def test_md_kl_prefers_state_summary_probabilities_for_kl(tmp_path: Path) -> Non
         "felp.plotting.md_kl._load_frame_projected_reweighted_surface",
         side_effect=_reject_frame_projection,
     ), patch(
-        "felp.plotting.md_kl._load_md_phi_psi_degrees",
+        "felp.plotting.md_kl._load_md_projection_values",
         return_value=(md_phi, md_psi),
     ):
         result = generate_md_kl_plot(config)

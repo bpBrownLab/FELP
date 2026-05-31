@@ -24,7 +24,15 @@ def _write_bundle(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
         stride=2,
         dt_traj="1 step",
         lag_time=5,
-        feature_spec={"operations": []},
+        feature_spec={
+            "operations": [
+                {
+                    "kind": "distances",
+                    "labels": ["ends", "turn"],
+                    "pairs": [[0, 1], [2, 3]],
+                }
+            ]
+        },
         reducer={"kind": "none"},
         clustering={"method": "kmeans"},
         model={"discrete_msm": {"active_state_fraction": 1.0}},
@@ -76,7 +84,11 @@ def _write_bundle(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
             "metastable": (np.array([0, 0]), np.array([1])),
         },
         frame_source_indices=(np.array([0, 2]), np.array([0])),
-        embedding={"cluster_centers": np.array([[-1.0, 0.5], [1.0, -0.5]])},
+        embedding={
+            "cluster_centers": np.array([[-1.0, 0.5], [1.0, -0.5]]),
+            "feature_centers": np.array([[-1.0, 0.5], [1.0, -0.5]]),
+            "metastable_feature_centers": np.array([[-0.5, 0.0], [0.5, 0.0]]),
+        },
     )
     return bundle_dir, topology, trajectory_a, trajectory_b
 
@@ -105,6 +117,66 @@ def test_microstate_atlas_loads_bundle_definitions(tmp_path: Path) -> None:
     assert len(atlas.definitions) == 2
     assert atlas.definitions[0].state_level == "metastable"
     assert atlas.definitions[0].reference_probability == 0.75
+    assert atlas.msm_assignment_index is not None
+
+
+def test_microstate_atlas_assigns_msm_bundle_by_nearest_feature_centroid(
+    tmp_path: Path,
+) -> None:
+    bundle_dir, _, _, _ = _write_bundle(tmp_path)
+    atlas = MicrostateAtlas.from_config(
+        MicrostateConfig(
+            source="msm_bundle",
+            msm_bundle_dir=str(bundle_dir),
+            state_level="cluster",
+        )
+    )
+
+    near_zero = atlas.assign({"ends": -10.0, "turn": 5.0})
+    near_one = atlas.assign({"ends": 10.0, "turn": -5.0})
+
+    assert near_zero.state_id == "0"
+    assert near_one.state_id == "1"
+    assert atlas.definitions[0].cv_ranges["ends"] == (-10.0, -10.0)
+    assert atlas.definitions[0].cv_ranges["turn"] == (5.0, 5.0)
+
+
+def test_microstate_atlas_assigns_msm_metastable_level(tmp_path: Path) -> None:
+    bundle_dir, _, _, _ = _write_bundle(tmp_path)
+    atlas = MicrostateAtlas.from_config(
+        MicrostateConfig(
+            source="msm_bundle",
+            msm_bundle_dir=str(bundle_dir),
+            state_level="metastable",
+        )
+    )
+
+    assignment = atlas.assign({"ends": -5.0, "turn": 0.0})
+    assert assignment.state_id == "0"
+
+
+def test_microstate_atlas_uses_cluster_centers_fallback_for_legacy_bundles(
+    tmp_path: Path,
+) -> None:
+    bundle_dir, _, _, _ = _write_bundle(tmp_path)
+    embedding_path = bundle_dir / "embedding.npz"
+    embedding = dict(np.load(embedding_path))
+    del embedding["feature_centers"]
+    del embedding["metastable_feature_centers"]
+    np.savez(embedding_path, **embedding)
+
+    atlas = MicrostateAtlas.from_config(
+        MicrostateConfig(
+            source="msm_bundle",
+            msm_bundle_dir=str(bundle_dir),
+            state_level="cluster",
+        )
+    )
+
+    assignment = atlas.assign({"ends": -10.0, "turn": 5.0})
+    assert assignment.state_id == "0"
+    assert atlas.definitions[0].cv_ranges["ends"] == (-10.0, -10.0)
+    assert atlas.definitions[0].cv_ranges["turn"] == (5.0, 5.0)
 
 
 def test_trajectory_loader_attaches_precomputed_states(tmp_path: Path, monkeypatch) -> None:

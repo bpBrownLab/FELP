@@ -64,6 +64,8 @@ class ReweightingOrchestrator:
             reference_counts=reference_counts,
             workers=self.workers,
             max_neighbors=self.config.neighbor_pool.max_neighbors,
+            grid_connectivity=self.config.neighbor_pool.grid_connectivity,
+            chebyshev_radius=self.config.neighbor_pool.chebyshev_radius,
         )
 
         outcomes: dict[str, ReweightingOutcome] = {}

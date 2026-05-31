@@ -15,6 +15,14 @@ from .artifacts import MSMBundle, MSMBundleManifest, save_bundle
 from ._compat import patch_threadpoolctl_missing_library_paths
 from .config import MSMFitConfig
 from .features import FeatureSpec, build_featurizer
+from .repartition import compute_feature_centers
+from felp.reweighting.grid_microstates import (
+    GridClusterResult,
+    GridDiscretization,
+    build_grid_microstate_definitions,
+    grid_cluster_trajectories,
+    grid_discretization_to_dict,
+)
 
 
 def _patch_numpy_legacy_aliases() -> None:
@@ -134,11 +142,18 @@ class PyEMMAPipeline:
         for i, rt in enumerate(reduced_trajectories):
             print(f"  traj {i}: shape={rt.shape}")
 
-        cluster = self._cluster(pyemma, reduced_trajectories)
-        cluster_dtrajs = tuple(
-            np.asarray(dtraj, dtype=int)
-            for dtraj in cluster.dtrajs
-        )
+        cluster = self._cluster(pyemma, reduced_trajectories, feature_spec)
+        grid_discretization: GridDiscretization | None = None
+        if isinstance(cluster, GridClusterResult):
+            cluster_dtrajs = cluster.dtrajs
+            cluster_centers = np.asarray(cluster.clustercenters, dtype=float)
+            grid_discretization = cluster.discretization
+        else:
+            cluster_dtrajs = tuple(
+                np.asarray(dtraj, dtype=int)
+                for dtraj in cluster.dtrajs
+            )
+            cluster_centers = np.asarray(cluster.clustercenters, dtype=float)
         print(f"[MSM pipeline] cluster_dtrajs: {len(cluster_dtrajs)} dtraj(s)")
         for i, dt in enumerate(cluster_dtrajs):
             print(f"  dtraj {i}: len={len(dt)}, unique states={len(np.unique(dt))}")
@@ -164,9 +179,17 @@ class PyEMMAPipeline:
             cluster_dtrajs=cluster_dtrajs,
         )
 
-        cluster_definitions = self._build_cluster_definitions(
-            cluster_centers=np.asarray(cluster.clustercenters),
-            discrete_msm=discrete_msm,
+        cluster_definitions = (
+            self._build_grid_cluster_definitions(
+                discrete_msm=discrete_msm,
+                discretization=grid_discretization,
+                feature_spec=feature_spec.to_dict(),
+            )
+            if grid_discretization is not None
+            else self._build_cluster_definitions(
+                cluster_centers=cluster_centers,
+                discrete_msm=discrete_msm,
+            )
         )
         metastable_definitions = self._build_metastable_definitions(
             reduced_trajectories=reduced_trajectories,
@@ -211,6 +234,17 @@ class PyEMMAPipeline:
                 "k_clusters": self.config.k_clusters,
                 "k_iter": self.config.k_iter,
                 "regspace_dmin": self.config.regspace_dmin,
+                **(
+                    {
+                        "grid": grid_discretization_to_dict(grid_discretization),
+                        "grid_target_frames_per_state": self.config.grid_target_frames_per_state,
+                        "grid_min_bins_per_axis": self.config.grid_min_bins_per_axis,
+                        "grid_max_bins_per_axis": self.config.grid_max_bins_per_axis,
+                        "grid_max_total_states": self.config.grid_max_total_states,
+                    }
+                    if grid_discretization is not None
+                    else {}
+                ),
             },
             model={
                 "discrete_msm": {
@@ -233,8 +267,11 @@ class PyEMMAPipeline:
             assignments=assignments,
             frame_source_indices=frame_source_indices,
             embedding=self._build_embedding_payload(
+                feature_trajectories=feature_trajectories,
                 reduced_trajectories=reduced_trajectories,
-                cluster_centers=np.asarray(cluster.clustercenters),
+                cluster_dtrajs=cluster_dtrajs,
+                metastable_dtrajs=metastable_dtrajs,
+                cluster_centers=cluster_centers,
             ),
         )
 
@@ -361,9 +398,20 @@ class PyEMMAPipeline:
         self,
         pyemma,
         reduced_trajectories: tuple[np.ndarray, ...],
+        feature_spec: FeatureSpec,
     ):
         """Cluster the reduced trajectories using the configured method."""
 
+        if self.config.clustering_method == "grid":
+            return grid_cluster_trajectories(
+                reduced_trajectories,
+                feature_spec=feature_spec.to_dict(),
+                grid_bins=self.config.grid_bins,
+                min_bins_per_axis=self.config.grid_min_bins_per_axis,
+                max_bins_per_axis=self.config.grid_max_bins_per_axis,
+                target_frames_per_state=self.config.grid_target_frames_per_state,
+                max_total_states=self.config.grid_max_total_states,
+            )
         if self.config.clustering_method == "kmeans":
             return pyemma.coordinates.cluster_kmeans(
                 _as_pyemma_trajectory_list(reduced_trajectories),
@@ -375,6 +423,27 @@ class PyEMMAPipeline:
             dmin=float(self.config.regspace_dmin),
         )
 
+    def _active_cluster_probabilities(self, discrete_msm) -> dict[int, float]:
+        return {
+            int(state_index): float(probability)
+            for state_index, probability in zip(discrete_msm.active_set, discrete_msm.pi)
+        }
+
+    def _build_grid_cluster_definitions(
+        self,
+        *,
+        discrete_msm,
+        discretization: GridDiscretization,
+        feature_spec: dict[str, object],
+    ) -> tuple[MicrostateDefinition, ...]:
+        """Build grid microstate definitions with MSM stationary probabilities."""
+
+        return build_grid_microstate_definitions(
+            discretization,
+            feature_spec=feature_spec,
+            reference_probabilities=self._active_cluster_probabilities(discrete_msm),
+        )
+
     def _build_cluster_definitions(
         self,
         cluster_centers: np.ndarray,
@@ -382,10 +451,7 @@ class PyEMMAPipeline:
     ) -> tuple[MicrostateDefinition, ...]:
         """Build discrete cluster state definitions with stationary probabilities."""
 
-        active_probabilities = {
-            int(state_index): float(probability)
-            for state_index, probability in zip(discrete_msm.active_set, discrete_msm.pi)
-        }
+        active_probabilities = self._active_cluster_probabilities(discrete_msm)
         definitions = []
         for cluster_index, center in enumerate(cluster_centers):
             plot_x = float(center[0]) if center.size >= 1 else None
@@ -495,12 +561,27 @@ class PyEMMAPipeline:
 
     def _build_embedding_payload(
         self,
+        *,
+        feature_trajectories: tuple[np.ndarray, ...],
         reduced_trajectories: tuple[np.ndarray, ...],
+        cluster_dtrajs: tuple[np.ndarray, ...],
+        metastable_dtrajs: Optional[tuple[np.ndarray, ...]],
         cluster_centers: np.ndarray,
     ) -> dict[str, np.ndarray]:
         """Build the cached embedding payload for the bundle."""
 
         payload: dict[str, np.ndarray] = {"cluster_centers": np.asarray(cluster_centers)}
+        payload["feature_centers"] = compute_feature_centers(
+            feature_trajectories,
+            cluster_dtrajs,
+            state_count=int(cluster_centers.shape[0]),
+        )
+        if metastable_dtrajs is not None:
+            payload["metastable_feature_centers"] = compute_feature_centers(
+                feature_trajectories,
+                metastable_dtrajs,
+                state_count=int(max(np.max(values) for values in metastable_dtrajs) + 1),
+            )
         for trajectory_id, values in enumerate(reduced_trajectories):
             payload[f"reduced_trajectory_{trajectory_id}"] = np.asarray(values)
         return payload
