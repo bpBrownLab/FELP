@@ -154,6 +154,81 @@ def build_wide() -> graphviz.Digraph:
     return g
 
 
+def build_vertical_large_font() -> graphviz.Digraph:
+    """Vertical layout with larger font size, equivalent to the wide version."""
+    g = graphviz.Digraph(
+        "FELP_workflow_vertical_large",
+        format="png",
+        engine="dot",
+        graph_attr={
+            "rankdir": "TB",
+            "splines": "true",
+            "nodesep": "0.45",
+            "ranksep": "0.55",
+            "bgcolor": "white",
+            "pad": "0.4",
+            "fontsize": "18",
+            "fontname": "Helvetica-Bold",
+        },
+        node_attr={
+            "shape": "box",
+            "style": "rounded,filled",
+            "fontname": "Helvetica",
+            "fontsize": "16",
+            "margin": "0.25,0.15",
+        },
+        edge_attr={
+            "fontname": "Helvetica",
+            "fontsize": "13",
+            "color": "#4a5568",
+            "arrowsize": "0.8",
+        },
+    )
+
+    with g.subgraph(name="cluster_s1") as c:
+        c.attr(label="1 · Reference", style="rounded", color="#2c5282", fontcolor="#2c5282", fontsize="18", fontname="Helvetica-Bold")
+        c.node("md", "Reference MD\n(topology + coords)", fillcolor="#ebf8ff", color="#2b6cb0")
+        c.node("ms", "Microstate atlas\ngrid · file · MSM", fillcolor="#f7fafc", color="#4a5568")
+        c.edge("md", "ms")
+
+    with g.subgraph(name="cluster_s2") as c:
+        c.attr(label="2 · Assign", style="rounded", color="#2c5282", fontcolor="#2c5282", fontsize="18", fontname="Helvetica-Bold")
+        c.node("cv", "CVs · assign i\nπ₀(i)", fillcolor="#f7fafc")
+        c.node("prior", "π₀(i)", fillcolor="#edf2f7", color="#2d3748")
+        c.edge("cv", "prior")
+
+    with g.subgraph(name="cluster_s3") as c:
+        c.attr(label="3 · Symmetric perturbation (per frame)", style="rounded", color="#2c5282", fontcolor="#2c5282", fontsize="18", fontname="Helvetica-Bold")
+        c.node("conv", "ParmEd →\nPyRosetta", fillcolor="#f7fafc")
+        c.node("rest", "Reference-frame\nrestraints", fillcolor="#fffaf0", color="#c05621")
+        c.node("ref_mut", "Ref: mutate /\nenforce original", fillcolor="#fffaf0", color="#c05621")
+        c.node("pert_mut", "Pert: mutate\ntarget", fillcolor="#fffaf0", color="#c05621")
+        c.node(
+            "openmm",
+            "OpenMM (ff14SBonlysc + GBNeck2)\nrestrained min → U₀, U₁\nΔU = U₁ − U₀",
+            fillcolor="#f0fff4",
+            color="#276749",
+        )
+        c.edges([("conv", "rest"), ("rest", "ref_mut"), ("rest", "pert_mut")])
+        c.edge("ref_mut", "openmm")
+        c.edge("pert_mut", "openmm")
+
+    with g.subgraph(name="cluster_s4") as c:
+        c.attr(label="4 · Reweight", style="rounded", color="#2c5282", fontcolor="#2c5282", fontsize="18", fontname="Helvetica-Bold")
+        c.node("fi", "fᵢ = ⟨e^{−βΔU}⟩\nESS · QC · 𝒰", fillcolor="#faf5ff", color="#6b46c1")
+        c.node("pool", "Optional:\nneighbor pool · L-curve", fillcolor="#faf5ff", color="#9f7aea", style="rounded,filled,dashed")
+        c.node("pi", "π₁(i) ∝ π₀(i) · fᵢ\nF₁(i)", fillcolor="#e2e8f0", color="#2d3748")
+        c.edge("fi", "pool")
+        c.edge("pool", "pi")
+        c.edge("fi", "pi", style="dashed", label="default")
+
+    g.edge("ms", "cv")
+    g.edge("prior", "conv")
+    g.edge("openmm", "fi")
+    g.edge("prior", "pi", style="dashed", constraint="false", color="#718096")
+    return g
+
+
 def _render(g: graphviz.Digraph, stem: str, *, dpi: int = 300) -> Path:
     g.graph_attr["dpi"] = str(dpi)
     path = Path(g.render(filename=stem, directory=str(HERE), cleanup=True))
@@ -164,11 +239,17 @@ def _render(g: graphviz.Digraph, stem: str, *, dpi: int = 300) -> Path:
 def render() -> None:
     _render(build_vertical(), "felp_workflow_schematic", dpi=300)
     _render(build_wide(), "felp_workflow_schematic_wide", dpi=300)
+    _render(build_vertical_large_font(), "felp_workflow_schematic_vertical", dpi=300)
 
     svg = build_wide()
     svg.format = "svg"
     svg_path = Path(svg.render(filename="felp_workflow_schematic_wide", directory=str(HERE), cleanup=False))
     print(f"Wrote {svg_path}")
+
+    svg_vert = build_vertical_large_font()
+    svg_vert.format = "svg"
+    svg_vert_path = Path(svg_vert.render(filename="felp_workflow_schematic_vertical", directory=str(HERE), cleanup=False))
+    print(f"Wrote {svg_vert_path}")
 
     mmd = HERE / "felp_workflow_schematic.mmd"
     if mmd.exists():
