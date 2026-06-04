@@ -27,12 +27,13 @@ share/python-wheels/
 MANIFEST
 #scratch/
 
-# Local run outputs and large trajectory data (keep tracked example inputs)
-data/**
-!data/GLY/
-!data/GLY/*.parm7
-!data/GLY/*.nc
-!data/run_*.sh
+# Local run outputs, trajectories, and benchmark data (not distributed)
+data/
+
+# Test suite (development only; not distributed)
+tests/
+conftest.py
+pytest.ini
 
 # Generated figure exports at repo root (not docs/figures/)
 /figures/
