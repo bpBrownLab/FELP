@@ -27,33 +27,28 @@ python felp.py --help
 python -m felp --help
 ```
 
-### Dependencies by command
-
-| Need | Required for |
-|------|--------------|
-| numpy, scipy, matplotlib, mdtraj, pyyaml (in `requirements.txt`) | All commands |
-| pyemma | `msm-fit`, `msm-inspect`, `msm-plot`, `msm-export-samples` |
-| ParmEd submodule + PyRosetta + OpenMM | `run` (per-frame mutation and energy evaluation) |
-
-PyRosetta and OpenMM are not pip-installable from `requirements.txt`; install them separately
-(PyRosetta requires a license; OpenMM via conda). Plotting and reweighting from existing
-`frame_results.csv` (`summarize`, `felp-plot`, `md-kl-plot`, `ess-compare`) do not need
-PyRosetta or OpenMM. Method details: [docs/theory.md](docs/theory.md).
-
 ## Quick start
 
-The repo ships a small GLY example (`data/GLY/`) for a smoke test. A full `run` performs
-the mutation and energy evaluation, so it needs the ParmEd submodule, PyRosetta, and OpenMM:
+Method details: [docs/theory.md](docs/theory.md).
+
+A full `run` performs the mutation and per-frame energy evaluation, so it needs the ParmEd
+submodule, PyRosetta, and OpenMM. The example below uses a φ/ψ grid (the default microstate
+source) and enables by-state QC frame exclusion; omit the `--reweighting-qc-*` flags to use
+the lighter defaults (`flag`, raw weights).
 
 ```bash
 python felp.py run \
-  --topology-file data/GLY/GLY.dry.parm7 \
-  --trajectory data/GLY/GLY_prod.0001.nc \
+  --topology-file path/to/reference.parm7 \
+  --trajectory path/to/reference.nc \
   --target-residue-number 2 \
   --target-residue-name ALA \
-  --output-dir outputs/gly_to_ala \
-  --phi-bins 12 --psi-bins 12 \
+  --original-residue-name GLY \
+  --output-dir path/to/output/gly_to_ala \
+  --phi-bins 36 --psi-bins 36 \
   --prior-probability-mode raw_counts \
+  --reweighting-qc-policy exclude-frames \
+  --reweighting-qc-method auto \
+  --reweighting-weight-treatment psis \
   --workers 4
 ```
 
@@ -61,15 +56,11 @@ Then plot the results (no PyRosetta/OpenMM needed):
 
 ```bash
 python felp.py felp-plot \
-  --microstate-summary outputs/gly_to_ala/microstate_summary.csv \
-  --raw-frame-results outputs/gly_to_ala/frame_results.csv \
-  --output-dir outputs/gly_to_ala/plots \
-  --temperature-kelvin 300
+  --microstate-summary path/to/output/gly_to_ala/microstate_summary.csv \
+  --raw-frame-results path/to/output/gly_to_ala/frame_results.csv \
+  --output-dir path/to/output/gly_to_ala/plots \
+  --temperature-kelvin 310
 ```
-
-The bundled `data/GLY/` files are a single short trajectory chunk for testing the workflow.
-Reproducing the manuscript benchmarks requires your own MD trajectories; those large datasets
-are not distributed with the repository.
 
 ## Examples
 
@@ -120,7 +111,7 @@ python felp.py run \
 Legacy entry point (same as `msm-fit`):
 
 ```bash
-python build_msm.py --help
+python archive/legacy/build_msm.py --help
 ```
 
 ### Resummarize with coupled reweighting
@@ -180,10 +171,3 @@ Use `--cpu` / `--gpu` for OpenMM platform selection. See [docs/theory.md](docs/t
 
 **Plotting commands** write `*.png` and `plot_summary.json`. Add `--resume` to continue interrupted runs.
 
-## Testing
-
-```bash
-python -m pytest -q
-```
-
-The GLY→ALA end-to-end benchmark runs when PyRosetta and OpenMM are available.

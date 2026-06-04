@@ -10,52 +10,69 @@ FELP does not create new conformational basins. It estimates the perturbed distr
 
 ## Reference and perturbed state probabilities
 
-Let `x` denote a configuration, `U_0(x)` the reference potential, `U_1(x)` the perturbed potential, and `beta = 1 / (k_B T)`. A microstate indicator `chi_i(x)` defines the restricted partition function
+Let $x$ denote a configuration, $U_0(x)$ the reference potential, $U_1(x)$ the perturbed potential, and $\beta = 1 / (k_B T)$. A microstate indicator $\chi_i(x)$ defines the restricted partition function
 
-```text
-Z_a(i) = integral chi_i(x) exp[-beta U_a(x)] dx
-```
+$$
+Z_a(i) = \int \chi_i(x) \exp[-\beta U_a(x)]\,dx
+$$
 
-for Hamiltonian `a`. The state probability is
+for Hamiltonian $a$. The state probability is
 
-```text
-pi_a(i) = Z_a(i) / sum_k Z_a(k)
-```
+$$
+\pi_a(i) = \frac{Z_a(i)}{\sum_k Z_a(k)}
+$$
 
 The restricted Zwanzig identity gives
 
-```text
-Z_1(i) / Z_0(i) = < exp[-beta DeltaU(x)] >_{0,i}
-DeltaU(x) = U_1(x) - U_0(x)
-```
+$$
+\frac{Z_1(i)}{Z_0(i)}
+= \left\langle \exp[-\beta \Delta U(x)] \right\rangle_{0,i},
+\qquad
+\Delta U(x) = U_1(x) - U_0(x)
+$$
 
 so the FELP target distribution is
 
-```text
-pi_1(i) = pi_0(i) <exp[-beta DeltaU]>_{0,i}
-          / sum_k pi_0(k) <exp[-beta DeltaU]>_{0,k}
-```
+$$
+\pi_1(i) =
+\frac{
+  \pi_0(i)\left\langle \exp[-\beta \Delta U] \right\rangle_{0,i}
+}{
+  \sum_k \pi_0(k)\left\langle \exp[-\beta \Delta U] \right\rangle_{0,k}
+}
+$$
 
 This is the central estimator in the manuscript.
 
 ## Finite-sample estimator
 
-For evaluated frames `x_ij` in state `i`, FELP computes stabilized Boltzmann weights
+For evaluated frames $x_{ij}$ in state $i$, FELP computes stabilized Boltzmann weights
 
-```text
-s = min(DeltaU) over all frames included in reweighting
-w_ij = exp[-beta (DeltaU_ij - s)]
-f_i = (1 / n_i) sum_j w_ij
-```
+$$
+s = \min_{i,j} \Delta U_{ij}
+$$
 
-The shift `s` is global, so it cancels during normalization. The finite-sample estimate is
+$$
+w_{ij} = \exp[-\beta(\Delta U_{ij} - s)]
+$$
 
-```text
-pi_target(i) = pi_reference(i) f_i / sum_k pi_reference(k) f_k
-F_i = -k_B T ln pi_target(i) + C
-```
+$$
+f_i = \frac{1}{n_i}\sum_j w_{ij}
+$$
 
-where `C` shifts the lowest finite free energy to zero.
+The shift $s$ is global, so it cancels during normalization. The finite-sample estimate is
+
+$$
+\pi_{\mathrm{target}}(i) =
+\frac{\pi_{\mathrm{reference}}(i) f_i}
+{\sum_k \pi_{\mathrm{reference}}(k) f_k}
+$$
+
+$$
+F_i = -k_B T \ln \pi_{\mathrm{target}}(i) + C
+$$
+
+where $C$ shifts the lowest finite free energy to zero.
 
 ## Reference priors and microstates
 
@@ -77,42 +94,48 @@ For each reference frame, FELP builds reference and perturbed branches from the 
 
 In the manuscript implementation, local structure preparation uses PyRosetta constrained FastRelax. Energies are then evaluated in OpenMM using ff14SB sidechain-only parameters with GBNeck2 implicit solvent. The recorded per-frame value is
 
-```text
-DeltaU_ij = U_1(x_ij) - U_0(x_ij)
-```
+$$
+\Delta U_{ij} = U_1(x_{ij}) - U_0(x_{ij})
+$$
 
-failed or non-finite frames are excluded before reweighting.
+Failed or non-finite frames are excluded before reweighting.
 
 ## Support diagnostics
 
 The local effective sample size is
 
-```text
-ESS_i = (sum_j w_ij)^2 / sum_j w_ij^2
-```
+$$
+\mathrm{ESS}_i =
+\frac{\left(\sum_j w_{ij}\right)^2}{\sum_j w_{ij}^2}
+$$
 
-Low `ESS_i` means the state-local factor is controlled by too few frames.
+Low $\mathrm{ESS}_i$ means the state-local factor is controlled by too few frames.
 
-FELP only estimates target probabilities on states with reference support. With `raw_counts` priors, states never visited by the reference have `pi_reference = 0`, no evaluated frames, and `pi_target = 0`. They are absent from the estimated landscape, not detected as low overlap.
+FELP only estimates target probabilities on states with reference support. With `raw_counts` priors, states never visited by the reference have $\pi_{\mathrm{reference}} = 0$, no evaluated frames, and $\pi_{\mathrm{target}} = 0$. They are absent from the estimated landscape, not detected as low overlap.
 
 This is the key asymmetry in the manuscript: a broad reference can often predict a narrower target (GLY->ALA), but a narrow reference cannot recover a broader target (ALA->GLY) unless the needed conformations were sampled.
 
 The manuscript summarizes unreliable target probability mass as
 
-```text
-U = sum_i pi_target(i) 1{ ESS_i < epsilon_i }
-```
+$$
+U = \sum_i \pi_{\mathrm{target}}(i)\,
+\mathbb{1}\{\mathrm{ESS}_i < \epsilon_i\}
+$$
 
 The implementation extends this to include state-level QC flags:
 
-```text
-U = sum_i pi_target(i) 1{ ESS_i < epsilon_i or q_i = 1 }
-epsilon_i = max(5, 0.1 n_i)
-```
+$$
+U = \sum_i \pi_{\mathrm{target}}(i)\,
+\mathbb{1}\{\mathrm{ESS}_i < \epsilon_i \ \mathrm{or}\ q_i = 1\}
+$$
 
-where `q_i = 1` marks states flagged for dominant-frame control after QC.
+$$
+\epsilon_i = \max(5, 0.1 n_i)
+$$
 
-FELP also reports absolute low-ESS masses (`ESS_i < 10` and `ESS_i < 50`) for continuity with earlier analyses. These are advisory rules of thumb. The scale-aware `target_probability_unreliable_local_support` field is the better single summary when frame counts differ across states.
+where $q_i = 1$ marks states flagged for dominant-frame control after QC.
+
+FELP also reports absolute low-ESS masses ($\mathrm{ESS}_i < 10$ and $\mathrm{ESS}_i < 50$) for continuity with earlier analyses. These are advisory rules of thumb. The scale-aware `target_probability_unreliable_local_support` field is the better single summary when frame counts differ across states.
 
 Other overlap fields should be read in context:
 
@@ -128,15 +151,24 @@ No scalar diagnostic can prove that an unsampled target basin exists. For covera
 
 ## Neighbor-pool regularization
 
-The manuscript uses neighbor pooling to stabilize noisy local factors on a discrete grid. For eligible neighbors `N(i)`,
+The manuscript uses neighbor pooling to stabilize noisy local factors on a discrete grid. For eligible neighbors $N(i)$,
 
-```text
-fbar_i = sum_{j in N(i)} ESS_j f_j / sum_{j in N(i)} ESS_j
-alpha_i = ESS_i / (ESS_i + tau)
-f_i_blend = alpha_i f_i + (1 - alpha_i) fbar_i
-```
+$$
+\bar{f}_i =
+\frac{\sum_{j \in N(i)} \mathrm{ESS}_j f_j}
+{\sum_{j \in N(i)} \mathrm{ESS}_j}
+$$
 
-Well-sampled states retain their local factors; low-ESS states borrow from adjacent states. `tau` is selected by an L-curve criterion over log-factor misfit and graph roughness unless a fixed value is supplied. See [neighbor_pool_reweighting.md](neighbor_pool_reweighting.md).
+$$
+\alpha_i = \frac{\mathrm{ESS}_i}{\mathrm{ESS}_i + \tau}
+$$
+
+$$
+f_i^{\mathrm{blend}} =
+\alpha_i f_i + (1 - \alpha_i)\bar{f}_i
+$$
+
+Well-sampled states retain their local factors; low-ESS states borrow from adjacent states. $\tau$ is selected by an L-curve criterion over log-factor misfit and graph roughness unless a fixed value is supplied. See [neighbor_pool_reweighting.md](neighbor_pool_reweighting.md).
 
 ## Reweighting backends
 
@@ -144,15 +176,18 @@ The manuscript method is the independent state-local Zwanzig estimator, optional
 
 All methods use the same prepared data: eligible frames grouped by microstate, reference probabilities, state-local Boltzmann factors, ESS values, and optional grid topology. Final target probabilities always have the form
 
-```text
-pi_target(i) = pi_reference(i) * reweight_factor(i) / Z
-```
+$$
+\pi_{\mathrm{target}}(i) =
+\frac{
+  \pi_{\mathrm{reference}}(i)\,\mathrm{reweight\_factor}(i)
+}{Z}
+$$
 
 | Method | Status | Reweight factor |
 |--------|--------|-----------------|
-| `independent` | Baseline manuscript estimator | `f_i = <exp[-beta DeltaU]>_i` |
-| `neighbor_pool` | Manuscript regularizer | ESS-weighted blend of `f_i` with neighboring local factors |
-| `laplacian` | Implementation extra | `exp[-beta DeltaG_i]` after MAP smoothing of state excess free energies |
+| `independent` | Baseline manuscript estimator | $f_i = \langle \exp[-\beta \Delta U]\rangle_i$ |
+| `neighbor_pool` | Manuscript regularizer | ESS-weighted blend of $f_i$ with neighboring local factors |
+| `laplacian` | Implementation extra | $\exp[-\beta \Delta G_i]$ after MAP smoothing of state excess free energies |
 | `frame` | Implementation extra | Global self-normalized frame weights, binned back to microstates |
 
 Use `independent` as the baseline. Use `neighbor_pool` for sparse/noisy grid maps when local factors should vary smoothly over neighboring states. Treat `laplacian` and `frame` as sensitivity analyses unless they have been validated for the system.
