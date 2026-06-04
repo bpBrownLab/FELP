@@ -132,7 +132,7 @@ class FELPPlotConfig:
     """Display unit for energies on plots: ``kj_mol`` (default) or ``kcal_mol``."""
 
     fel_estimator: str = "histogram"
-    """Projected frame-density estimator: ``histogram`` or ``gaussian-kernel``."""
+    """Projected frame-density estimator: ``histogram`` or ``gaussian-kernel`` (2D only)."""
 
     fel_bandwidth: str = "auto"
     """Gaussian-kernel bandwidth: ``auto``, one float, or ``x,y`` floats."""
@@ -3119,12 +3119,10 @@ def _plot_cv_projected_landscapes_1d(
     """Project exact 1D CV frame samples using prior-consistent frame weights."""
 
     if fel_estimator == "gaussian-kernel":
-        return [], {
-            "cv_frame_projection_estimator": "gaussian-kernel",
-            "cv_frame_projection_note": (
-                "1D gaussian-kernel projection is not implemented; use histogram."
-            ),
-        }
+        raise ConfigurationError(
+            "fel_estimator=gaussian-kernel is supported for 2D CV projections only; "
+            "use histogram for 1D projections."
+        )
 
     reference_probability_by_state = {
         state_id: float(probability)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 # Nominal absolute Kish-ESS cutoffs (independent-sample scale) for reporting how much
 # target probability sits in weakly supported states. ESS ≈ 10 is a common IS rule of
-# thumb for minimally useful samples; 50 is more lenient. See docs/overlap_diagnostics.md.
+# thumb for minimally useful samples; 50 is more lenient. See docs/theory.md.
 LOW_ESS_ABSOLUTE_THRESHOLDS: tuple[int, ...] = (10, 50)
 
 # Relative floor: state i is unreliable if ESS_i < max(min_state_ess, rho * n_i).

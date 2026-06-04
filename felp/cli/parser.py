@@ -1467,8 +1467,9 @@ def _add_felp_plot_arguments(parser: argparse.ArgumentParser) -> None:
         default="histogram",
         help=(
             "Estimator for frame-projected CV free-energy landscapes. "
-            "'histogram' preserves the existing weighted-bin estimator; "
-            "'gaussian-kernel' uses a state-mass-preserving kernel density estimator."
+            "'histogram' uses weighted bins for all projections; "
+            "'gaussian-kernel' uses a state-mass-preserving kernel density "
+            "estimator for 2D projections only."
         ),
     )
     parser.add_argument(

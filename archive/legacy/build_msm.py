@@ -1,9 +1,15 @@
 #! /usr/bin/env python
-"""Compatibility wrapper for the rewritten PyEMMA MSM pipeline.
+"""Archived copy of the legacy MSM-fit entry point.
 
-This legacy entry point now forwards directly to:
+The supported invocation from the repository root is:
+
+    python build_msm.py ...
+
+which forwards to:
 
     python felp.py msm-fit ...
+
+This file is kept for reference and matches the root wrapper.
 """
 
 from __future__ import annotations
@@ -14,7 +20,7 @@ import sys
 
 
 def _load_felp_entrypoint():
-    entrypoint = Path(__file__).with_name("felp.py")
+    entrypoint = Path(__file__).resolve().parents[2] / "felp.py"
     spec = importlib.util.spec_from_file_location("felp_entrypoint", entrypoint)
     if spec is None or spec.loader is None:
         raise RuntimeError("Unable to load the FELP entry point.")

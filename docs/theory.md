@@ -1,0 +1,170 @@
+# FELP theory and method
+
+This document tracks the estimator, diagnostics, and assumptions described in the manuscript. Advanced neighbor-pool options are documented separately in [neighbor_pool_reweighting.md](neighbor_pool_reweighting.md).
+
+## Problem statement
+
+FELP estimates how a local perturbation, usually a mutation, redistributes probability over a **reference-sampled** conformational landscape. The method starts from a reference ensemble with a prior over discrete microstates, evaluates restrained reference-to-perturbed energy differences for configurations in each state, and reweights the reference state probabilities.
+
+FELP does not create new conformational basins. It estimates the perturbed distribution over the state space already sampled by the reference trajectory or supplied by an MSM bundle.
+
+## Reference and perturbed state probabilities
+
+Let `x` denote a configuration, `U_0(x)` the reference potential, `U_1(x)` the perturbed potential, and `beta = 1 / (k_B T)`. A microstate indicator `chi_i(x)` defines the restricted partition function
+
+```text
+Z_a(i) = integral chi_i(x) exp[-beta U_a(x)] dx
+```
+
+for Hamiltonian `a`. The state probability is
+
+```text
+pi_a(i) = Z_a(i) / sum_k Z_a(k)
+```
+
+The restricted Zwanzig identity gives
+
+```text
+Z_1(i) / Z_0(i) = < exp[-beta DeltaU(x)] >_{0,i}
+DeltaU(x) = U_1(x) - U_0(x)
+```
+
+so the FELP target distribution is
+
+```text
+pi_1(i) = pi_0(i) <exp[-beta DeltaU]>_{0,i}
+          / sum_k pi_0(k) <exp[-beta DeltaU]>_{0,k}
+```
+
+This is the central estimator in the manuscript.
+
+## Finite-sample estimator
+
+For evaluated frames `x_ij` in state `i`, FELP computes stabilized Boltzmann weights
+
+```text
+s = min(DeltaU) over all frames included in reweighting
+w_ij = exp[-beta (DeltaU_ij - s)]
+f_i = (1 / n_i) sum_j w_ij
+```
+
+The shift `s` is global, so it cancels during normalization. The finite-sample estimate is
+
+```text
+pi_target(i) = pi_reference(i) f_i / sum_k pi_reference(k) f_k
+F_i = -k_B T ln pi_target(i) + C
+```
+
+where `C` shifts the lowest finite free energy to zero.
+
+## Reference priors and microstates
+
+FELP supports three state sources:
+
+| Source | Reference prior |
+|--------|-----------------|
+| `grid` | Raw counts over assigned/evaluable reference frames |
+| `file` | Loaded `reference_probability` values or raw counts |
+| `msm_bundle` | Loaded MSM probabilities or raw counts |
+
+The manuscript benchmarks used raw-count priors from MD trajectories. Loaded priors are useful when state definitions already carry a trusted stationary distribution.
+
+By default, grid states are target-residue phi/psi bins. File-defined states can use other CV ranges, including distances. MSM bundles provide cluster or metastable states from a PyEMMA workflow.
+
+## Restrained perturbation evaluation
+
+For each reference frame, FELP builds reference and perturbed branches from the same starting pose. CV values measured in the reference pose become restraint targets. The same restraints are applied to both branches so the energy comparison remains local to the assigned state.
+
+In the manuscript implementation, local structure preparation uses PyRosetta constrained FastRelax. Energies are then evaluated in OpenMM using ff14SB sidechain-only parameters with GBNeck2 implicit solvent. The recorded per-frame value is
+
+```text
+DeltaU_ij = U_1(x_ij) - U_0(x_ij)
+```
+
+failed or non-finite frames are excluded before reweighting.
+
+## Support diagnostics
+
+The local effective sample size is
+
+```text
+ESS_i = (sum_j w_ij)^2 / sum_j w_ij^2
+```
+
+Low `ESS_i` means the state-local factor is controlled by too few frames.
+
+FELP only estimates target probabilities on states with reference support. With `raw_counts` priors, states never visited by the reference have `pi_reference = 0`, no evaluated frames, and `pi_target = 0`. They are absent from the estimated landscape, not detected as low overlap.
+
+This is the key asymmetry in the manuscript: a broad reference can often predict a narrower target (GLY->ALA), but a narrow reference cannot recover a broader target (ALA->GLY) unless the needed conformations were sampled.
+
+The manuscript summarizes unreliable target probability mass as
+
+```text
+U = sum_i pi_target(i) 1{ ESS_i < epsilon_i }
+```
+
+The implementation extends this to include state-level QC flags:
+
+```text
+U = sum_i pi_target(i) 1{ ESS_i < epsilon_i or q_i = 1 }
+epsilon_i = max(5, 0.1 n_i)
+```
+
+where `q_i = 1` marks states flagged for dominant-frame control after QC.
+
+FELP also reports absolute low-ESS masses (`ESS_i < 10` and `ESS_i < 50`) for continuity with earlier analyses. These are advisory rules of thumb. The scale-aware `target_probability_unreliable_local_support` field is the better single summary when frame counts differ across states.
+
+Other overlap fields should be read in context:
+
+| Metric | Use | Caveat |
+|--------|-----|--------|
+| `target_probability_unreliable_local_support` | Primary support check for target-probability states | Cannot see unsampled target-only basins |
+| `target_probability_low_ess_mass_ess_lt_10` | Manuscript-style low-ESS mass summary | Absolute threshold; harsh for small states, lenient for large states |
+| `max_normalized_weight` | Detects frame-level domination | Global, not state-local |
+| `overlap_coefficient` | Describes similarity of reference and target state distributions | Low values can be benign for subset targets such as GLY->ALA |
+| global ESS fraction | Detects global weight concentration | Can penalize valid concentration into a target subset |
+
+No scalar diagnostic can prove that an unsampled target basin exists. For coverage gaps, inspect reference occupancy, compare forward/reverse directions when possible, and use chemical knowledge about whether the target is broader than the reference.
+
+## Neighbor-pool regularization
+
+The manuscript uses neighbor pooling to stabilize noisy local factors on a discrete grid. For eligible neighbors `N(i)`,
+
+```text
+fbar_i = sum_{j in N(i)} ESS_j f_j / sum_{j in N(i)} ESS_j
+alpha_i = ESS_i / (ESS_i + tau)
+f_i_blend = alpha_i f_i + (1 - alpha_i) fbar_i
+```
+
+Well-sampled states retain their local factors; low-ESS states borrow from adjacent states. `tau` is selected by an L-curve criterion over log-factor misfit and graph roughness unless a fixed value is supplied. See [neighbor_pool_reweighting.md](neighbor_pool_reweighting.md).
+
+## Reweighting backends
+
+The manuscript method is the independent state-local Zwanzig estimator, optionally regularized with neighbor-pool blend. The `laplacian` and `frame` backends are implementation options for exploration and comparison; they are not the primary manuscript estimator.
+
+All methods use the same prepared data: eligible frames grouped by microstate, reference probabilities, state-local Boltzmann factors, ESS values, and optional grid topology. Final target probabilities always have the form
+
+```text
+pi_target(i) = pi_reference(i) * reweight_factor(i) / Z
+```
+
+| Method | Status | Reweight factor |
+|--------|--------|-----------------|
+| `independent` | Baseline manuscript estimator | `f_i = <exp[-beta DeltaU]>_i` |
+| `neighbor_pool` | Manuscript regularizer | ESS-weighted blend of `f_i` with neighboring local factors |
+| `laplacian` | Implementation extra | `exp[-beta DeltaG_i]` after MAP smoothing of state excess free energies |
+| `frame` | Implementation extra | Global self-normalized frame weights, binned back to microstates |
+
+Use `independent` as the baseline. Use `neighbor_pool` for sparse/noisy grid maps when local factors should vary smoothly over neighboring states. Treat `laplacian` and `frame` as sensitivity analyses unless they have been validated for the system.
+
+The manuscript benchmarks used cardinal grid neighbors for neighbor pooling. The CLI default currently uses `chebyshev3`; pass `--neighbor-pool-grid-connectivity cardinal` to reproduce the manuscript neighbor stencil.
+
+## Main limitations
+
+FELP is reliable when the target distribution lies within the sampled reference state space and the important target-probability states have adequate local ESS. It can fail when the target requires unsampled conformations, when local overlap is poor, when states mix distinct basins, or when the implicit-solvent mutation scoring model is not appropriate for the physical question.
+
+The manuscript benchmarks emphasize this asymmetry: GLY->ALA and GLY->PRO are well-posed because glycine is conformationally broad, while ALA->GLY fails because alanine does not sample the broad glycine landscape.
+
+## OpenMM platform notes
+
+Use `--cpu` or `--gpu` (or `--platform-name`) to select the OpenMM platform. On CPU, FELP defaults to one OpenMM thread per context to avoid oversubscription and NaN minimization on many-core hosts when running many workers. Override with `--cpu-threads N` when running few workers.

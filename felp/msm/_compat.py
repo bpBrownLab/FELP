@@ -2,6 +2,24 @@
 
 from __future__ import annotations
 
+import numpy as np
+
+
+def patch_numpy_legacy_aliases() -> None:
+    """Provide NumPy aliases still referenced by PyEMMA 2.5.x."""
+
+    aliases = {
+        "bool": np.bool_,
+        "int": int,
+        "float": float,
+        "complex": complex,
+        "object": object,
+        "str": str,
+    }
+    for name, value in aliases.items():
+        if name not in np.__dict__:
+            setattr(np, name, value)
+
 
 def patch_threadpoolctl_missing_library_paths() -> None:
     """Silence threadpoolctl callback tracebacks for stale shared-library paths.

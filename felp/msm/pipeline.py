@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 import os
 import shutil
 from typing import Any, Optional
@@ -12,7 +13,7 @@ import numpy as np
 from felp.core import DependencyError, MicrostateDefinition
 
 from .artifacts import MSMBundle, MSMBundleManifest, save_bundle
-from ._compat import patch_threadpoolctl_missing_library_paths
+from ._compat import patch_numpy_legacy_aliases, patch_threadpoolctl_missing_library_paths
 from .config import MSMFitConfig
 from .features import FeatureSpec, build_featurizer
 from .repartition import compute_feature_centers
@@ -25,24 +26,11 @@ from felp.reweighting.grid_microstates import (
 )
 
 
-def _patch_numpy_legacy_aliases() -> None:
-    """Provide NumPy aliases still referenced by PyEMMA 2.5.x."""
-
-    aliases = {
-        "bool": np.bool_,
-        "int": int,
-        "float": float,
-        "complex": complex,
-        "object": object,
-        "str": str,
-    }
-    for name, value in aliases.items():
-        if name not in np.__dict__:
-            setattr(np, name, value)
+logger = logging.getLogger(__name__)
 
 
 def _import_pyemma():
-    _patch_numpy_legacy_aliases()
+    patch_numpy_legacy_aliases()
     patch_threadpoolctl_missing_library_paths()
     try:
         import pyemma
@@ -118,29 +106,38 @@ class PyEMMAPipeline:
         featurizer = build_featurizer(self.config.topology_file, feature_spec)
 
         source_input = [list(group) for group in self.config.trajectory_groups]
-        print(f"[MSM pipeline] trajectory groups: {len(source_input)}")
+        logger.debug("[MSM pipeline] trajectory groups: %d", len(source_input))
         for i, group in enumerate(source_input):
-            print(f"  group {i}: {len(group)} file(s)")
+            logger.debug("  group %d: %d file(s)", i, len(group))
 
         reader = pyemma.coordinates.source(
             source_input,
             features=featurizer,
         )
-        print(f"[MSM pipeline] reader.ntraj = {reader.ntraj}")
-        print(f"[MSM pipeline] reader.trajectory_lengths() = {reader.trajectory_lengths()}")
+        logger.debug("[MSM pipeline] reader.ntraj = %s", reader.ntraj)
+        logger.debug(
+            "[MSM pipeline] reader.trajectory_lengths() = %s",
+            reader.trajectory_lengths(),
+        )
 
         feature_trajectories = tuple(
             np.asarray(values)
             for values in reader.get_output(stride=self.config.stride)
         )
-        print(f"[MSM pipeline] feature_trajectories: {len(feature_trajectories)} array(s)")
+        logger.debug(
+            "[MSM pipeline] feature_trajectories: %d array(s)",
+            len(feature_trajectories),
+        )
         for i, ft in enumerate(feature_trajectories):
-            print(f"  traj {i}: shape={ft.shape}, dtype={ft.dtype}")
+            logger.debug("  traj %d: shape=%s, dtype=%s", i, ft.shape, ft.dtype)
 
         reducer_model, reduced_trajectories = self._reduce(pyemma, feature_trajectories)
-        print(f"[MSM pipeline] reduced_trajectories: {len(reduced_trajectories)} array(s)")
+        logger.debug(
+            "[MSM pipeline] reduced_trajectories: %d array(s)",
+            len(reduced_trajectories),
+        )
         for i, rt in enumerate(reduced_trajectories):
-            print(f"  traj {i}: shape={rt.shape}")
+            logger.debug("  traj %d: shape=%s", i, rt.shape)
 
         cluster = self._cluster(pyemma, reduced_trajectories, feature_spec)
         grid_discretization: GridDiscretization | None = None
@@ -154,9 +151,14 @@ class PyEMMAPipeline:
                 for dtraj in cluster.dtrajs
             )
             cluster_centers = np.asarray(cluster.clustercenters, dtype=float)
-        print(f"[MSM pipeline] cluster_dtrajs: {len(cluster_dtrajs)} dtraj(s)")
+        logger.debug("[MSM pipeline] cluster_dtrajs: %d dtraj(s)", len(cluster_dtrajs))
         for i, dt in enumerate(cluster_dtrajs):
-            print(f"  dtraj {i}: len={len(dt)}, unique states={len(np.unique(dt))}")
+            logger.debug(
+                "  dtraj %d: len=%d, unique states=%d",
+                i,
+                len(dt),
+                len(np.unique(dt)),
+            )
 
         discrete_msm = pyemma.msm.estimate_markov_model(
             _as_pyemma_trajectory_list(cluster_dtrajs),
@@ -320,9 +322,9 @@ class PyEMMAPipeline:
                     handle.write(
                         f"Validation plotting failed after MSM bundle export: {exc}\n"
                     )
-                print(
-                    f"[MSM pipeline] WARNING: validation plotting failed; "
-                    f"see {warn_path}"
+                logger.warning(
+                    "[MSM pipeline] validation plotting failed; see %s",
+                    warn_path,
                 )
 
             self._write_bundle_style_plots(bundle)
@@ -361,15 +363,16 @@ class PyEMMAPipeline:
                         ylabel=self.config.plot_ylabel,
                     )
                 )
-                print(f"[MSM pipeline] wrote bundle-style plots: {sub}")
+                logger.info("[MSM pipeline] wrote bundle-style plots: %s", sub)
             except Exception as exc:
                 os.makedirs(sub, exist_ok=True)
                 warn_path = os.path.join(sub, "plot_warnings.txt")
                 with open(warn_path, "w", encoding="utf-8") as handle:
                     handle.write(f"Bundle-style plotting failed: {exc}\n")
-                print(
-                    f"[MSM pipeline] WARNING: bundle-style plots failed for "
-                    f"{level}; see {warn_path}"
+                logger.warning(
+                    "[MSM pipeline] bundle-style plots failed for %s; see %s",
+                    level,
+                    warn_path,
                 )
 
     def _reduce(
