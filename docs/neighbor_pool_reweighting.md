@@ -2,24 +2,28 @@
 
 Neighbor-pool reweighting is a **spatially coupled** extension of the state-local Zwanzig estimator. After per-bin local Boltzmann factors are computed from QC-filtered frames, the method adjusts those factors using information from **adjacent bins on the CV grid** before reconstructing target probabilities.
 
-Covers the `neighbor_pool` backend in `felp summarize` / `felp run`: the **blend** solver, automatic **L-curve** τ selection, the legacy **GCV** score, and the optional **variational** solver.
+Covers the `neighbor_pool` backend in `felp summarize` / `felp run`: the **blend** solver, automatic **L-curve** $\tau$ selection, the legacy **GCV** score, and the optional **variational** solver.
 
 ## Role in the FELP pipeline
 
-For each microstate (grid bin) `i`, FELP first computes the usual independent quantities:
+For each microstate (grid bin) $i$, FELP first computes the usual independent quantities:
 
 | Symbol | Meaning |
 |--------|---------|
-| `f_i^local` | State-local mean Boltzmann factor (Zwanzig average with global log shift) |
-| `ESS_i` | Effective sample size of the state-local weights |
-| `π_i^ref` | Reference prior probability |
+| $f_i^{\mathrm{local}}$ | State-local mean Boltzmann factor (Zwanzig average with global log shift) |
+| $\mathrm{ESS}_i$ | Effective sample size of the state-local weights |
+| $\pi_i^{\mathrm{ref}}$ | Reference prior probability |
 
-Neighbor pooling produces a **reweight factor** `f_i` that may differ from `f_i^local`. Target probabilities follow the same normalization as independent Zwanzig:
+Neighbor pooling produces a **reweight factor** $f_i$ that may differ from $f_i^{\mathrm{local}}$. Target probabilities follow the same normalization as independent Zwanzig:
 
-```text
-Z = Σ_i π_i^ref · f_i
-π_i^target = π_i^ref · f_i / Z
-```
+$$
+Z = \sum_i \pi_i^{\mathrm{ref}} f_i
+$$
+
+$$
+\pi_i^{\mathrm{target}} =
+\frac{\pi_i^{\mathrm{ref}} f_i}{Z}
+$$
 
 Plotting and diagnostics use the same `microstate_summary.csv` columns (`reweight_factor`, `target_probability`, etc.) as other backends.
 
@@ -50,27 +54,40 @@ The **blend** solver is the manuscript estimator. It performs **per-bin** partia
 
 ### Blending formula
 
-```text
-w_i = ESS_i / (ESS_i + τ)
+$$
+w_i = \frac{\mathrm{ESS}_i}{\mathrm{ESS}_i + \tau}
+$$
 
-f_i = w_i · f_i^local + (1 - w_i) · f̄_{N(i)}^local
-```
+$$
+\bar{f}_{\mathcal{N}(i)}^{\mathrm{local}} =
+\frac{
+  \sum_{j \in \mathcal{N}(i)} \mathrm{ESS}_j f_j^{\mathrm{local}}
+}{
+  \sum_{j \in \mathcal{N}(i)} \mathrm{ESS}_j
+}
+$$
 
-where `f̄_{N(i)}^local` is the ESS-weighted mean of `f^local` over graph neighbors of `i` that have positive ESS and positive local factor.
+$$
+f_i =
+w_i f_i^{\mathrm{local}}
++ (1 - w_i)\bar{f}_{\mathcal{N}(i)}^{\mathrm{local}}
+$$
 
-### What τ means (blend)
+where $\bar{f}_{\mathcal{N}(i)}^{\mathrm{local}}$ is the ESS-weighted mean of $f^{\mathrm{local}}$ over graph neighbors of $i$ that have positive ESS and positive local factor.
 
-**τ is not** the number of frames, samples, or grid bins. It is a **dimensionless pseudocount** on the same scale as `ESS_i`:
+### What $\tau$ Means (Blend)
 
-| τ vs ESS_i | Effect |
+**$\tau$ is not** the number of frames, samples, or grid bins. It is a **dimensionless pseudocount** on the same scale as $\mathrm{ESS}_i$:
+
+| $\tau$ vs $\mathrm{ESS}_i$ | Effect |
 |------------|--------|
-| τ ≪ ESS_i | `w_i → 1` → stay local |
-| τ ≫ ESS_i | `w_i → 0` → trust neighbor pool |
-| τ ~ ESS_i | comparable local vs pooled contribution |
+| $\tau \ll \mathrm{ESS}_i$ | $w_i \to 1$: stay local |
+| $\tau \gg \mathrm{ESS}_i$ | $w_i \to 0$: trust neighbor pool |
+| $\tau \sim \mathrm{ESS}_i$ | comparable local vs pooled contribution |
 
-Example: `ESS_i = 10`, `τ = 50` gives `(1 - w_i) = 50/60 ≈ 83%` weight on the neighbor pool (strong spatial smoothing).
+Example: $\mathrm{ESS}_i = 10$, $\tau = 50$ gives $1 - w_i = 50/60 \approx 83\%$ weight on the neighbor pool (strong spatial smoothing).
 
-τ controls **how much each bin trusts its own noisy local average versus its neighbors’ local averages**. It does not change who the neighbors are; the grid definition does.
+$\tau$ controls **how much each bin trusts its own noisy local average versus its neighbors’ local averages**. It does not change who the neighbors are; the grid definition does.
 
 ### Recorded metadata (blend)
 
@@ -86,58 +103,74 @@ Run-level (`run_summary.json` → `neighbor_pool`):
 
 - `pool_solver`: `"blend"`
 - `tau`, `tau_mode`
-- τ-selection diagnostics (see below)
+- $\tau$-selection diagnostics (see below)
 
-## Automatic τ selection (blend)
+## Automatic $\tau$ Selection (Blend)
 
-When `--neighbor-pool-tau` is omitted, τ is chosen by `--neighbor-pool-tau-mode`.
+When `--neighbor-pool-tau` is omitted, $\tau$ is chosen by `--neighbor-pool-tau-mode`.
 
 ### L-curve (default: `lcurve`)
 
-For each candidate τ on a log-spaced grid from `1` to `10 × max(ESS)` (30 points):
+For each candidate $\tau$ on a log-spaced grid from $1$ to $10 \max_i(\mathrm{ESS}_i)$ (30 points):
 
 1. Apply the blend formula and compute  
-   **misfit** = `Σ_i ESS_i · (log f_i^local - log f_i)²`
-2. Compute **roughness** = `½ Σ_{(i,j) ∈ edges} (log f_i - log f_j)²` on the grid graph
-3. Form the curve `(misfit(τ), roughness(τ))`
+   $$
+   \mathcal{M}(\tau) =
+   \sum_i \mathrm{ESS}_i
+   \left[\log f_i^{\mathrm{local}} - \log f_i(\tau)\right]^2
+   $$
+2. Compute graph roughness on the grid graph:
+   $$
+   \mathcal{R}(\tau) =
+   \frac{1}{2}
+   \sum_{(i,j) \in E}
+   \left[\log f_i(\tau) - \log f_j(\tau)\right]^2
+   $$
+3. Form the curve $(\mathcal{M}(\tau), \mathcal{R}(\tau))$.
 
-The chosen τ is the **corner** of this curve: the point farthest from the straight chord joining the endpoints, evaluated in **log₁₀(misfit)** vs **log₁₀(roughness)** space (Hansen L-curve heuristic).
+The chosen $\tau$ is the **corner** of this curve: the point farthest from the straight chord joining the endpoints, evaluated in $\log_{10}\mathcal{M}$ vs $\log_{10}\mathcal{R}$ space (Hansen L-curve heuristic).
 
-**Why L-curve:** It balances fit and smoothness without an arbitrary multiplier (the legacy GCV score used `misfit + median(n_frames) × roughness`).
+**Why L-curve:** It balances fit and smoothness without an arbitrary multiplier (the legacy GCV score used $\mathcal{M} + \mathrm{median}(n_{\mathrm{frames}}) \mathcal{R}$).
 
 **Stored diagnostics:**
 
 - `lcurve_scan`: list of `{tau, misfit, roughness}` for all candidates
 - `lcurve_corner_index`, `lcurve_corner_misfit`, `lcurve_corner_roughness`
 
-Use `lcurve_scan` to plot the tradeoff and verify a clear elbow. On very sparse or low-overlap datasets the curve may be shallow; in that case prefer a fixed τ chosen from a small sweep.
+Use `lcurve_scan` to plot the tradeoff and verify a clear elbow. On very sparse or low-overlap datasets the curve may be shallow; in that case prefer a fixed $\tau$ chosen from a small sweep.
 
 ### GCV (`gcv`, legacy)
 
 Minimizes:
 
-```text
-score(τ) = misfit(τ) + median(n_frames_per_bin) × roughness(τ)
-```
+$$
+\mathrm{score}(\tau) =
+\mathcal{M}(\tau)
++ \mathrm{median}(n_{\mathrm{frames\ per\ bin}})\,\mathcal{R}(\tau)
+$$
 
-over the same τ grid. Retained for backward compatibility and comparison with earlier runs. The `median(n_frames)` scale (~60 on dense trajectories) is **not** derived from ESS theory.
+over the same $\tau$ grid. Retained for backward compatibility and comparison with earlier runs. The $\mathrm{median}(n_{\mathrm{frames}})$ scale (~60 on dense trajectories) is **not** derived from ESS theory.
 
 ### ESS summaries (`mean_ess`, `median_ess`)
 
-Set τ to the mean or median of positive bin ESS values (no optimization). Useful as a simple scale-aware default when L-curve/GCV are untrusted.
+Set $\tau$ to the mean or median of positive bin ESS values (no optimization). Useful as a simple scale-aware default when L-curve/GCV are untrusted.
 
-### Fixed τ (`--neighbor-pool-tau <value>`)
+### Fixed $\tau$ (`--neighbor-pool-tau <value>`)
 
-Skips automatic selection; `tau_mode` is recorded as `"fixed"`. Recommended when you want reproducible smoothing strength across projects (e.g. τ = 50 after a documented sweep).
+Skips automatic selection; `tau_mode` is recorded as `"fixed"`. Recommended when you want reproducible smoothing strength across projects (e.g. $\tau = 50$ after a documented sweep).
 
 ## Optional: `--neighbor-pool-min-local-weight`
 
-Default `0.0` (no effect). When `> 0`, after computing `f_i` the code enforces:
+Default `0.0` (no effect). When `> 0`, after computing $f_i$ the code enforces:
 
-```text
-w_i ← max(w_i, w_min)
-f_i ← w_i · f_i^local + (1 - w_i) · f_i
-```
+$$
+w_i \leftarrow \max(w_i, w_{\min})
+$$
+
+$$
+f_i \leftarrow
+w_i f_i^{\mathrm{local}} + (1 - w_i) f_i
+$$
 
 This is a post-hoc guardrail to prevent extreme pooling in very low-ESS bins. It reuses the blend weight definition.
 
@@ -147,19 +180,32 @@ This is a post-hoc guardrail to prevent extreme pooling in very low-ESS bins. It
 --neighbor-pool-solver variational
 ```
 
-The variational solver replaces the per-bin blend with a **coupled Gaussian Markov random field** on log-factors `y_i = log f_i`:
+The variational solver replaces the per-bin blend with a **coupled Gaussian Markov random field** on log-factors $y_i = \log f_i$:
 
-```text
-min_y  Σ_i ESS_i · (y_i - y_i^local)²  +  (1/τ) · ½ yᵀ L y
-```
+$$
+\min_y
+\sum_i \mathrm{ESS}_i\left(y_i - y_i^{\mathrm{local}}\right)^2
++ \frac{1}{\tau}\,\frac{1}{2}y^\mathsf{T} L y
+$$
 
-solved as `(diag(ESS) + L/τ) y = diag(ESS) y^local`, then `f_i = exp(y_i)`.
+solved as
 
-Here **large τ** means **weak** neighbor coupling (→ independent limit), opposite in spirit to blend τ.
+$$
+\left[\operatorname{diag}(\mathrm{ESS}) + \frac{L}{\tau}\right]y =
+\operatorname{diag}(\mathrm{ESS})\,y^{\mathrm{local}},
+$$
 
-Automatic τ (`--neighbor-pool-tau-mode variational`) minimizes the profile energy `F*(τ)` and often drives τ to the **upper search bound** on sparse, noisy data (e.g. chignolin), collapsing to independent Zwanzig. **Do not use variational auto-τ** unless you are explicitly studying that model.
+then
 
-Use **blend** for spatial smoothing of discrete maps. Use **variational** only with fixed τ and clear validation if exploring the coupled log-factor model.
+$$
+f_i = \exp(y_i).
+$$
+
+Here **large $\tau$** means **weak** neighbor coupling ($\to$ independent limit), opposite in spirit to blend $\tau$.
+
+Automatic $\tau$ (`--neighbor-pool-tau-mode variational`) minimizes the profile energy $F^*(\tau)$ and often drives $\tau$ to the **upper search bound** on sparse, noisy data (e.g. chignolin), collapsing to independent Zwanzig. **Do not use variational auto-$\tau$** unless you are explicitly studying that model.
+
+Use **blend** for spatial smoothing of discrete maps. Use **variational** only with fixed $\tau$ and clear validation if exploring the coupled log-factor model.
 
 ## CLI reference
 
@@ -167,7 +213,7 @@ Use **blend** for spatial smoothing of discrete maps. Use **variational** only w
 |------|---------|-------------|
 | `--reweighting-methods neighbor_pool` | omit | Enable this backend (can combine with `independent`, `laplacian`, `frame`) |
 | `--neighbor-pool-solver` | `blend` | `blend` or `variational` |
-| `--neighbor-pool-tau` | *(omit)* | Fixed τ; skips auto selection |
+| `--neighbor-pool-tau` | *(omit)* | Fixed $\tau$; skips auto selection |
 | `--neighbor-pool-tau-mode` | `lcurve` | `lcurve`, `gcv`, `mean_ess`, `median_ess` (blend); `variational` (+ `gcv` alias) for variational solver |
 | `--neighbor-pool-min-local-weight` | `0` | Minimum local blend weight |
 | `--neighbor-pool-max-neighbors` | `4` | kNN cap for non-grid atlases |
@@ -195,7 +241,7 @@ python felp.py summarize \
 
 (`--neighbor-pool-solver blend` and `--neighbor-pool-tau-mode lcurve` are optional; they are the defaults.)
 
-### Example: fixed τ = 50 (blend)
+### Example: fixed $\tau = 50$ (blend)
 
 ```bash
   --neighbor-pool-solver blend \
@@ -211,11 +257,11 @@ Run two output directories differing only in `--neighbor-pool-tau-mode lcurve` v
 | Backend | Variable smoothed | Coupling |
 |---------|-------------------|----------|
 | **independent** | none | per-bin Zwanzig only |
-| **neighbor_pool (blend)** | `f_i` | local ↔ neighbor **local** factors |
-| **laplacian** | `ΔG_i` | MAP with `λ (k_B T)² Σ (∇ΔG)²` on grid |
+| **neighbor_pool (blend)** | $f_i$ | local ↔ neighbor **local** factors |
+| **laplacian** | $\Delta G_i$ | MAP with $\lambda (k_B T)^2 \sum(\nabla \Delta G)^2$ on grid |
 | **frame** | global SNIS | continuous frame weights, then bin |
 
-Neighbor-pool (blend) is the lightest-touch spatial regularizer: it does not re-optimize energies and preserves the Zwanzig interpretation of `f_i^local` while sharing information across the grid.
+Neighbor-pool (blend) is the lightest-touch spatial regularizer: it does not re-optimize energies and preserves the Zwanzig interpretation of $f_i^{\mathrm{local}}$ while sharing information across the grid.
 
 ## Implementation
 

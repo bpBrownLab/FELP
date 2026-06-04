@@ -10,7 +10,7 @@ FELP does not create new conformational basins. It estimates the perturbed distr
 
 ## Reference and perturbed state probabilities
 
-Let $x$ denote a configuration, $U_0(x)$ the reference potential, $U_1(x)$ the perturbed potential, and $\beta = 1 / (k_B T)$. A microstate indicator $\chi_i(x)$ defines the restricted partition function
+Let $x$ denote a configuration, $U_0(x)$ the reference potential, $U_1(x)$ the perturbed potential, and $\beta = (k_B T)^{-1}$. A microstate indicator $\chi_i(x)$ defines the restricted partition function
 
 $$
 Z_a(i) = \int \chi_i(x) \exp[-\beta U_a(x)]\,dx
@@ -36,9 +36,9 @@ so the FELP target distribution is
 $$
 \pi_1(i) =
 \frac{
-  \pi_0(i)\left\langle \exp[-\beta \Delta U] \right\rangle_{0,i}
+  \pi_0(i)\left\langle \exp[-\beta \Delta U(x)] \right\rangle_{0,i}
 }{
-  \sum_k \pi_0(k)\left\langle \exp[-\beta \Delta U] \right\rangle_{0,k}
+  \sum_k \pi_0(k)\left\langle \exp[-\beta \Delta U(x)] \right\rangle_{0,k}
 }
 $$
 
@@ -63,13 +63,13 @@ $$
 The shift $s$ is global, so it cancels during normalization. The finite-sample estimate is
 
 $$
-\pi_{\mathrm{target}}(i) =
-\frac{\pi_{\mathrm{reference}}(i) f_i}
-{\sum_k \pi_{\mathrm{reference}}(k) f_k}
+\hat{\pi}_1(i) =
+\frac{\hat{\pi}_0(i) f_i}
+{\sum_k \hat{\pi}_0(k) f_k}
 $$
 
 $$
-F_i = -k_B T \ln \pi_{\mathrm{target}}(i) + C
+F_1(i) = -k_B T \ln \hat{\pi}_1(i) + C
 $$
 
 where $C$ shifts the lowest finite free energy to zero.
@@ -111,22 +111,22 @@ $$
 
 Low $\mathrm{ESS}_i$ means the state-local factor is controlled by too few frames.
 
-FELP only estimates target probabilities on states with reference support. With `raw_counts` priors, states never visited by the reference have $\pi_{\mathrm{reference}} = 0$, no evaluated frames, and $\pi_{\mathrm{target}} = 0$. They are absent from the estimated landscape, not detected as low overlap.
+FELP only estimates target probabilities on states with reference support. With `raw_counts` priors, states never visited by the reference have $\hat{\pi}_0 = 0$, no evaluated frames, and $\hat{\pi}_1 = 0$. They are absent from the estimated landscape, not detected as low overlap.
 
 This is the key asymmetry in the manuscript: a broad reference can often predict a narrower target (GLY->ALA), but a narrow reference cannot recover a broader target (ALA->GLY) unless the needed conformations were sampled.
 
 The manuscript summarizes unreliable target probability mass as
 
 $$
-U = \sum_i \pi_{\mathrm{target}}(i)\,
-\mathbb{1}\{\mathrm{ESS}_i < \epsilon_i\}
+\mathcal{U} = \sum_i \hat{\pi}_1(i)\,
+\mathbf{1}\{\mathrm{ESS}_i < \epsilon_i\}
 $$
 
 The implementation extends this to include state-level QC flags:
 
 $$
-U = \sum_i \pi_{\mathrm{target}}(i)\,
-\mathbb{1}\{\mathrm{ESS}_i < \epsilon_i \ \mathrm{or}\ q_i = 1\}
+\mathcal{U} = \sum_i \hat{\pi}_1(i)\,
+\mathbf{1}\{\mathrm{ESS}_i < \epsilon_i \; \mathrm{or}\; q_i = 1\}
 $$
 
 $$
@@ -151,13 +151,15 @@ No scalar diagnostic can prove that an unsampled target basin exists. For covera
 
 ## Neighbor-pool regularization
 
-The manuscript uses neighbor pooling to stabilize noisy local factors on a discrete grid. For eligible neighbors $N(i)$,
+The manuscript uses neighbor pooling to stabilize noisy local factors on a discrete grid. For eligible neighbors $\mathcal{N}(i)$,
 
 $$
 \bar{f}_i =
-\frac{\sum_{j \in N(i)} \mathrm{ESS}_j f_j}
-{\sum_{j \in N(i)} \mathrm{ESS}_j}
+\frac{\sum_{j \in \mathcal{N}(i)} \mathrm{ESS}_j f_j}
+{\sum_{j \in \mathcal{N}(i)} \mathrm{ESS}_j}
 $$
+
+with $\bar{f}_i = f_i$ when no eligible neighbors are available.
 
 $$
 \alpha_i = \frac{\mathrm{ESS}_i}{\mathrm{ESS}_i + \tau}
