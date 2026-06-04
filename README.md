@@ -4,6 +4,10 @@ Free Energy Landscape Perturbation: restrained, state-local reweighting of a ref
 
 Given a reference trajectory and discrete microstates (φ/ψ grid, JSON definitions, or MSM bundle), FELP evaluates per-frame energy differences and aggregates them with a state-local Zwanzig estimator to obtain target-state populations and relative free energies.
 
+<p align="center">
+  <img src="manuscript/figures/felp_toc_graphic.png" alt="FELP: reweighting a reference free energy landscape under a restrained mutation to predict mutation-induced population shifts, with ESS/overlap diagnostics." width="720">
+</p>
+
 ## Installation
 
 FELP runs from a git checkout. There is no PyPI package, and `pip install` does not
