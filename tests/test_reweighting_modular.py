@@ -145,10 +145,9 @@ def test_neighbor_pool_config_parses_chebyshev_alias() -> None:
     assert config.chebyshev_radius == 2
 
 
-def test_neighbor_pool_default_connectivity_is_chebyshev3() -> None:
+def test_neighbor_pool_default_connectivity_is_cardinal() -> None:
     config = NeighborPoolConfig()
-    assert config.grid_connectivity == "chebyshev"
-    assert config.chebyshev_radius == 3
+    assert config.grid_connectivity == "cardinal"
 
 
 def test_independent_matches_legacy_aggregator() -> None:

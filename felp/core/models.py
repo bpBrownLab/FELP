@@ -983,7 +983,7 @@ class NeighborPoolConfig:
     solver: str = "blend"
     min_local_weight: float = 0.0
     max_neighbors: int = 4
-    grid_connectivity: str = "chebyshev3"
+    grid_connectivity: str = "cardinal"
     chebyshev_radius: int = 3
 
     def __post_init__(self) -> None:
@@ -1036,7 +1036,7 @@ class NeighborPoolConfig:
             solver=str(payload.get("solver", payload.get("pool_solver", "blend"))),
             min_local_weight=float(payload.get("min_local_weight", 0.0)),
             max_neighbors=int(payload.get("max_neighbors", 4)),
-            grid_connectivity=str(payload.get("grid_connectivity", "chebyshev3")),
+            grid_connectivity=str(payload.get("grid_connectivity", "cardinal")),
             chebyshev_radius=int(payload.get("chebyshev_radius", 3)),
         )
 

@@ -77,7 +77,7 @@ def build_reweighting_prep(
     reference_counts: dict[str, int] | None = None,
     workers: int = 1,
     max_neighbors: int = 4,
-    grid_connectivity: str = "chebyshev3",
+    grid_connectivity: str = "cardinal",
     chebyshev_radius: int = 3,
 ) -> ReweightingPrep:
     """Run grouping, priors, QC, and per-state weight construction once."""

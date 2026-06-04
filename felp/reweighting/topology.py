@@ -309,7 +309,7 @@ def build_grid_topology(
     atlas: MicrostateAtlas,
     *,
     max_neighbors: int = 4,
-    grid_connectivity: str = "chebyshev3",
+    grid_connectivity: str = "cardinal",
     chebyshev_radius: int = 3,
 ) -> GridTopology | None:
     """Build a neighbor graph for spatially coupled reweighting estimators."""

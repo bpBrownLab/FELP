@@ -428,7 +428,7 @@ def _add_reweighting_method_arguments(parser: argparse.ArgumentParser) -> None:
     )
     group.add_argument(
         "--neighbor-pool-grid-connectivity",
-        default="chebyshev3",
+        default="cardinal",
         help=(
             "Neighbor stencil for regular CV-grid microstates (1D/2D/3D). 'cardinal' "
             "uses face-sharing bins. 'chebyshev' uses a Chebyshev (L_inf) ball in "
@@ -2387,7 +2387,7 @@ def build_reweighting_config(namespace: argparse.Namespace) -> ReweightingConfig
             ),
             max_neighbors=int(getattr(namespace, "neighbor_pool_max_neighbors", 4)),
             grid_connectivity=str(
-                getattr(namespace, "neighbor_pool_grid_connectivity", "chebyshev3")
+                getattr(namespace, "neighbor_pool_grid_connectivity", "cardinal")
             ),
             chebyshev_radius=int(
                 getattr(namespace, "neighbor_pool_chebyshev_radius", 3)

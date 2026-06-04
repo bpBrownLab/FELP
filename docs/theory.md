@@ -190,9 +190,7 @@ $$
 | `independent` | Baseline manuscript estimator | $f_i = \langle \exp[-\beta \Delta U]\rangle_i$ |
 | `neighbor_pool` | Manuscript regularizer | ESS-weighted blend of $f_i$ with neighboring local factors |
 
-Use `independent` as the baseline. Use `neighbor_pool` for sparse/noisy grid maps when local factors should vary smoothly over neighboring states.
-
-The manuscript benchmarks used cardinal grid neighbors for neighbor pooling. The CLI default currently uses `chebyshev3`; pass `--neighbor-pool-grid-connectivity cardinal` to reproduce the manuscript neighbor stencil.
+Use `independent` as the baseline. Use `neighbor_pool` for sparse/noisy grid maps when local factors should vary smoothly over neighboring states. Neighbor pooling defaults to `cardinal` grid connectivity.
 
 ## Main limitations
 

@@ -34,8 +34,16 @@ data/**
 !data/GLY/*.nc
 !data/run_*.sh
 
-# Generated figure exports at repo root
-figures/
+# Generated figure exports at repo root (not docs/figures/)
+/figures/
+
+# Internal analysis scripts (public repo keeps only felp.py wrappers)
+scripts/*
+!scripts/_dispatch.py
+!scripts/felp_run.py
+!scripts/felp_plot.py
+!scripts/msm_fit.py
+!scripts/msm_plot.py
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
