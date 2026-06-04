@@ -84,7 +84,7 @@ FELP supports three state sources:
 | `file` | Loaded `reference_probability` values or raw counts |
 | `msm_bundle` | Loaded MSM probabilities or raw counts |
 
-The manuscript benchmarks used raw-count priors from MD trajectories. Loaded priors are useful when state definitions already carry a trusted stationary distribution.
+The manuscript benchmarks used raw-count priors from MD trajectories. Loaded priors are useful when state definitions already carry an established stationary distribution.
 
 By default, grid states are target-residue phi/psi bins. File-defined states can use other CV ranges, including distances. MSM bundles provide cluster or metastable states from a PyEMMA workflow.
 
@@ -100,7 +100,7 @@ $$
 
 Failed or non-finite frames are excluded before reweighting.
 
-## Support diagnostics
+## Overlap and validity diagnostics
 
 The local effective sample size is
 
@@ -109,9 +109,9 @@ $$
 \frac{\left(\sum_j w_{ij}\right)^2}{\sum_j w_{ij}^2}
 $$
 
-Low $\mathrm{ESS}_i$ means the state-local factor is controlled by too few frames.
+Low $\mathrm{ESS}_i$ indicates that the local Zwanzig factor depends on too few configurations to be reliable.
 
-FELP only estimates target probabilities on states with reference support. With `raw_counts` priors, states never visited by the reference have $\hat{\pi}_0 = 0$, no evaluated frames, and $\hat{\pi}_1 = 0$. They are absent from the estimated landscape, not detected as low overlap.
+FELP estimates the perturbed distribution only over the conformational state space sampled by the reference ensemble. With `raw_counts` priors, states never visited by the reference have $\hat{\pi}_0 = 0$, no evaluated frames, and $\hat{\pi}_1 = 0$. They are absent from the estimated landscape rather than flagged by an overlap diagnostic.
 
 This is the key asymmetry in the manuscript: a broad reference can often predict a narrower target (GLY->ALA), but a narrow reference cannot recover a broader target (ALA->GLY) unless the needed conformations were sampled.
 
@@ -135,19 +135,19 @@ $$
 
 where $q_i = 1$ marks states flagged for dominant-frame control after QC.
 
-FELP also reports absolute low-ESS masses ($\mathrm{ESS}_i < 10$ and $\mathrm{ESS}_i < 50$) for continuity with earlier analyses. These are advisory rules of thumb. The scale-aware `target_probability_unreliable_local_support` field is the better single summary when frame counts differ across states.
+FELP also reports absolute low-ESS masses ($\mathrm{ESS}_i < 10$ and $\mathrm{ESS}_i < 50$) for continuity with earlier analyses. These are advisory rules of thumb. The scale-aware unreliable-target-mass field is the better single summary when frame counts differ across states.
 
 Other overlap fields should be read in context:
 
 | Metric | Use | Caveat |
 |--------|-----|--------|
-| `target_probability_unreliable_local_support` | Primary support check for target-probability states | Cannot see unsampled target-only basins |
+| `target_probability_unreliable_local_support` | Output field for unreliable target probability mass | Cannot see unsampled target-only basins |
 | `target_probability_low_ess_mass_ess_lt_10` | Manuscript-style low-ESS mass summary | Absolute threshold; harsh for small states, lenient for large states |
 | `max_normalized_weight` | Detects frame-level domination | Global, not state-local |
 | `overlap_coefficient` | Describes similarity of reference and target state distributions | Low values can be benign for subset targets such as GLY->ALA |
 | global ESS fraction | Detects global weight concentration | Can penalize valid concentration into a target subset |
 
-No scalar diagnostic can prove that an unsampled target basin exists. For coverage gaps, inspect reference occupancy, compare forward/reverse directions when possible, and use chemical knowledge about whether the target is broader than the reference.
+No scalar diagnostic can prove that an unsampled target basin exists. To assess missing phase space, inspect reference occupancy, compare forward/reverse directions when possible, and use chemical knowledge about whether the target ensemble is broader than the reference.
 
 ## Neighbor-pool regularization
 
@@ -172,9 +172,9 @@ $$
 
 Well-sampled states retain their local factors; low-ESS states borrow from adjacent states. $\tau$ is selected by an L-curve criterion over log-factor misfit and graph roughness unless a fixed value is supplied. See [neighbor_pool_reweighting.md](neighbor_pool_reweighting.md).
 
-## Reweighting backends
+## Reweighting methods
 
-The manuscript method is the independent state-local Zwanzig estimator, optionally regularized with neighbor-pool blend. The `laplacian` and `frame` backends are implementation options for exploration and comparison; they are not the primary manuscript estimator.
+The verified manuscript workflow uses the independent state-local Zwanzig estimator, optionally regularized with neighbor-pool blend.
 
 All methods use the same prepared data: eligible frames grouped by microstate, reference probabilities, state-local Boltzmann factors, ESS values, and optional grid topology. Final target probabilities always have the form
 
@@ -189,10 +189,8 @@ $$
 |--------|--------|-----------------|
 | `independent` | Baseline manuscript estimator | $f_i = \langle \exp[-\beta \Delta U]\rangle_i$ |
 | `neighbor_pool` | Manuscript regularizer | ESS-weighted blend of $f_i$ with neighboring local factors |
-| `laplacian` | Implementation extra | $\exp[-\beta \Delta G_i]$ after MAP smoothing of state excess free energies |
-| `frame` | Implementation extra | Global self-normalized frame weights, binned back to microstates |
 
-Use `independent` as the baseline. Use `neighbor_pool` for sparse/noisy grid maps when local factors should vary smoothly over neighboring states. Treat `laplacian` and `frame` as sensitivity analyses unless they have been validated for the system.
+Use `independent` as the baseline. Use `neighbor_pool` for sparse/noisy grid maps when local factors should vary smoothly over neighboring states.
 
 The manuscript benchmarks used cardinal grid neighbors for neighbor pooling. The CLI default currently uses `chebyshev3`; pass `--neighbor-pool-grid-connectivity cardinal` to reproduce the manuscript neighbor stencil.
 

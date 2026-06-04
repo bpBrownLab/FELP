@@ -1,267 +1,168 @@
 # Neighbor-pool reweighting
 
-Neighbor-pool reweighting is a **spatially coupled** extension of the state-local Zwanzig estimator. After per-bin local Boltzmann factors are computed from QC-filtered frames, the method adjusts those factors using information from **adjacent bins on the CV grid** before reconstructing target probabilities.
+This document describes the verified reweighting choices used for manuscript-style FELP analyses:
 
-Covers the `neighbor_pool` backend in `felp summarize` / `felp run`: the **blend** solver, automatic **L-curve** $\tau$ selection, the legacy **GCV** score, and the optional **variational** solver.
+- **No pooling**: the independent state-local Zwanzig estimator.
+- **Neighbor pooling**: ESS-weighted pooling of adjacent state-local factors, using either a fixed $\tau$ or automatic L-curve selection.
 
-## Role in the FELP pipeline
+## No pooling
 
-For each microstate (grid bin) $i$, FELP first computes the usual independent quantities:
-
-| Symbol | Meaning |
-|--------|---------|
-| $f_i^{\mathrm{local}}$ | State-local mean Boltzmann factor (Zwanzig average with global log shift) |
-| $\mathrm{ESS}_i$ | Effective sample size of the state-local weights |
-| $\pi_i^{\mathrm{ref}}$ | Reference prior probability |
-
-Neighbor pooling produces a **reweight factor** $f_i$ that may differ from $f_i^{\mathrm{local}}$. Target probabilities follow the same normalization as independent Zwanzig:
+The baseline estimator treats each microstate independently. For evaluated frames $x_{ij}$ in state $i$, FELP computes
 
 $$
-Z = \sum_i \pi_i^{\mathrm{ref}} f_i
+w_{ij} = \exp[-\beta(\Delta U_{ij} - s)]
 $$
 
+and the state-local Zwanzig factor
+
 $$
-\pi_i^{\mathrm{target}} =
-\frac{\pi_i^{\mathrm{ref}} f_i}{Z}
+f_i = \frac{1}{n_i}\sum_{j=1}^{n_i} w_{ij}.
 $$
 
-Plotting and diagnostics use the same `microstate_summary.csv` columns (`reweight_factor`, `target_probability`, etc.) as other backends.
+The perturbed state probabilities are then
+
+$$
+\hat{\pi}_1(i) =
+\frac{\hat{\pi}_0(i) f_i}
+{\sum_k \hat{\pi}_0(k) f_k}.
+$$
+
+This is the primary FELP estimator. It is the clearest choice when every important target-probability state has adequate local effective sample size.
+
+## Neighbor pooling
+
+Neighbor pooling regularizes noisy state-local factors on a discrete grid. It assumes that adjacent microstates within a basin should have smoothly varying perturbation factors.
+
+For eligible neighbors $\mathcal{N}(i)$, define the ESS-weighted pooled factor
+
+$$
+\bar{f}_i =
+\frac{\sum_{j \in \mathcal{N}(i)} \mathrm{ESS}_j f_j}
+{\sum_{j \in \mathcal{N}(i)} \mathrm{ESS}_j},
+$$
+
+with $\bar{f}_i = f_i$ when no eligible neighbors are available. The blended factor is
+
+$$
+f_i^{\mathrm{blend}} =
+\alpha_i f_i + (1-\alpha_i)\bar{f}_i,
+\qquad
+\alpha_i = \frac{\mathrm{ESS}_i}{\mathrm{ESS}_i + \tau}.
+$$
+
+States with high $\mathrm{ESS}_i$ retain their local factors; states with low $\mathrm{ESS}_i$ borrow more from adjacent states. The final normalization is the same as above, using $f_i^{\mathrm{blend}}$ in place of $f_i$.
+
+## Choosing $\tau$
+
+The manuscript workflow uses two choices:
+
+| Choice | Use |
+|--------|-----|
+| Fixed $\tau$ | Reproducible smoothing strength across related analyses |
+| L-curve $\tau$ | Automatic balance between local fidelity and graph smoothness |
+
+For fixed $\tau$:
+
+```bash
+--reweighting-method neighbor_pool \
+--neighbor-pool-tau 50
+```
+
+When $\tau$ is omitted, the blend solver uses the L-curve criterion. For each candidate $\tau$, FELP computes the log-factor misfit
+
+$$
+\mathcal{M}(\tau) =
+\sum_i \mathrm{ESS}_i
+\left[\ln f_i - \ln f_i^{\mathrm{blend}}(\tau)\right]^2
+$$
+
+and graph roughness
+
+$$
+\mathcal{R}(\tau) =
+\frac{1}{2}
+\sum_i
+\sum_{j \in \mathcal{N}(i)}
+\left[
+\ln f_i^{\mathrm{blend}}(\tau)
+- \ln f_j^{\mathrm{blend}}(\tau)
+\right]^2.
+$$
+
+The selected $\tau$ is the corner of the $\mathcal{M}$--$\mathcal{R}$ curve in log-log space, defined as the point farthest from the chord connecting the two extremes.
+
+```bash
+--reweighting-method neighbor_pool \
+--neighbor-pool-solver blend \
+--neighbor-pool-tau-mode lcurve
+```
+
+`--neighbor-pool-solver blend` and `--neighbor-pool-tau-mode lcurve` are the defaults for neighbor pooling.
 
 ## Grid topology
 
-Coupling requires a neighbor graph on microstates:
+The neighbor set $\mathcal{N}(i)$ is defined by the grid connectivity. Two families are available:
 
-1. **Preferred:** regular 1D/2D/3D CV-grid microstates (`bin_indices` or uniform `cv_ranges`).
-   - **`chebyshev3` (default):** Chebyshev (L_inf) ball of radius 3 in bin-index space
-     (6 neighbors in 1D, 48 in 2D, 124 in 3D interior cells).
-   - **`cardinal`:** face-sharing bins (2 in 1D, 4 in 2D, 6 in 3D).
-   - **`chebyshev` / `chebyshevN`:** Chebyshev ball with explicit radius `N`. `chebyshev1`
-     adds diagonals (8 neighbors in 2D); `chebyshev2` adds the next shell (24 in 2D).
-2. **Fallback:** k-nearest neighbors in CV space, capped by `--neighbor-pool-max-neighbors`
-   (default 4). Used for irregular k-means MSM atlases; grid-connectivity flags are
-   ignored. Grid-based MSM bundles (`msm-fit --clustering-method grid`) use the same
-   rectilinear topology as file/grid FELP microstates.
+- **`cardinal`**: face-sharing bins only (2 in 1D, 4 in 2D, 6 in 3D).
+- **`chebyshev`N**: every bin within an $L_\infty$ (Chebyshev) radius $N$, including diagonals.
 
-The manuscript benchmarks used cardinal grid neighbors. The current CLI default is
-`chebyshev3`; pass `--neighbor-pool-grid-connectivity cardinal` to reproduce the
-manuscript neighbor stencil.
+The figures below show which bins (blue) are pooled into the target bin (red) for each stencil.
 
-If no topology is available, neighbor-pool degrades to local factors and records a warning in `run_summary.json`.
+### 1D
 
-## Solver: blend (default, recommended)
+![1D cardinal vs Chebyshev neighbor stencils](figures/neighbor_stencils_1d.png)
 
-The **blend** solver is the manuscript estimator. It performs **per-bin** partial pooling toward an ESS-weighted average of **neighbors’ local factors** (not a global linear solve).
+In 1D, `cardinal` pools the two adjacent bins, while `chebyshev3` reaches three bins in each direction (six neighbors).
 
-### Blending formula
+### 2D
 
-$$
-w_i = \frac{\mathrm{ESS}_i}{\mathrm{ESS}_i + \tau}
-$$
+![2D cardinal vs Chebyshev neighbor stencils](figures/neighbor_stencils_2d.png)
 
-$$
-\bar{f}_{\mathcal{N}(i)}^{\mathrm{local}} =
-\frac{
-  \sum_{j \in \mathcal{N}(i)} \mathrm{ESS}_j f_j^{\mathrm{local}}
-}{
-  \sum_{j \in \mathcal{N}(i)} \mathrm{ESS}_j
-}
-$$
+In 2D, `cardinal` pools the four edge-sharing bins. `chebyshev1` adds the four diagonals (eight neighbors), and `chebyshev3` pools the full $7\times7$ block around the target bin (48 neighbors). Broader stencils smooth more aggressively and can blur genuine basin boundaries.
 
-$$
-f_i =
-w_i f_i^{\mathrm{local}}
-+ (1 - w_i)\bar{f}_{\mathcal{N}(i)}^{\mathrm{local}}
-$$
+### Choosing a stencil
 
-where $\bar{f}_{\mathcal{N}(i)}^{\mathrm{local}}$ is the ESS-weighted mean of $f^{\mathrm{local}}$ over graph neighbors of $i$ that have positive ESS and positive local factor.
-
-### What $\tau$ Means (Blend)
-
-**$\tau$ is not** the number of frames, samples, or grid bins. It is a **dimensionless pseudocount** on the same scale as $\mathrm{ESS}_i$:
-
-| $\tau$ vs $\mathrm{ESS}_i$ | Effect |
-|------------|--------|
-| $\tau \ll \mathrm{ESS}_i$ | $w_i \to 1$: stay local |
-| $\tau \gg \mathrm{ESS}_i$ | $w_i \to 0$: trust neighbor pool |
-| $\tau \sim \mathrm{ESS}_i$ | comparable local vs pooled contribution |
-
-Example: $\mathrm{ESS}_i = 10$, $\tau = 50$ gives $1 - w_i = 50/60 \approx 83\%$ weight on the neighbor pool (strong spatial smoothing).
-
-$\tau$ controls **how much each bin trusts its own noisy local average versus its neighbors’ local averages**. It does not change who the neighbors are; the grid definition does.
-
-### Recorded metadata (blend)
-
-Per state (in aggregation metadata):
-
-- `raw_local_factor`
-- `pooled_neighbor_factor`
-- `pooling_weight` (= `w_i`)
-- `neighbor_state_ids`
-- `local_ess`
-
-Run-level (`run_summary.json` → `neighbor_pool`):
-
-- `pool_solver`: `"blend"`
-- `tau`, `tau_mode`
-- $\tau$-selection diagnostics (see below)
-
-## Automatic $\tau$ Selection (Blend)
-
-When `--neighbor-pool-tau` is omitted, $\tau$ is chosen by `--neighbor-pool-tau-mode`.
-
-### L-curve (default: `lcurve`)
-
-For each candidate $\tau$ on a log-spaced grid from $1$ to $10 \max_i(\mathrm{ESS}_i)$ (30 points):
-
-1. Apply the blend formula and compute  
-   $$
-   \mathcal{M}(\tau) =
-   \sum_i \mathrm{ESS}_i
-   \left[\log f_i^{\mathrm{local}} - \log f_i(\tau)\right]^2
-   $$
-2. Compute graph roughness on the grid graph:
-   $$
-   \mathcal{R}(\tau) =
-   \frac{1}{2}
-   \sum_{(i,j) \in E}
-   \left[\log f_i(\tau) - \log f_j(\tau)\right]^2
-   $$
-3. Form the curve $(\mathcal{M}(\tau), \mathcal{R}(\tau))$.
-
-The chosen $\tau$ is the **corner** of this curve: the point farthest from the straight chord joining the endpoints, evaluated in $\log_{10}\mathcal{M}$ vs $\log_{10}\mathcal{R}$ space (Hansen L-curve heuristic).
-
-**Why L-curve:** It balances fit and smoothness without an arbitrary multiplier (the legacy GCV score used $\mathcal{M} + \mathrm{median}(n_{\mathrm{frames}}) \mathcal{R}$).
-
-**Stored diagnostics:**
-
-- `lcurve_scan`: list of `{tau, misfit, roughness}` for all candidates
-- `lcurve_corner_index`, `lcurve_corner_misfit`, `lcurve_corner_roughness`
-
-Use `lcurve_scan` to plot the tradeoff and verify a clear elbow. On very sparse or low-overlap datasets the curve may be shallow; in that case prefer a fixed $\tau$ chosen from a small sweep.
-
-### GCV (`gcv`, legacy)
-
-Minimizes:
-
-$$
-\mathrm{score}(\tau) =
-\mathcal{M}(\tau)
-+ \mathrm{median}(n_{\mathrm{frames\ per\ bin}})\,\mathcal{R}(\tau)
-$$
-
-over the same $\tau$ grid. Retained for backward compatibility and comparison with earlier runs. The $\mathrm{median}(n_{\mathrm{frames}})$ scale (~60 on dense trajectories) is **not** derived from ESS theory.
-
-### ESS summaries (`mean_ess`, `median_ess`)
-
-Set $\tau$ to the mean or median of positive bin ESS values (no optimization). Useful as a simple scale-aware default when L-curve/GCV are untrusted.
-
-### Fixed $\tau$ (`--neighbor-pool-tau <value>`)
-
-Skips automatic selection; `tau_mode` is recorded as `"fixed"`. Recommended when you want reproducible smoothing strength across projects (e.g. $\tau = 50$ after a documented sweep).
-
-## Optional: `--neighbor-pool-min-local-weight`
-
-Default `0.0` (no effect). When `> 0`, after computing $f_i$ the code enforces:
-
-$$
-w_i \leftarrow \max(w_i, w_{\min})
-$$
-
-$$
-f_i \leftarrow
-w_i f_i^{\mathrm{local}} + (1 - w_i) f_i
-$$
-
-This is a post-hoc guardrail to prevent extreme pooling in very low-ESS bins. It reuses the blend weight definition.
-
-## Solver: variational (optional, experimental)
+The manuscript benchmarks used cardinal grid neighbors. To reproduce that stencil:
 
 ```bash
---neighbor-pool-solver variational
+--neighbor-pool-grid-connectivity cardinal
 ```
 
-The variational solver replaces the per-bin blend with a **coupled Gaussian Markov random field** on log-factors $y_i = \log f_i$:
+The current CLI default is `chebyshev3`, which is broader than the manuscript stencil. Use `cardinal` for manuscript-style analyses unless you have a documented reason to broaden the neighborhood.
 
-$$
-\min_y
-\sum_i \mathrm{ESS}_i\left(y_i - y_i^{\mathrm{local}}\right)^2
-+ \frac{1}{\tau}\,\frac{1}{2}y^\mathsf{T} L y
-$$
+If no neighbor topology is available, neighbor pooling falls back to local factors and records a warning in `run_summary.json`.
 
-solved as
+The stencil figures are generated by `scripts/plot_neighbor_pool_stencils.py`.
 
-$$
-\left[\operatorname{diag}(\mathrm{ESS}) + \frac{L}{\tau}\right]y =
-\operatorname{diag}(\mathrm{ESS})\,y^{\mathrm{local}},
-$$
+## Recommended commands
 
-then
-
-$$
-f_i = \exp(y_i).
-$$
-
-Here **large $\tau$** means **weak** neighbor coupling ($\to$ independent limit), opposite in spirit to blend $\tau$.
-
-Automatic $\tau$ (`--neighbor-pool-tau-mode variational`) minimizes the profile energy $F^*(\tau)$ and often drives $\tau$ to the **upper search bound** on sparse, noisy data (e.g. chignolin), collapsing to independent Zwanzig. **Do not use variational auto-$\tau$** unless you are explicitly studying that model.
-
-Use **blend** for spatial smoothing of discrete maps. Use **variational** only with fixed $\tau$ and clear validation if exploring the coupled log-factor model.
-
-## CLI reference
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--reweighting-methods neighbor_pool` | omit | Enable this backend (can combine with `independent`, `laplacian`, `frame`) |
-| `--neighbor-pool-solver` | `blend` | `blend` or `variational` |
-| `--neighbor-pool-tau` | *(omit)* | Fixed $\tau$; skips auto selection |
-| `--neighbor-pool-tau-mode` | `lcurve` | `lcurve`, `gcv`, `mean_ess`, `median_ess` (blend); `variational` (+ `gcv` alias) for variational solver |
-| `--neighbor-pool-min-local-weight` | `0` | Minimum local blend weight |
-| `--neighbor-pool-max-neighbors` | `4` | kNN cap for non-grid atlases |
-| `--neighbor-pool-grid-connectivity` | `chebyshev3` | Grid stencil: `cardinal`, `chebyshev`, or `chebyshevN` (1D/2D/3D) |
-| `--neighbor-pool-chebyshev-radius` | `3` | Radius when connectivity is `chebyshev` (ignored for `chebyshevN` aliases) |
-
-Multi-method summarize writes each backend under `reweighting_<method>/` plus `reweighting_comparison.json`.
-
-### Example: auto L-curve (blend)
+Independent/no-pooling baseline:
 
 ```bash
 python felp.py summarize \
   --raw-frame-results path/to/frame_results.csv \
-  --output-dir path/to/out \
+  --output-dir path/to/independent_summary \
   --microstate-source file \
-  --microstate-file path/to/auto_microstates.json \
+  --microstate-file path/to/microstates.json \
   --prior-probability-mode raw_counts \
-  --repartition \
-  --temperature-kelvin 310 \
-  --reweighting-qc-policy exclude-frames \
-  --reweighting-methods independent neighbor_pool laplacian frame \
-  --neighbor-pool-solver blend \
+  --reweighting-method independent
+```
+
+Neighbor pooling with L-curve $\tau$:
+
+```bash
+python felp.py summarize \
+  --raw-frame-results path/to/frame_results.csv \
+  --output-dir path/to/neighbor_pool_summary \
+  --microstate-source file \
+  --microstate-file path/to/microstates.json \
+  --prior-probability-mode raw_counts \
+  --reweighting-method neighbor_pool \
+  --neighbor-pool-grid-connectivity cardinal \
   --neighbor-pool-tau-mode lcurve
 ```
 
-(`--neighbor-pool-solver blend` and `--neighbor-pool-tau-mode lcurve` are optional; they are the defaults.)
-
-### Example: fixed $\tau = 50$ (blend)
-
-```bash
-  --neighbor-pool-solver blend \
-  --neighbor-pool-tau 50
-```
-
-### Example: compare L-curve vs GCV
-
-Run two output directories differing only in `--neighbor-pool-tau-mode lcurve` vs `gcv`, then compare `reweighting_neighbor_pool/run_summary.json` (`tau`, `lcurve_scan` or `gcv_score`) and state-level FEL plots (`reweighted_*_state_free_energy_landscape.png`).
-
-## Relation to other coupled backends
-
-| Backend | Variable smoothed | Coupling |
-|---------|-------------------|----------|
-| **independent** | none | per-bin Zwanzig only |
-| **neighbor_pool (blend)** | $f_i$ | local ↔ neighbor **local** factors |
-| **laplacian** | $\Delta G_i$ | MAP with $\lambda (k_B T)^2 \sum(\nabla \Delta G)^2$ on grid |
-| **frame** | global SNIS | continuous frame weights, then bin |
-
-Neighbor-pool (blend) is the lightest-touch spatial regularizer: it does not re-optimize energies and preserves the Zwanzig interpretation of $f_i^{\mathrm{local}}$ while sharing information across the grid.
+The same reweighting options can be passed to `felp.py run` when you want the chosen aggregation to happen immediately after frame evaluation.
 
 ## Implementation
 
