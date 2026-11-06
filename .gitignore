@@ -1,0 +1,32 @@
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.coverage*
+htmlcov/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+.env
+.venv/
+venv/
+*.log
+outputs/
+
+# Local editor and agent settings.
+.vscode/
+.agents/
+.codex/
+.aws/
+.felp_protocol_benchmark/
+
+# Generated TeX files.
+*.aux
+*.bbl
+*.blg
+*.fls
+*.fdb_latexmk
+*.synctex.gz

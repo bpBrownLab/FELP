@@ -1,0 +1,1509 @@
+{
+  "schema_version": 1,
+  "notes": "Portable original-score input manifest. Relative paths resolve under --project-root. Null paths require --input/--atlas overrides or editing. Ubiquitin is ongoing: add an entry when its scores and atlas exist. No target MD tables are silently inferred.",
+  "runs": [
+    {
+      "id": "GLY_to_ALA",
+      "group": "dipeptide",
+      "label": "GLY → ALA",
+      "input_csv": "data/GLY/felp_GLY_to_ALA_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "GLY_to_ARG",
+      "group": "dipeptide",
+      "label": "GLY → ARG",
+      "input_csv": "data/GLY/felp_GLY_to_ARG_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "GLY_to_ASN",
+      "group": "dipeptide",
+      "label": "GLY → ASN",
+      "input_csv": "data/GLY/felp_GLY_to_ASN_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "GLY_to_ASP",
+      "group": "dipeptide",
+      "label": "GLY → ASP",
+      "input_csv": "data/GLY/felp_GLY_to_ASP_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "GLY_to_CYS",
+      "group": "dipeptide",
+      "label": "GLY → CYS",
+      "input_csv": "data/GLY/felp_GLY_to_CYS_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "GLY_to_GLN",
+      "group": "dipeptide",
+      "label": "GLY → GLN",
+      "input_csv": "data/GLY/felp_GLY_to_GLN_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "GLY_to_GLU",
+      "group": "dipeptide",
+      "label": "GLY → GLU",
+      "input_csv": "data/GLY/felp_GLY_to_GLU_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "GLY_to_GLY",
+      "group": "dipeptide",
+      "label": "GLY → GLY",
+      "input_csv": "data/GLY/felp_GLY_to_GLY_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "GLY_to_HIS",
+      "group": "dipeptide",
+      "label": "GLY → HIS",
+      "input_csv": "data/GLY/felp_GLY_to_HIS_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "GLY_to_ILE",
+      "group": "dipeptide",
+      "label": "GLY → ILE",
+      "input_csv": "data/GLY/felp_GLY_to_ILE_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "GLY_to_LEU",
+      "group": "dipeptide",
+      "label": "GLY → LEU",
+      "input_csv": "data/GLY/felp_GLY_to_LEU_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "GLY_to_LYS",
+      "group": "dipeptide",
+      "label": "GLY → LYS",
+      "input_csv": "data/GLY/felp_GLY_to_LYS_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "GLY_to_MET",
+      "group": "dipeptide",
+      "label": "GLY → MET",
+      "input_csv": "data/GLY/felp_GLY_to_MET_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "GLY_to_PHE",
+      "group": "dipeptide",
+      "label": "GLY → PHE",
+      "input_csv": "data/GLY/felp_GLY_to_PHE_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "GLY_to_PRO",
+      "group": "dipeptide",
+      "label": "GLY → PRO",
+      "input_csv": "data/GLY/felp_GLY_to_PRO_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "GLY_to_SER",
+      "group": "dipeptide",
+      "label": "GLY → SER",
+      "input_csv": "data/GLY/felp_GLY_to_SER_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "GLY_to_THR",
+      "group": "dipeptide",
+      "label": "GLY → THR",
+      "input_csv": "data/GLY/felp_GLY_to_THR_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "GLY_to_TRP",
+      "group": "dipeptide",
+      "label": "GLY → TRP",
+      "input_csv": "data/GLY/felp_GLY_to_TRP_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "GLY_to_TYR",
+      "group": "dipeptide",
+      "label": "GLY → TYR",
+      "input_csv": "data/GLY/felp_GLY_to_TYR_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "GLY_to_VAL",
+      "group": "dipeptide",
+      "label": "GLY → VAL",
+      "input_csv": "data/GLY/felp_GLY_to_VAL_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "ALA_to_ALA",
+      "group": "dipeptide",
+      "label": "ALA → ALA",
+      "input_csv": "data/ALA/felp_ALA_to_ALA_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "ALA_to_ARG",
+      "group": "dipeptide",
+      "label": "ALA → ARG",
+      "input_csv": "data/ALA/felp_ALA_to_ARG_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "ALA_to_ASN",
+      "group": "dipeptide",
+      "label": "ALA → ASN",
+      "input_csv": "data/ALA/felp_ALA_to_ASN_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "ALA_to_ASP",
+      "group": "dipeptide",
+      "label": "ALA → ASP",
+      "input_csv": "data/ALA/felp_ALA_to_ASP_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "ALA_to_CYS",
+      "group": "dipeptide",
+      "label": "ALA → CYS",
+      "input_csv": "data/ALA/felp_ALA_to_CYS_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "ALA_to_GLN",
+      "group": "dipeptide",
+      "label": "ALA → GLN",
+      "input_csv": "data/ALA/felp_ALA_to_GLN_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "ALA_to_GLU",
+      "group": "dipeptide",
+      "label": "ALA → GLU",
+      "input_csv": "data/ALA/felp_ALA_to_GLU_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "ALA_to_GLY",
+      "group": "dipeptide",
+      "label": "ALA → GLY",
+      "input_csv": "data/ALA/felp_ALA_to_GLY_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "ALA_to_HIS",
+      "group": "dipeptide",
+      "label": "ALA → HIS",
+      "input_csv": "data/ALA/felp_ALA_to_HIS_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "ALA_to_ILE",
+      "group": "dipeptide",
+      "label": "ALA → ILE",
+      "input_csv": "data/ALA/felp_ALA_to_ILE_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "ALA_to_LEU",
+      "group": "dipeptide",
+      "label": "ALA → LEU",
+      "input_csv": "data/ALA/felp_ALA_to_LEU_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "ALA_to_LYS",
+      "group": "dipeptide",
+      "label": "ALA → LYS",
+      "input_csv": "data/ALA/felp_ALA_to_LYS_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "ALA_to_MET",
+      "group": "dipeptide",
+      "label": "ALA → MET",
+      "input_csv": "data/ALA/felp_ALA_to_MET_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "ALA_to_PHE",
+      "group": "dipeptide",
+      "label": "ALA → PHE",
+      "input_csv": "data/ALA/felp_ALA_to_PHE_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "ALA_to_PRO",
+      "group": "dipeptide",
+      "label": "ALA → PRO",
+      "input_csv": "data/ALA/felp_ALA_to_PRO_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "ALA_to_SER",
+      "group": "dipeptide",
+      "label": "ALA → SER",
+      "input_csv": "data/ALA/felp_ALA_to_SER_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "ALA_to_THR",
+      "group": "dipeptide",
+      "label": "ALA → THR",
+      "input_csv": "data/ALA/felp_ALA_to_THR_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "ALA_to_TRP",
+      "group": "dipeptide",
+      "label": "ALA → TRP",
+      "input_csv": "data/ALA/felp_ALA_to_TRP_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "ALA_to_TYR",
+      "group": "dipeptide",
+      "label": "ALA → TYR",
+      "input_csv": "data/ALA/felp_ALA_to_TYR_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "ALA_to_VAL",
+      "group": "dipeptide",
+      "label": "ALA → VAL",
+      "input_csv": "data/ALA/felp_ALA_to_VAL_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "PRO_to_ALA",
+      "group": "dipeptide",
+      "label": "PRO → ALA",
+      "input_csv": "data/PRO/felp_PRO_to_ALA_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "PRO_to_ARG",
+      "group": "dipeptide",
+      "label": "PRO → ARG",
+      "input_csv": "data/PRO/felp_PRO_to_ARG_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "PRO_to_ASN",
+      "group": "dipeptide",
+      "label": "PRO → ASN",
+      "input_csv": "data/PRO/felp_PRO_to_ASN_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "PRO_to_ASP",
+      "group": "dipeptide",
+      "label": "PRO → ASP",
+      "input_csv": "data/PRO/felp_PRO_to_ASP_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "PRO_to_CYS",
+      "group": "dipeptide",
+      "label": "PRO → CYS",
+      "input_csv": "data/PRO/felp_PRO_to_CYS_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "PRO_to_GLN",
+      "group": "dipeptide",
+      "label": "PRO → GLN",
+      "input_csv": "data/PRO/felp_PRO_to_GLN_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "PRO_to_GLU",
+      "group": "dipeptide",
+      "label": "PRO → GLU",
+      "input_csv": "data/PRO/felp_PRO_to_GLU_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "PRO_to_GLY",
+      "group": "dipeptide",
+      "label": "PRO → GLY",
+      "input_csv": "data/PRO/felp_PRO_to_GLY_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "PRO_to_HIS",
+      "group": "dipeptide",
+      "label": "PRO → HIS",
+      "input_csv": "data/PRO/felp_PRO_to_HIS_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "PRO_to_ILE",
+      "group": "dipeptide",
+      "label": "PRO → ILE",
+      "input_csv": "data/PRO/felp_PRO_to_ILE_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "PRO_to_LEU",
+      "group": "dipeptide",
+      "label": "PRO → LEU",
+      "input_csv": "data/PRO/felp_PRO_to_LEU_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "PRO_to_LYS",
+      "group": "dipeptide",
+      "label": "PRO → LYS",
+      "input_csv": "data/PRO/felp_PRO_to_LYS_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "PRO_to_MET",
+      "group": "dipeptide",
+      "label": "PRO → MET",
+      "input_csv": "data/PRO/felp_PRO_to_MET_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "PRO_to_PHE",
+      "group": "dipeptide",
+      "label": "PRO → PHE",
+      "input_csv": "data/PRO/felp_PRO_to_PHE_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "PRO_to_PRO",
+      "group": "dipeptide",
+      "label": "PRO → PRO",
+      "input_csv": "data/PRO/felp_PRO_to_PRO_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "PRO_to_SER",
+      "group": "dipeptide",
+      "label": "PRO → SER",
+      "input_csv": "data/PRO/felp_PRO_to_SER_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "PRO_to_THR",
+      "group": "dipeptide",
+      "label": "PRO → THR",
+      "input_csv": "data/PRO/felp_PRO_to_THR_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "PRO_to_TRP",
+      "group": "dipeptide",
+      "label": "PRO → TRP",
+      "input_csv": "data/PRO/felp_PRO_to_TRP_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "PRO_to_TYR",
+      "group": "dipeptide",
+      "label": "PRO → TYR",
+      "input_csv": "data/PRO/felp_PRO_to_TYR_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "PRO_to_VAL",
+      "group": "dipeptide",
+      "label": "PRO → VAL",
+      "input_csv": "data/PRO/felp_PRO_to_VAL_full.from_msm_bundle/frame_results.csv",
+      "states": {
+        "source": "grid",
+        "phi_bins": 45,
+        "psi_bins": 45
+      },
+      "periodic_cvs": [
+        "phi",
+        "psi"
+      ],
+      "axis_labels": [
+        "φ (deg)",
+        "ψ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "prior_mode": "raw_counts",
+      "expected_frames": 250000
+    },
+    {
+      "id": "chignolin_WT_to_CLN025",
+      "group": "chignolin",
+      "label": "Chignolin WT → CLN025",
+      "input_csv": "chignolin_wterm_wild-type/to_1Y_10Y.redo-1/frame_results.csv",
+      "states": {
+        "source": "file",
+        "file": "chignolin_wterm_wild-type/to_1Y_10Y.redo-1/auto_microstates.json"
+      },
+      "periodic_cvs": [],
+      "axis_labels": [
+        "Cα1–Cα10 distance (Å)",
+        "Cα3–Cα6 distance (Å)"
+      ],
+      "temperature_kelvin": 310,
+      "basins": [],
+      "notes": "Paths inferred from archived plotting defaults: verify before running. Add a verified shared folded-basin definition to basins.",
+      "prior_mode": "raw_counts"
+    },
+    {
+      "id": "chignolin_CLN025_to_WT",
+      "group": "chignolin",
+      "label": "Chignolin CLN025 → WT",
+      "input_csv": "chignolin_wterm_CLN025/to_1G_10G.redo-1/frame_results.csv",
+      "states": {
+        "source": "file",
+        "file": "chignolin_wterm_CLN025/to_1G_10G.redo-1/auto_microstates.json"
+      },
+      "periodic_cvs": [],
+      "axis_labels": [
+        "Cα1–Cα10 distance (Å)",
+        "Cα3–Cα6 distance (Å)"
+      ],
+      "temperature_kelvin": 310,
+      "basins": [],
+      "notes": "Paths inferred from archived plotting defaults: verify before running. Add a verified shared folded-basin definition to basins.",
+      "prior_mode": "raw_counts"
+    },
+    {
+      "id": "t4l_L99A_to_WT",
+      "group": "t4l",
+      "label": "T4L L99A → WT",
+      "input_csv": "t4/felp_A99L/frame_results.csv",
+      "states": {
+        "source": "file",
+        "file": "t4/felp_A99L/auto_microstates.json"
+      },
+      "periodic_cvs": [
+        "psi_114"
+      ],
+      "axis_labels": [
+        "ψ114 (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "basins": [],
+      "notes": "Original 237859-frame L99A reference scores, shared saved 64-bin psi_114 atlas; periodic neighbor sharing.",
+      "prior_mode": "raw_counts",
+      "expected_frames": 237859
+    },
+    {
+      "id": "t4l_L99A_to_L99A_G113A",
+      "group": "t4l",
+      "label": "T4L L99A → L99A/G113A",
+      "input_csv": "t4/felp_G113A/frame_results.csv",
+      "states": {
+        "source": "file",
+        "file": "t4/felp_A99L/auto_microstates.json"
+      },
+      "periodic_cvs": [
+        "psi_114"
+      ],
+      "axis_labels": [
+        "ψ114 (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "basins": [],
+      "notes": "Original 237859-frame L99A reference scores, shared saved 64-bin psi_114 atlas; periodic neighbor sharing.",
+      "prior_mode": "raw_counts",
+      "expected_frames": 237859
+    },
+    {
+      "id": "t4l_L99A_to_L99A_G113A_R119P",
+      "group": "t4l",
+      "label": "T4L L99A → L99A/G113A/R119P",
+      "input_csv": "t4/felp_G113A_R119P/frame_results.csv",
+      "states": {
+        "source": "file",
+        "file": "t4/felp_A99L/auto_microstates.json"
+      },
+      "periodic_cvs": [
+        "psi_114"
+      ],
+      "axis_labels": [
+        "ψ114 (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "basins": [],
+      "notes": "Original 237859-frame L99A reference scores, shared saved 64-bin psi_114 atlas; periodic neighbor sharing.",
+      "prior_mode": "raw_counts",
+      "expected_frames": 237859
+    },
+    {
+      "id": "egfr_WT_to_L858R",
+      "group": "egfr",
+      "label": "EGFR WT → L858R",
+      "input_csv": "egfr/felp_outputs/L858R_full_aloop_cut16/merged/frame_results.csv",
+      "states": {
+        "source": "file",
+        "file": "egfr/felp_outputs/L858R_full_aloop_cut16/manuscript_package/microstates_aloop_128.json"
+      },
+      "periodic_cvs": [
+        "aloop"
+      ],
+      "axis_labels": [
+        "A-loop θ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "basins": [
+        {
+          "name": "inactive",
+          "ranges": {
+            "plot_x": [
+              -90,
+              0
+            ]
+          }
+        },
+        {
+          "name": "active",
+          "ranges": {
+            "plot_x": [
+              40,
+              135
+            ]
+          }
+        }
+      ],
+      "notes": "Current 80,000-frame source from EGFR provenance. The historical 475-score cut is NOT silently reapplied; use explicit QC settings and preserve the raw reference.",
+      "prior_mode": "raw_counts",
+      "expected_frames": 80000,
+      "fel_max_kcal_mol": 10
+    },
+    {
+      "id": "egfr_WT_to_G719S",
+      "group": "egfr",
+      "label": "EGFR WT → G719S",
+      "input_csv": "egfr/felp_outputs/G719S_target_only/merged/frame_results.csv",
+      "states": {
+        "source": "file",
+        "file": "egfr/felp_outputs/L858R_full_aloop_cut16/manuscript_package/microstates_aloop_128.json"
+      },
+      "periodic_cvs": [
+        "aloop"
+      ],
+      "axis_labels": [
+        "A-loop θ (deg)"
+      ],
+      "temperature_kelvin": 310,
+      "basins": [
+        {
+          "name": "inactive",
+          "ranges": {
+            "plot_x": [
+              -90,
+              0
+            ]
+          }
+        },
+        {
+          "name": "active",
+          "ranges": {
+            "plot_x": [
+              40,
+              135
+            ]
+          }
+        }
+      ],
+      "notes": "Original 80,000-frame G719S target-only campaign used in EGFR_aloop_compare. Use the same periodic 128-bin A-loop atlas and original reference counts as L858R; select the global ArviZ GPD k<0.5 cut independently.",
+      "prior_mode": "raw_counts",
+      "expected_frames": 80000,
+      "fel_max_kcal_mol": 10
+    }
+  ]
+}

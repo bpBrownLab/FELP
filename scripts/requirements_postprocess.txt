@@ -1,0 +1,8 @@
+# PSIS implementation used by the jctc2026 protocol.
+arviz==0.22.0
+# Vendored ParmEd still imports numpy.compat, removed in NumPy 2.
+numpy>=1.26.4,<2
+scipy>=1.12,<1.17
+xarray==2025.6.1
+pandas>=2.2,<3
+matplotlib>=3.8,<3.11

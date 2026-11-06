@@ -1,0 +1,10 @@
+{
+  "use_degrees": true,
+  "use_cossin": false,
+  "periodic": false,
+  "operations": [
+    {
+      "kind": "backbone_torsions"
+    }
+  ]
+}

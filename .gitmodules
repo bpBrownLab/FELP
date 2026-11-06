@@ -1,0 +1,3 @@
+[submodule "ParmEd"]
+	path = ParmEd
+	url = https://github.com/bpBrownLab/ParmEd.git

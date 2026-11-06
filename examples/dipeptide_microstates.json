@@ -1,0 +1,40 @@
+{
+  "states": [
+    {
+      "state_id": "beta_left",
+      "label": "beta_left",
+      "phi_range": [
+        -180.0,
+        -60.0
+      ],
+      "psi_range": [
+        60.0,
+        180.0
+      ]
+    },
+    {
+      "state_id": "alpha_right",
+      "label": "alpha_right",
+      "phi_range": [
+        -120.0,
+        0.0
+      ],
+      "psi_range": [
+        -90.0,
+        60.0
+      ]
+    },
+    {
+      "state_id": "left_handed",
+      "label": "left_handed",
+      "phi_range": [
+        0.0,
+        180.0
+      ],
+      "psi_range": [
+        -90.0,
+        90.0
+      ]
+    }
+  ]
+}
